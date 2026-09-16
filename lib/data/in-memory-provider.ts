@@ -3648,16 +3648,22 @@ export class InMemoryDataProvider implements DataProvider {
     const items: ItemMeta[] = [];
     for (const a of this.seed.liveCycle.assessments) {
       const excluded = this.excludedSet(cycleId, a.id);
+      // Never-scored (Max Score = 0) items — instructions/stimuli — never entered
+      // scoring either (getRawData/getNaiveScores apply the same maxScore>=1 gate),
+      // so they're dropped here too, before the exclusion filter below.
+      const scoredItemIds = new Set(
+        a.items.filter((it) => !excluded.has(it.id) && (it.maxScore ?? 1) >= 1).map((it) => it.id),
+      );
       // responsesOf already drops participants removed at the Clean stage, so the
       // cohort α is computed over reflects the cleaned set — the same way scoring
       // does. (excludedSet also folds in Clean-stage column removals.) This is what
       // makes a Clean change propagate into the reliability output.
       for (const r of this.responsesOf(a)) {
-        if (excluded.has(r.itemId)) continue;
+        if (!scoredItemIds.has(r.itemId)) continue;
         responses.push(r);
       }
       for (const it of a.items) {
-        if (excluded.has(it.id)) continue;
+        if (!scoredItemIds.has(it.id)) continue;
         items.push({
           itemId: it.id,
           assessmentId: a.id,

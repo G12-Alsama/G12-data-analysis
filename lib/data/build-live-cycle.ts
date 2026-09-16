@@ -254,9 +254,12 @@ export function buildLiveCycleData(
       .map(([p, status]) => ({ p, status }));
 
     // Speededness & timing diagnostics over the RAW sitting (export order proxy).
+    // Max Score = 0 items (instructions/stimuli) were never scored — exclude their
+    // responses here too, so they don't inflate omission/completion/correlation inputs.
+    const diagSourceRecs = recs.filter((r) => (r.maxScore ?? 1) >= 1);
     const itemOrder = new Map<string, number>();
-    for (const r of recs) if (!itemOrder.has(r.qmQuestionId)) itemOrder.set(r.qmQuestionId, itemOrder.size);
-    const diagRecs: DiagResponse[] = recs.map((r) => ({
+    for (const r of diagSourceRecs) if (!itemOrder.has(r.qmQuestionId)) itemOrder.set(r.qmQuestionId, itemOrder.size);
+    const diagRecs: DiagResponse[] = diagSourceRecs.map((r) => ({
       participantId: r.participantPseudonym,
       itemId: r.qmQuestionId,
       demandLevel: r.demandLevel,
