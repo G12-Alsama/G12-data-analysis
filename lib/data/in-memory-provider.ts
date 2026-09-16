@@ -1438,6 +1438,12 @@ export class InMemoryDataProvider implements DataProvider {
 
     const scoreByKey = new Map<string, number>();
     for (const r of a.responses) scoreByKey.set(`${r.p} ${r.i}`, r.s);
+    const answerGivenByKey = new Map<string, string>();
+    const responseTimeByKey = new Map<string, number>();
+    for (const r of a.responses) {
+      if (r.answerGiven != null) answerGivenByKey.set(`${r.p} ${r.i}`, r.answerGiven);
+      if (r.responseTime != null) responseTimeByKey.set(`${r.p} ${r.i}`, r.responseTime);
+    }
     const incident = new Map<string, string>();
     for (const ti of a.technicalIncidents ?? []) incident.set(ti.p, ti.status);
     const scored = items.filter((it) => (it.maxScore ?? 1) >= 1);
@@ -1467,7 +1473,12 @@ export class InMemoryDataProvider implements DataProvider {
           QuestionMinimumScore: "0",
           QuestionMaximumScore: String(it.maxScore ?? 1),
           QuestionStatus: "Normal",
+          AnswerGiven: answerGivenByKey.get(`${p.id} ${it.id}`) ?? "",
           AnswerScore: String(score),
+          AnswerResponseTimeSeconds:
+            responseTimeByKey.get(`${p.id} ${it.id}`) !== undefined
+              ? String(responseTimeByKey.get(`${p.id} ${it.id}`))
+              : "",
           AssessmentId: a.id,
           AssessmentName: a.name,
           // Participant identity, carried as its OWN column (the email = the
