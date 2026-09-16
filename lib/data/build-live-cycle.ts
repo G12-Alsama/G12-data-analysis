@@ -213,7 +213,13 @@ export function buildLiveCycleData(
     // Responses straight from the cleaned rows so the answered flag rides along
     // (answered unless explicitly blank) — feeds the display-only D3% metric.
     const seedResponses: SeedResponse[] = recs.map((r) => {
-      const resp: SeedResponse = { p: r.participantPseudonym, i: r.qmQuestionId, s: r.answerScore };
+      const resp: SeedResponse = {
+        p: r.participantPseudonym,
+        i: r.qmQuestionId,
+        s: r.answerScore,
+        answerGiven: r.answerGiven,
+        responseTime: r.responseTime,
+      };
       if (!r.answerGiven) resp.a = false;
       return resp;
     });

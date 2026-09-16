@@ -526,7 +526,13 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
     });
 
     const seedResponses: SeedResponse[] = aResp.map((r) => {
-      const resp: SeedResponse = { p: r.participant_id, i: r.item_id, s: Number(r.answer_score) };
+      const resp: SeedResponse = {
+        p: r.participant_id,
+        i: r.item_id,
+        s: Number(r.answer_score),
+        answerGiven: r.answer_given,
+        responseTime: r.response_time,
+      };
       if (r.answer_given == null) resp.a = false;
       return resp;
     });
