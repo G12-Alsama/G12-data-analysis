@@ -1812,7 +1812,8 @@ export class InMemoryDataProvider implements DataProvider {
     // response from that item's cohort psychometrics. With no per-student
     // exclusions this is byte-identical to the seed (parity-verified).
     const live = this.liveItemStats(cycleId, a);
-    const items: ItemRow[] = a.items.map((it) => {
+    const scoredItems = a.items.filter((it) => (it.maxScore ?? 1) >= 1);
+    const items: ItemRow[] = scoredItems.map((it) => {
       const s = live.get(it.id);
       return {
         id: it.id,
@@ -1866,7 +1867,7 @@ export class InMemoryDataProvider implements DataProvider {
       assessment: ref,
       assessments: refs,
       kpis: {
-        items: a.items.length,
+        items: scoredItems.length,
         excluded: excluded.size,
         medianDifficulty,
         cohortMean,
@@ -1881,6 +1882,9 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getItemDetail(cycleId: string, assessmentId: string, itemId: string): ItemDetailModel | null {
+    // Note: unlike getReview(), this still looks up by itemId across all of a.items,
+    // so a Max Score = 0 item is still reachable here even though it no longer
+    // appears as a row in the Review table. Possible follow-up, not fixed here.
     const a = this.assessment(assessmentId);
     if (cycleId !== this.seed.liveCycle.id || !a) return null;
     const index = a.items.findIndex((it) => it.id === itemId);
