@@ -190,6 +190,10 @@ export interface ResponseRow {
   item_id: string;
   assessment_id: string | null;
   answer_given: string | null;
+  /** 0046 — raw QM `AnswerGivenChoiceNumber`, blank normalised to NULL upstream.
+   *  The correct field for "was this item answered?" (`answer_given` carries the
+   *  sentinel "<Not defined>" for an unanswered item and stays non-null). */
+  answer_given_choice_number: string | null;
   answer_score: number;
   response_time: number | null;
   result_status: string | null;

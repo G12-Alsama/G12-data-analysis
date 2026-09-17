@@ -32,6 +32,7 @@ function resp(over: Partial<CleanResponse>): CleanResponse {
     questionType: "Multiple Choice",
     maxScore: 1,
     answerGiven: "A",
+    answerGivenChoiceNumber: "1",
     answerScore: 1,
     responseTime: 10,
     resultStatus: "Finished",

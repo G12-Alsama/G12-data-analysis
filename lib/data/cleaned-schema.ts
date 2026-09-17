@@ -75,7 +75,6 @@ export const CLEANED_DATA_UNAVAILABLE: ReadonlySet<CleanedDataColumn> = new Set<
   "QuestionPossibleAnswers",
   "QuestionPossibleAnswersCount",
   "AnswerGiven",
-  "AnswerGivenChoiceNumber",
   "AnswerComment",
   "AnswerResponseTimeSeconds",
   "MetaTags",

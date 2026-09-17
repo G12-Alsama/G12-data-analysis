@@ -73,6 +73,13 @@ export interface SeedResponse {
    * display-only "% of D3 questions answered" per-student metric.
    */
   a?: boolean;
+  /**
+   * The raw `AnswerGivenChoiceNumber` (blank normalised to null upstream). The
+   * authoritative "was this presented item actually answered?" signal — unlike the
+   * raw `AnswerGiven` text (which carries QM's "<Not defined>" sentinel for an
+   * unanswered item), this is genuinely blank/null with no sentinel ambiguity.
+   */
+  answerGivenChoiceNumber?: string | null;
 }
 
 /** A participant whose sitting of this assessment finished with a technical-fault status. */

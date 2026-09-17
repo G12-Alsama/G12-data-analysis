@@ -213,6 +213,10 @@ export function timingPerformance(records: readonly DiagResponse[]): TimingResul
   // Aggregate to student level: score % (correct ÷ presented) and median item time.
   const byStudent = new Map<string, { correct: number; presented: number; times: number[] }>();
   for (const r of records) {
+    // Only attempted items belong in the time-on-task ↔ score correlation — an
+    // omitted item's near-zero/partial dwell time is not a genuine response time
+    // and would corrupt the per-student median.
+    if (!r.answered) continue;
     let s = byStudent.get(r.participantId);
     if (!s) { s = { correct: 0, presented: 0, times: [] }; byStudent.set(r.participantId, s); }
     s.presented += 1;

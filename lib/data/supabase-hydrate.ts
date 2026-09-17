@@ -527,7 +527,10 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
 
     const seedResponses: SeedResponse[] = aResp.map((r) => {
       const resp: SeedResponse = { p: r.participant_id, i: r.item_id, s: Number(r.answer_score) };
-      if (r.answer_given == null) resp.a = false;
+      resp.answerGivenChoiceNumber = r.answer_given_choice_number;
+      // Answered iff answer_given_choice_number is present — answer_given carries
+      // QM's "<Not defined>" sentinel for an unanswered item, so it is never used here.
+      if (r.answer_given_choice_number == null) resp.a = false;
       return resp;
     });
 
@@ -573,7 +576,10 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
       demandLevel: demandByItem.get(r.item_id) ?? null,
       itemSet: itemSetByItem.get(r.item_id) ?? null,
       order: order.get(r.item_id) ?? 0,
-      answered: r.answer_given != null,
+      // answer_given carries QM's "<Not defined>" sentinel for an unanswered item
+      // (never null), so omission/speededness/timing key off
+      // answer_given_choice_number, which is genuinely null instead.
+      answered: r.answer_given_choice_number != null,
       correct: Number(r.answer_score) === 1,
       responseTime: r.response_time,
     }));

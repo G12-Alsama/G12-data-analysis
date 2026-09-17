@@ -214,7 +214,10 @@ export function buildLiveCycleData(
     // (answered unless explicitly blank) — feeds the display-only D3% metric.
     const seedResponses: SeedResponse[] = recs.map((r) => {
       const resp: SeedResponse = { p: r.participantPseudonym, i: r.qmQuestionId, s: r.answerScore };
-      if (!r.answerGiven) resp.a = false;
+      resp.answerGivenChoiceNumber = r.answerGivenChoiceNumber;
+      // Answered iff AnswerGivenChoiceNumber is present — AnswerGiven carries QM's
+      // "<Not defined>" sentinel for an unanswered item, so it is never used here.
+      if (!r.answerGivenChoiceNumber) resp.a = false;
       return resp;
     });
 
@@ -256,7 +259,10 @@ export function buildLiveCycleData(
       demandLevel: r.demandLevel,
       itemSet: r.itemSet,
       order: itemOrder.get(r.qmQuestionId)!,
-      answered: !!r.answerGiven,
+      // AnswerGiven carries QM's "<Not defined>" sentinel for an unanswered item
+      // (truthy), so omission/speededness/timing key off AnswerGivenChoiceNumber,
+      // which is genuinely blank instead.
+      answered: !!r.answerGivenChoiceNumber,
       correct: r.answerScore === 1,
       responseTime: r.responseTime,
     }));

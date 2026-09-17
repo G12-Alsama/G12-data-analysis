@@ -35,6 +35,13 @@ export interface CleanResponse {
   questionType: string;
   maxScore: number;
   answerGiven: string | null;
+  /**
+   * The export's `AnswerGivenChoiceNumber` — QM's own answer-index field, blank
+   * (normalised to null) when the item was left unanswered. Unlike `answerGiven`
+   * (which carries the sentinel text "<Not defined>" for an unanswered item, a
+   * truthy string), this is the field to key "was this item answered?" off of.
+   */
+  answerGivenChoiceNumber: string | null;
   answerScore: number;
   responseTime: number | null;
   resultStatus: string | null;

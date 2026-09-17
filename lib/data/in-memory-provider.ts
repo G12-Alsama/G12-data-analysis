@@ -1438,6 +1438,8 @@ export class InMemoryDataProvider implements DataProvider {
 
     const scoreByKey = new Map<string, number>();
     for (const r of a.responses) scoreByKey.set(`${r.p} ${r.i}`, r.s);
+    const choiceNumberByKey = new Map<string, string | null>();
+    for (const r of a.responses) choiceNumberByKey.set(`${r.p} ${r.i}`, r.answerGivenChoiceNumber ?? null);
     const incident = new Map<string, string>();
     for (const ti of a.technicalIncidents ?? []) incident.set(ti.p, ti.status);
     const scored = items.filter((it) => (it.maxScore ?? 1) >= 1);
@@ -1468,6 +1470,7 @@ export class InMemoryDataProvider implements DataProvider {
           QuestionMaximumScore: String(it.maxScore ?? 1),
           QuestionStatus: "Normal",
           AnswerScore: String(score),
+          AnswerGivenChoiceNumber: choiceNumberByKey.get(`${p.id} ${it.id}`) ?? "",
           AssessmentId: a.id,
           AssessmentName: a.name,
           // Participant identity, carried as its OWN column (the email = the

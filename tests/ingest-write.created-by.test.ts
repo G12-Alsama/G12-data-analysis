@@ -36,6 +36,7 @@ function sampleRecs(): CleanResponse[] {
     questionType: "MCQ",
     maxScore: 1,
     answerGiven: "A",
+    answerGivenChoiceNumber: "1",
     answerScore: 1,
     responseTime: null,
     resultStatus: null,
