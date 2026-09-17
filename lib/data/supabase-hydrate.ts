@@ -533,6 +533,7 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
         s: Number(r.answer_score),
         answerGiven: r.answer_given,
         answerGivenChoiceNumber: r.answer_given_choice_number,
+        questionPresentedNumber: r.question_presented_number,
         responseTime: r.response_time,
       };
       // Answered iff answer_given_choice_number is present — answer_given carries
@@ -577,24 +578,44 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
     // (mirrors buildLiveCycleData's diagSourceRecs filter).
     const scoredItemIds = new Set(aItems.filter((it) => (it.max_score ?? 1) >= 1).map((it) => it.id));
     const diagSourceResp = aResp.filter((r) => scoredItemIds.has(r.item_id));
+    // Presentation order uses QM's real per-sitting question_presented_number —
+    // confirmed against the 700435 fixture to VARY per participant even for the
+    // same question, so it is read per response, never shared globally by item.
+    // Only falls back to the old created_at-based first-appearance-order proxy
+    // when question_presented_number is null/missing for a given row (defensive;
+    // should not fire on real data — logged below so a fallback firing is visible).
     const ordered = [...diagSourceResp].sort((x, y) => (x.created_at < y.created_at ? -1 : 1));
-    const order = new Map<string, number>();
-    for (const r of ordered) if (!order.has(r.item_id)) order.set(r.item_id, order.size);
+    const orderFallback = new Map<string, number>();
+    for (const r of ordered) if (!orderFallback.has(r.item_id)) orderFallback.set(r.item_id, orderFallback.size);
     const demandByItem = new Map(aItems.map((it) => [it.id, it.demand_level]));
     const itemSetByItem = new Map(aItems.map((it) => [it.id, it.item_set]));
-    const diagRecs: DiagResponse[] = diagSourceResp.map((r) => ({
-      participantId: r.participant_id,
-      itemId: r.item_id,
-      demandLevel: demandByItem.get(r.item_id) ?? null,
-      itemSet: itemSetByItem.get(r.item_id) ?? null,
-      order: order.get(r.item_id) ?? 0,
-      // answer_given carries QM's "<Not defined>" sentinel for an unanswered item
-      // (never null), so omission/speededness/timing key off
-      // answer_given_choice_number, which is genuinely null instead.
-      answered: r.answer_given_choice_number != null,
-      correct: Number(r.answer_score) === 1,
-      responseTime: r.response_time,
-    }));
+    let fallbackOrderCount = 0;
+    const diagRecs: DiagResponse[] = diagSourceResp.map((r) => {
+      let order = r.question_presented_number;
+      if (order == null) {
+        order = orderFallback.get(r.item_id) ?? 0;
+        fallbackOrderCount += 1;
+      }
+      return {
+        participantId: r.participant_id,
+        itemId: r.item_id,
+        demandLevel: demandByItem.get(r.item_id) ?? null,
+        itemSet: itemSetByItem.get(r.item_id) ?? null,
+        order,
+        // answer_given carries QM's "<Not defined>" sentinel for an unanswered item
+        // (never null), so omission/speededness/timing key off
+        // answer_given_choice_number, which is genuinely null instead.
+        answered: r.answer_given_choice_number != null,
+        correct: Number(r.answer_score) === 1,
+        responseTime: r.response_time,
+      };
+    });
+    if (fallbackOrderCount > 0) {
+      console.warn(
+        `hydrate: ${a.name} — ${fallbackOrderCount} response(s) had no question_presented_number; ` +
+          `fell back to first-appearance-order proxy for presentation order.`,
+      );
+    }
     // Match P-B's matrix: drop staff/test accounts and dedupe (participant, item)
     // keeping the last row before computing (see cleanDiagResponses).
     const cleanDiag = cleanDiagResponses(diagRecs, { excludedParticipantIds: cohortExcludedIds });

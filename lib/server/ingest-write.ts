@@ -272,6 +272,7 @@ export async function ingestCleanResponses(
       assessment_id: assessmentId.get(r.assessmentName),
       answer_given: r.answerGiven,
       answer_given_choice_number: r.answerGivenChoiceNumber,
+      question_presented_number: r.questionPresentedNumber,
       answer_score: r.answerScore,
       response_time: r.responseTime,
       result_status: r.resultStatus,

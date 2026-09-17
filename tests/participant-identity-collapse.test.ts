@@ -125,8 +125,8 @@ describe("participant identity collapse — realistic-identity fixture", () => {
   it("assertParticipantIdentityIntact throws when distinct sitters fold into fewer participants", () => {
     const collapsed: CleanResponse[] = [
       // two DISTINCT results (sitters) folded onto one pseudonym in one subject.
-      { assessmentName: "Math", qmQuestionId: "q1", qmResultId: "R1", qmParticipantId: "a@x.edu", participantPseudonym: "P0001", wording: null, description: null, parentWording: null, majorElement: null, subElement: null, demandLevel: null, itemSet: null, questionType: "Multiple Choice", maxScore: 1, answerGiven: "a", answerGivenChoiceNumber: "1", answerScore: 1, responseTime: null, resultStatus: "Finished OK" },
-      { assessmentName: "Math", qmQuestionId: "q1", qmResultId: "R2", qmParticipantId: "a@x.edu", participantPseudonym: "P0001", wording: null, description: null, parentWording: null, majorElement: null, subElement: null, demandLevel: null, itemSet: null, questionType: "Multiple Choice", maxScore: 1, answerGiven: "b", answerGivenChoiceNumber: "2", answerScore: 0, responseTime: null, resultStatus: "Finished OK" },
+      { assessmentName: "Math", qmQuestionId: "q1", qmResultId: "R1", qmParticipantId: "a@x.edu", participantPseudonym: "P0001", wording: null, description: null, parentWording: null, majorElement: null, subElement: null, demandLevel: null, itemSet: null, questionType: "Multiple Choice", maxScore: 1, answerGiven: "a", answerGivenChoiceNumber: "1", questionPresentedNumber: null, answerScore: 1, responseTime: null, resultStatus: "Finished OK" },
+      { assessmentName: "Math", qmQuestionId: "q1", qmResultId: "R2", qmParticipantId: "a@x.edu", participantPseudonym: "P0001", wording: null, description: null, parentWording: null, majorElement: null, subElement: null, demandLevel: null, itemSet: null, questionType: "Multiple Choice", maxScore: 1, answerGiven: "b", answerGivenChoiceNumber: "2", questionPresentedNumber: null, answerScore: 0, responseTime: null, resultStatus: "Finished OK" },
     ];
     expect(() => assertParticipantIdentityIntact(collapsed)).toThrow(/identity collapse/i);
   });

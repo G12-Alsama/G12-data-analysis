@@ -695,32 +695,50 @@ export class InMemoryDataProvider implements DataProvider {
    * `hydrate`). Only items with `maxScore >= 1` are included — the same filter
    * those two build paths apply (unscored stimulus/instruction items must not
    * inflate omission/completion/correlation inputs; see
-   * tests/diagnostics-maxscore-zero.test.ts). Item order is the item's position
-   * in the already-ordered `a.items` array, matching ingest-time first-
-   * appearance order. "answered" reads the same `r.a !== false` signal the rest
-   * of the provider uses (itself keyed off AnswerGivenChoiceNumber upstream).
+   * tests/diagnostics-maxscore-zero.test.ts). Presentation order uses QM's real
+   * per-sitting `questionPresentedNumber` carried on each response — confirmed
+   * against the 700435 fixture to VARY per participant even for the same item, so
+   * it is read per response, never shared globally by item. Falls back to the
+   * item's position in the already-ordered `a.items` array (ingest-time first-
+   * appearance order) ONLY when `questionPresentedNumber` is null/missing for a
+   * given response (defensive; should not fire on real data — logged below so a
+   * fallback firing stays visible). "answered" reads the same `r.a !== false`
+   * signal the rest of the provider uses (itself keyed off AnswerGivenChoiceNumber
+   * upstream).
    */
   private diagResponsesFor(a: SeedAssessment): DiagResponse[] {
-    const itemMeta = new Map<string, { demand: string | null; itemSet: string | null; order: number }>();
-    let order = 0;
+    const itemMeta = new Map<string, { demand: string | null; itemSet: string | null; fallbackOrder: number }>();
+    let fallbackOrder = 0;
     for (const it of a.items) {
       if ((it.maxScore ?? 1) < 1) continue;
-      itemMeta.set(it.id, { demand: it.demand, itemSet: it.itemSet ?? null, order: order++ });
+      itemMeta.set(it.id, { demand: it.demand, itemSet: it.itemSet ?? null, fallbackOrder: fallbackOrder++ });
     }
     const out: DiagResponse[] = [];
+    let fallbackOrderCount = 0;
     for (const r of a.responses) {
       const meta = itemMeta.get(r.i);
       if (!meta) continue;
+      let order = r.questionPresentedNumber ?? null;
+      if (order == null) {
+        order = meta.fallbackOrder;
+        fallbackOrderCount += 1;
+      }
       out.push({
         participantId: r.p,
         itemId: r.i,
         demandLevel: meta.demand,
         itemSet: meta.itemSet,
-        order: meta.order,
+        order,
         answered: r.a !== false,
         correct: r.s === 1,
         responseTime: r.responseTime ?? null,
       });
+    }
+    if (fallbackOrderCount > 0) {
+      console.warn(
+        `diagResponsesFor: ${a.name} — ${fallbackOrderCount} response(s) had no questionPresentedNumber; ` +
+          `fell back to item-array-position proxy for presentation order.`,
+      );
     }
     return out;
   }
@@ -1477,6 +1495,8 @@ export class InMemoryDataProvider implements DataProvider {
     for (const r of a.responses) scoreByKey.set(`${r.p} ${r.i}`, r.s);
     const choiceNumberByKey = new Map<string, string | null>();
     for (const r of a.responses) choiceNumberByKey.set(`${r.p} ${r.i}`, r.answerGivenChoiceNumber ?? null);
+    const presentedNumberByKey = new Map<string, number | null>();
+    for (const r of a.responses) presentedNumberByKey.set(`${r.p} ${r.i}`, r.questionPresentedNumber ?? null);
     const answerGivenByKey = new Map<string, string>();
     const responseTimeByKey = new Map<string, number>();
     for (const r of a.responses) {
@@ -1508,6 +1528,7 @@ export class InMemoryDataProvider implements DataProvider {
           QuestionDescription: it.wording ?? "",
           QuestionType: "Multiple Choice",
           QuestionSubElement: it.sub ?? "",
+          QuestionPresentedNumber: presentedNumberByKey.get(`${p.id} ${it.id}`) != null ? String(presentedNumberByKey.get(`${p.id} ${it.id}`)) : "",
           QuestionWording: it.wording ?? "",
           QuestionMinimumScore: "0",
           QuestionMaximumScore: String(it.maxScore ?? 1),

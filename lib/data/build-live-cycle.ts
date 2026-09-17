@@ -228,6 +228,7 @@ export function buildLiveCycleData(
         s: r.answerScore,
         answerGiven: r.answerGiven,
         answerGivenChoiceNumber: r.answerGivenChoiceNumber,
+        questionPresentedNumber: r.questionPresentedNumber,
         responseTime: r.responseTime,
       };
       // Answered iff AnswerGivenChoiceNumber is present — AnswerGiven carries QM's
@@ -265,25 +266,43 @@ export function buildLiveCycleData(
       .filter(([, status]) => isTechnicalIncidentStatus(status))
       .map(([p, status]) => ({ p, status }));
 
-    // Speededness & timing diagnostics over the RAW sitting (export order proxy).
-    // Max Score = 0 items (instructions/stimuli) were never scored — exclude their
-    // responses here too, so they don't inflate omission/completion/correlation inputs.
+    // Speededness & timing diagnostics over the RAW sitting. Presentation order
+    // uses QM's real per-sitting QuestionPresentedNumber — confirmed against the
+    // 700435 fixture to VARY per participant even for the same question, so it is
+    // read per response, never shared globally by item. Only falls back to the
+    // old first-appearance-order proxy when QuestionPresentedNumber is null/
+    // missing for a given row (defensive; should not fire on real data — logged
+    // below so a fallback firing stays visible).
     const diagSourceRecs = recs.filter((r) => (r.maxScore ?? 1) >= 1);
-    const itemOrder = new Map<string, number>();
-    for (const r of diagSourceRecs) if (!itemOrder.has(r.qmQuestionId)) itemOrder.set(r.qmQuestionId, itemOrder.size);
-    const diagRecs: DiagResponse[] = diagSourceRecs.map((r) => ({
-      participantId: r.participantPseudonym,
-      itemId: r.qmQuestionId,
-      demandLevel: r.demandLevel,
-      itemSet: r.itemSet,
-      order: itemOrder.get(r.qmQuestionId)!,
-      // AnswerGiven carries QM's "<Not defined>" sentinel for an unanswered item
-      // (truthy), so omission/speededness/timing key off AnswerGivenChoiceNumber,
-      // which is genuinely blank instead.
-      answered: !!r.answerGivenChoiceNumber,
-      correct: r.answerScore === 1,
-      responseTime: r.responseTime,
-    }));
+    const itemOrderFallback = new Map<string, number>();
+    for (const r of diagSourceRecs) if (!itemOrderFallback.has(r.qmQuestionId)) itemOrderFallback.set(r.qmQuestionId, itemOrderFallback.size);
+    let fallbackOrderCount = 0;
+    const diagRecs: DiagResponse[] = diagSourceRecs.map((r) => {
+      let order = r.questionPresentedNumber;
+      if (order == null) {
+        order = itemOrderFallback.get(r.qmQuestionId)!;
+        fallbackOrderCount += 1;
+      }
+      return {
+        participantId: r.participantPseudonym,
+        itemId: r.qmQuestionId,
+        demandLevel: r.demandLevel,
+        itemSet: r.itemSet,
+        order,
+        // AnswerGiven carries QM's "<Not defined>" sentinel for an unanswered item
+        // (truthy), so omission/speededness/timing key off AnswerGivenChoiceNumber,
+        // which is genuinely blank instead.
+        answered: !!r.answerGivenChoiceNumber,
+        correct: r.answerScore === 1,
+        responseTime: r.responseTime,
+      };
+    });
+    if (fallbackOrderCount > 0) {
+      console.warn(
+        `buildLiveCycleData: ${name} — ${fallbackOrderCount} response(s) had no QuestionPresentedNumber; ` +
+          `fell back to first-appearance-order proxy for presentation order.`,
+      );
+    }
     // Match P-B's matrix: drop staff/test accounts and dedupe (student, item)
     // keeping the last row, keyed on P-A's stable pseudonym, before computing.
     const cleanDiag = cleanDiagResponses(diagRecs, { excludedParticipantIds: cohortExcludedPseudonyms });

@@ -194,6 +194,11 @@ export interface ResponseRow {
    *  The correct field for "was this item answered?" (`answer_given` carries the
    *  sentinel "<Not defined>" for an unanswered item and stays non-null). */
   answer_given_choice_number: string | null;
+  /** 0047 — raw QM `QuestionPresentedNumber` for this participant's sitting of
+   *  this question. VARIES per participant even for the same question (confirmed
+   *  against the 700435 fixture) — a per-response value, never a per-question
+   *  constant. The authoritative "presentation order" for Assessment Health. */
+  question_presented_number: number | null;
   answer_score: number;
   response_time: number | null;
   result_status: string | null;

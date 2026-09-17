@@ -87,6 +87,15 @@ export interface SeedResponse {
    * unanswered item), this is genuinely blank/null with no sentinel ambiguity.
    */
   answerGivenChoiceNumber?: string | null;
+  /**
+   * The raw `QuestionPresentedNumber` — QM's real per-sitting item order. VARIES
+   * per participant even for the same item (confirmed against the 700435
+   * fixture), so this must be carried per-response rather than on `SeedItem`.
+   * The authoritative "presentation order" for Assessment Health (Speededness
+   * Index, omission-by-position, timing correlations); undefined/null falls back
+   * to first-appearance order (see `build-live-cycle.ts`/`supabase-hydrate.ts`).
+   */
+  questionPresentedNumber?: number | null;
   /** The QM `AnswerGiven` value (raw answer text/choice), for the cleaned export. */
   answerGiven?: string | null;
   /** The QM response time in seconds, for the cleaned export. */

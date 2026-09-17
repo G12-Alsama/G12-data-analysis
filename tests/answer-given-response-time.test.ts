@@ -140,6 +140,7 @@ describe("AnswerGiven / AnswerResponseTimeSeconds reach the cleaned export", () 
         maxScore: 1,
         answerGiven: "A",
         answerGivenChoiceNumber: "1",
+        questionPresentedNumber: null,
         answerScore: 1,
         responseTime: null,
         resultStatus: null,

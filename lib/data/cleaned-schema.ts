@@ -69,7 +69,6 @@ export type CleanedDataColumn = (typeof CLEANED_DATA_COLUMNS)[number];
 export const CLEANED_DATA_UNAVAILABLE: ReadonlySet<CleanedDataColumn> = new Set<CleanedDataColumn>([
   "QuestionTopicId",
   "QuestionTopicPath",
-  "QuestionPresentedNumber",
   "QuestionCorrectAnswers",
   "QuestionCorrectAnswersChoiceNumber",
   "QuestionPossibleAnswers",

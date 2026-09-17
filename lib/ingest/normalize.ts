@@ -218,6 +218,9 @@ export function normalizeResponses(
       // Blank (not the sentinel "<Not defined>") for an unanswered item — normalise
       // to null the same way resultStatus does, so "answered?" is never ambiguous.
       answerGivenChoiceNumber: (str(row["AnswerGivenChoiceNumber"]) || null) as string | null,
+      // QM's real per-sitting item order — null when blank/non-numeric, same
+      // parsing as every other numeric QM column (see toNumber above).
+      questionPresentedNumber: toNumber(row["QuestionPresentedNumber"], null),
       answerScore: toNumber(row["AnswerScore"], 0) ?? 0,
       responseTime: toNumber(row["AnswerResponseTimeSeconds"], null),
       resultStatus: (str(row["ResultStatus"]) || null) as string | null,
