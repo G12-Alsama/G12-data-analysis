@@ -58,7 +58,20 @@ import {
   type OASittingStudent,
 } from "./overall-analytics";
 import { buildLiveCycleData } from "./build-live-cycle";
-import { buildAssessmentDiagnostics, cleanDiagResponses, type DiagResponse } from "@/lib/diagnostics";
+import {
+  buildAssessmentDiagnostics,
+  cleanDiagResponses,
+  type DiagResponse,
+  // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER)
+  __setTempDebugTimingLabel,
+} from "@/lib/diagnostics";
+// TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER): the target assessment
+// confirmed in the production DB. Matched by id OR name so this also fires
+// against local/demo data during testing.
+const __TEMP_DEBUG_TARGET_ASSESSMENT_ID = "56629397-a027-4159-97f9-2bcf2cd38890";
+function __tempDebugIsTargetAssessment(a: { id: string; name: string }): boolean {
+  return a.id === __TEMP_DEBUG_TARGET_ASSESSMENT_ID || a.name.includes("Applicable Math");
+}
 import { doNextForStage } from "./pipeline-route";
 import type { CleanResponse } from "@/lib/ingest/types";
 import type { ValidationReport } from "@/lib/ingest/types";
@@ -707,11 +720,27 @@ export class InMemoryDataProvider implements DataProvider {
    * upstream).
    */
   private diagResponsesFor(a: SeedAssessment): DiagResponse[] {
+    // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER)
+    const __tempDebug = __tempDebugIsTargetAssessment(a);
+    if (__tempDebug) {
+      console.log(`[TEMP-DEBUG] diagResponsesFor(${a.name}): a.items.length=${a.items.length}`);
+      console.log(`[TEMP-DEBUG] diagResponsesFor(${a.name}): a.responses.length=${a.responses.length}`);
+    }
     const itemMeta = new Map<string, { demand: string | null; itemSet: string | null; fallbackOrder: number }>();
     let fallbackOrder = 0;
+    const __tempDebugExcludedItemIds: string[] = []; // TEMP-DEBUG
     for (const it of a.items) {
-      if ((it.maxScore ?? 1) < 1) continue;
+      if ((it.maxScore ?? 1) < 1) {
+        if (__tempDebug) __tempDebugExcludedItemIds.push(it.id); // TEMP-DEBUG
+        continue;
+      }
       itemMeta.set(it.id, { demand: it.demand, itemSet: it.itemSet ?? null, fallbackOrder: fallbackOrder++ });
+    }
+    if (__tempDebug) {
+      console.log(
+        `[TEMP-DEBUG] diagResponsesFor(${a.name}): excluded ${__tempDebugExcludedItemIds.length} item(s) ` +
+          `by (maxScore ?? 1) < 1: [${__tempDebugExcludedItemIds.join(", ")}]`,
+      );
     }
     const out: DiagResponse[] = [];
     let fallbackOrderCount = 0;
@@ -739,6 +768,10 @@ export class InMemoryDataProvider implements DataProvider {
         `diagResponsesFor: ${a.name} — ${fallbackOrderCount} response(s) had no questionPresentedNumber; ` +
           `fell back to item-array-position proxy for presentation order.`,
       );
+    }
+    // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER)
+    if (__tempDebug) {
+      console.log(`[TEMP-DEBUG] diagResponsesFor(${a.name}): returned DiagResponse[].length=${out.length}`);
     }
     return out;
   }
@@ -3862,7 +3895,13 @@ export class InMemoryDataProvider implements DataProvider {
         const removed = this.cleanRowSet(a.id);
         const excludedParticipantIds = removed && removed.size ? new Set([...removed, ...cohortExcluded]) : cohortExcluded;
         const cleanDiag = cleanDiagResponses(this.diagResponsesFor(a), { excludedParticipantIds });
+        // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER): gate
+        // timingPerformance()'s internal [TEMP-DEBUG] logging to this one
+        // assessment, then reset immediately so nothing else logs.
+        const __tempDebugTarget = __tempDebugIsTargetAssessment(a);
+        if (__tempDebugTarget) __setTempDebugTimingLabel(a.name);
         const d = buildAssessmentDiagnostics(cleanDiag);
+        if (__tempDebugTarget) __setTempDebugTimingLabel(null);
         return {
           assessmentId: a.id,
           assessmentName: a.name,
