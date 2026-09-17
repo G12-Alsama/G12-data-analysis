@@ -34,18 +34,18 @@ const APPLICABLE = "Applicable Math";
  */
 const REPRODUCED = {
   whole: {
-    speeded: { nItems: 41, nPresentations: 697, omissionRate: 0, completion: 1, speedednessIndex: 0.0269, earlyOmission: 0, lateOmission: 0, earlyAccuracy: 0.3373, lateAccuracy: 0.2834 },
-    timing: { nStudents: 17, pearson: -0.2057, spearman: -0.1432 },
+    speeded: { nItems: 40, nPresentations: 680, omissionRate: 0.0353, completion: 0.9647, speedednessIndex: 0.0498, earlyOmission: 0.0353, lateOmission: 0.0353, earlyAccuracy: 0.3679, lateAccuracy: 0.2683 },
+    timing: { nStudents: 17, pearson: 0.0415, spearman: 0.0761 },
   },
   byDemand: {
-    D1: { nItems: 16, nPresentations: 272, omissionRate: 0, speedednessIndex: 0, earlyAccuracy: 0.3676, lateAccuracy: 0.3676 },
-    D2: { nItems: 16, nPresentations: 272, omissionRate: 0, speedednessIndex: 0.0221, earlyAccuracy: 0.3235, lateAccuracy: 0.2794 },
-    D3: { nItems: 9, nPresentations: 153, omissionRate: 0, speedednessIndex: 0.049, earlyAccuracy: 0.2941, lateAccuracy: 0.1961 },
+    D1: { nItems: 15, nPresentations: 255, omissionRate: 0.0549, speedednessIndex: 0.025, earlyAccuracy: 0.4213, lateAccuracy: 0.3968 },
+    D2: { nItems: 16, nPresentations: 272, omissionRate: 0.0184, speedednessIndex: 0.0477, earlyAccuracy: 0.3235, lateAccuracy: 0.3016 },
+    D3: { nItems: 9, nPresentations: 153, omissionRate: 0.0327, speedednessIndex: 0.0566, earlyAccuracy: 0.3093, lateAccuracy: 0.1961 },
   },
   timingByDemand: {
-    D1: { nStudents: 17, pearson: -0.2718, spearman: -0.2288 },
-    D2: { nStudents: 17, pearson: 0.179, spearman: 0.1636 },
-    D3: { nStudents: 17, pearson: 0.5298, spearman: 0.5849 },
+    D1: { nStudents: 17, pearson: -0.2292, spearman: -0.1548 },
+    D2: { nStudents: 17, pearson: 0.3105, spearman: 0.2803 },
+    D3: { nStudents: 17, pearson: 0.5907, spearman: 0.5688 },
   },
 } as const;
 

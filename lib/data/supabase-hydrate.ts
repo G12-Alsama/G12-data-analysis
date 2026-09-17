@@ -508,6 +508,7 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
         major: it.major_element,
         sub: it.sub_element,
         demand: it.demand_level,
+        itemSet: it.item_set ?? null,
         maxScore: it.max_score ?? 1,
         participantsAnswered: answered.length,
         participantsPresented: presented.length,

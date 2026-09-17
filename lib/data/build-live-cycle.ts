@@ -160,6 +160,14 @@ export function buildLiveCycleData(
     }
     const itemMetas = [...itemMetaMap.values()];
 
+    // Item-set (shared-stimulus) tag per item (first occurrence), kept off ItemMeta
+    // (an engine type) since it's display/diagnostics-only — feeds live Assessment
+    // Health recompute via `SeedItem.itemSet`.
+    const itemSetMap = new Map<string, string | null>();
+    for (const r of recs) {
+      if (!itemSetMap.has(r.qmQuestionId)) itemSetMap.set(r.qmQuestionId, r.itemSet ?? null);
+    }
+
     const responses: ResponseRecord[] = recs.map((r) => ({
       participantId: r.participantPseudonym,
       itemId: r.qmQuestionId,
@@ -193,6 +201,7 @@ export function buildLiveCycleData(
         major: m.majorElement ?? null,
         sub: m.subElement ?? null,
         demand: m.demandLevel ?? null,
+        itemSet: itemSetMap.get(m.itemId) ?? null,
         maxScore: m.maxScore ?? 1,
         participantsAnswered: a?.answered ?? s.n,
         participantsPresented: a?.presented ?? s.n,

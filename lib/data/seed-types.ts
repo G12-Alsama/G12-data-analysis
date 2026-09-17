@@ -37,6 +37,13 @@ export interface SeedItem {
   major: string | null;
   sub: string | null;
   demand: string | null;
+  /**
+   * Item-set / shared-stimulus name (a passage/prompt shared by several items), or
+   * null when ungrouped. Carried so Assessment Health diagnostics can be recomputed
+   * live from `SeedAssessment.items`/`responses` (see `getDiagnostics`) instead of
+   * only from the ingest-time snapshot.
+   */
+  itemSet?: string | null;
   maxScore: number;
   /**
    * The question's multiple-choice answer options, from the QM export

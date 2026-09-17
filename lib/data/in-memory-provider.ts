@@ -58,6 +58,7 @@ import {
   type OASittingStudent,
 } from "./overall-analytics";
 import { buildLiveCycleData } from "./build-live-cycle";
+import { buildAssessmentDiagnostics, cleanDiagResponses, type DiagResponse } from "@/lib/diagnostics";
 import { doNextForStage } from "./pipeline-route";
 import type { CleanResponse } from "@/lib/ingest/types";
 import type { ValidationReport } from "@/lib/ingest/types";
@@ -686,6 +687,42 @@ export class InMemoryDataProvider implements DataProvider {
       assessmentId: a.id,
       score: r.s,
     }));
+  }
+  /**
+   * Raw diagnostics records for one assessment's CURRENT `items`/`responses` —
+   * unfiltered by participant (the drop-set is applied by the caller via
+   * `cleanDiagResponses`, matching the ingest-time build in `buildLiveCycleData`/
+   * `hydrate`). Only items with `maxScore >= 1` are included — the same filter
+   * those two build paths apply (unscored stimulus/instruction items must not
+   * inflate omission/completion/correlation inputs; see
+   * tests/diagnostics-maxscore-zero.test.ts). Item order is the item's position
+   * in the already-ordered `a.items` array, matching ingest-time first-
+   * appearance order. "answered" reads the same `r.a !== false` signal the rest
+   * of the provider uses (itself keyed off AnswerGivenChoiceNumber upstream).
+   */
+  private diagResponsesFor(a: SeedAssessment): DiagResponse[] {
+    const itemMeta = new Map<string, { demand: string | null; itemSet: string | null; order: number }>();
+    let order = 0;
+    for (const it of a.items) {
+      if ((it.maxScore ?? 1) < 1) continue;
+      itemMeta.set(it.id, { demand: it.demand, itemSet: it.itemSet ?? null, order: order++ });
+    }
+    const out: DiagResponse[] = [];
+    for (const r of a.responses) {
+      const meta = itemMeta.get(r.i);
+      if (!meta) continue;
+      out.push({
+        participantId: r.p,
+        itemId: r.i,
+        demandLevel: meta.demand,
+        itemSet: meta.itemSet,
+        order: meta.order,
+        answered: r.a !== false,
+        correct: r.s === 1,
+        responseTime: r.responseTime ?? null,
+      });
+    }
+    return out;
   }
   /**
    * participantId -> full subject score for one assessment, composed from the
@@ -3784,21 +3821,35 @@ export class InMemoryDataProvider implements DataProvider {
     };
   }
 
+  /**
+   * Assessment Health diagnostics, recomputed live from each assessment's CURRENT
+   * `items`/`responses` on every read — never the static ingest-time snapshot
+   * (`this.seed.liveCycle.diagnostics`) — so a Clean-stage participant removal
+   * (per-subject `setCleanRemoval` or cohort-wide `excludeParticipantFromCohort`)
+   * is reflected immediately, the same way `getReliability`/`getNaiveScores`
+   * already recompute over `responsesOf`'s corrected cohort.
+   */
   getDiagnostics(cycleId: string): DiagnosticsModel | null {
     if (cycleId !== this.seed.liveCycle.id) return null;
-    const shortOf = new Map(this.seed.liveCycle.assessments.map((a) => [a.id, a.shortName]));
+    const cohortExcluded = this.cohortExcludedSet();
     return {
       cycleId,
-      assessments: (this.seed.liveCycle.diagnostics ?? []).map((d) => ({
-        assessmentId: d.assessmentId,
-        assessmentName: d.assessmentName,
-        shortName: shortOf.get(d.assessmentId) ?? d.assessmentName,
-        whole: d.whole,
-        byDemand: d.byDemand,
-        byItemSet: d.byItemSet,
-        timingByDemand: d.timingByDemand,
-        omissionByPosition: d.omissionByPosition,
-      })),
+      assessments: this.seed.liveCycle.assessments.map((a) => {
+        const removed = this.cleanRowSet(a.id);
+        const excludedParticipantIds = removed && removed.size ? new Set([...removed, ...cohortExcluded]) : cohortExcluded;
+        const cleanDiag = cleanDiagResponses(this.diagResponsesFor(a), { excludedParticipantIds });
+        const d = buildAssessmentDiagnostics(cleanDiag);
+        return {
+          assessmentId: a.id,
+          assessmentName: a.name,
+          shortName: a.shortName,
+          whole: d.whole,
+          byDemand: d.byDemand,
+          byItemSet: d.byItemSet,
+          timingByDemand: d.timingByDemand,
+          omissionByPosition: d.omissionByPosition,
+        };
+      }),
     };
   }
 
