@@ -1505,6 +1505,9 @@ export class InMemoryDataProvider implements DataProvider {
     }
     const incident = new Map<string, string>();
     for (const ti of a.technicalIncidents ?? []) incident.set(ti.p, ti.status);
+    // Max-0 items (instruction/stimulus pages) are never real responses — excluded
+    // from both the score totals and the exported rows below, so a passage intro
+    // doesn't show up as a full row in the Clean step's export.
     const scored = items.filter((it) => (it.maxScore ?? 1) >= 1);
     const maxTotal = scored.reduce((n, it) => n + (it.maxScore ?? 1), 0);
 
@@ -1515,7 +1518,7 @@ export class InMemoryDataProvider implements DataProvider {
       for (const it of scored) total += scoreByKey.get(`${p.id} ${it.id}`) ?? 0;
       const pct = maxTotal ? Math.round((total / maxTotal) * 1000) / 10 : 0;
       const resultStatus = incident.get(p.id) ?? "Finished OK";
-      for (const it of items) {
+      for (const it of scored) {
         const score = scoreByKey.get(`${p.id} ${it.id}`);
         if (score === undefined) continue; // a row per presented (answered) question
         const rec: Partial<Record<CleanedDataColumn, string>> = {
