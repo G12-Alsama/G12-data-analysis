@@ -234,12 +234,16 @@ export function timingPerformance(records: readonly DiagResponse[]): TimingResul
     );
   }
   // Aggregate to student level: score % (correct ÷ presented) and median item time.
+  // Every presented (scored) item contributes its responseTime to the median,
+  // answered or not — QM logs dwell time on a question even when the student
+  // leaves it blank, and that time is valid timing signal (ground-truth
+  // methodology: "Median Response Time per Item = median of each student's
+  // AnswerResponseTimeSeconds inside the analysis unit", no answered-only
+  // filter). Only a genuinely missing/non-finite responseTime is excluded below
+  // — that's real data absence, distinct from "left blank but still timed".
+  // (`answered` still drives omission/completion in speededness(), untouched.)
   const byStudent = new Map<string, { correct: number; presented: number; times: number[] }>();
   for (const r of records) {
-    // Only attempted items belong in the time-on-task ↔ score correlation — an
-    // omitted item's near-zero/partial dwell time is not a genuine response time
-    // and would corrupt the per-student median.
-    if (!r.answered) continue;
     let s = byStudent.get(r.participantId);
     if (!s) { s = { correct: 0, presented: 0, times: [] }; byStudent.set(r.participantId, s); }
     s.presented += 1;

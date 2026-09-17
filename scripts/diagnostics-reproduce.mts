@@ -82,10 +82,12 @@ const refSpeeded = (rs: DiagResponse[]) => {
 };
 const refTiming = (rs: DiagResponse[]) => {
   const by = new Map<string, { c: number; p: number; t: number[] }>();
-  // Only attempted items belong in the time-on-task ↔ score correlation — an
-  // omitted item's near-zero/partial dwell time is not a genuine response time
-  // and would corrupt the per-student median (mirrors timingPerformance()).
-  for (const r of rs) { if (!r.answered) continue; const s = by.get(r.participantId) ?? { c: 0, p: 0, t: [] }; s.p++; if (r.correct) s.c++; if (r.responseTime != null && Number.isFinite(r.responseTime)) s.t.push(r.responseTime); by.set(r.participantId, s); }
+  // Every presented (scored) item contributes its responseTime, answered or
+  // not — QM logs dwell time even on a blank answer, and the ground-truth
+  // methodology takes the median over all of them, no answered-only filter
+  // (mirrors timingPerformance()). Only a genuinely missing/non-finite
+  // responseTime is excluded.
+  for (const r of rs) { const s = by.get(r.participantId) ?? { c: 0, p: 0, t: [] }; s.p++; if (r.correct) s.c++; if (r.responseTime != null && Number.isFinite(r.responseTime)) s.t.push(r.responseTime); by.set(r.participantId, s); }
   const sp: number[] = [], mt: number[] = []; for (const s of by.values()) { if (!s.p || !s.t.length) continue; sp.push((s.c / s.p) * 100); mt.push(median(s.t)); }
   const p = pearson(mt, sp), s = spearman(mt, sp);
   return { nStudents: sp.length, pearson: p === null ? null : rnd(p), spearman: s === null ? null : rnd(s) };

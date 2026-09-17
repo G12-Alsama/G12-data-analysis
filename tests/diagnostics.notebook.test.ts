@@ -35,7 +35,7 @@ const APPLICABLE = "Applicable Math";
 const REPRODUCED = {
   whole: {
     speeded: { nItems: 40, nPresentations: 680, omissionRate: 0.0353, completion: 0.9647, speedednessIndex: 0.0498, earlyOmission: 0.0353, lateOmission: 0.0353, earlyAccuracy: 0.3679, lateAccuracy: 0.2683 },
-    timing: { nStudents: 17, pearson: 0.0415, spearman: 0.0761 },
+    timing: { nStudents: 17, pearson: -0.194, spearman: -0.0775 },
   },
   byDemand: {
     D1: { nItems: 15, nPresentations: 255, omissionRate: 0.0549, speedednessIndex: 0.025, earlyAccuracy: 0.4213, lateAccuracy: 0.3968 },
@@ -43,9 +43,9 @@ const REPRODUCED = {
     D3: { nItems: 9, nPresentations: 153, omissionRate: 0.0327, speedednessIndex: 0.0566, earlyAccuracy: 0.3093, lateAccuracy: 0.1961 },
   },
   timingByDemand: {
-    D1: { nStudents: 17, pearson: -0.2292, spearman: -0.1548 },
-    D2: { nStudents: 17, pearson: 0.3105, spearman: 0.2803 },
-    D3: { nStudents: 17, pearson: 0.5907, spearman: 0.5688 },
+    D1: { nStudents: 17, pearson: -0.2545, spearman: -0.2463 },
+    D2: { nStudents: 17, pearson: 0.179, spearman: 0.1636 },
+    D3: { nStudents: 17, pearson: 0.5298, spearman: 0.5849 },
   },
 } as const;
 
