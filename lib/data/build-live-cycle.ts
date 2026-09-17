@@ -213,8 +213,14 @@ export function buildLiveCycleData(
     // Responses straight from the cleaned rows so the answered flag rides along
     // (answered unless explicitly blank) — feeds the display-only D3% metric.
     const seedResponses: SeedResponse[] = recs.map((r) => {
-      const resp: SeedResponse = { p: r.participantPseudonym, i: r.qmQuestionId, s: r.answerScore };
-      resp.answerGivenChoiceNumber = r.answerGivenChoiceNumber;
+      const resp: SeedResponse = {
+        p: r.participantPseudonym,
+        i: r.qmQuestionId,
+        s: r.answerScore,
+        answerGiven: r.answerGiven,
+        answerGivenChoiceNumber: r.answerGivenChoiceNumber,
+        responseTime: r.responseTime,
+      };
       // Answered iff AnswerGivenChoiceNumber is present — AnswerGiven carries QM's
       // "<Not defined>" sentinel for an unanswered item, so it is never used here.
       if (!r.answerGivenChoiceNumber) resp.a = false;
@@ -251,9 +257,12 @@ export function buildLiveCycleData(
       .map(([p, status]) => ({ p, status }));
 
     // Speededness & timing diagnostics over the RAW sitting (export order proxy).
+    // Max Score = 0 items (instructions/stimuli) were never scored — exclude their
+    // responses here too, so they don't inflate omission/completion/correlation inputs.
+    const diagSourceRecs = recs.filter((r) => (r.maxScore ?? 1) >= 1);
     const itemOrder = new Map<string, number>();
-    for (const r of recs) if (!itemOrder.has(r.qmQuestionId)) itemOrder.set(r.qmQuestionId, itemOrder.size);
-    const diagRecs: DiagResponse[] = recs.map((r) => ({
+    for (const r of diagSourceRecs) if (!itemOrder.has(r.qmQuestionId)) itemOrder.set(r.qmQuestionId, itemOrder.size);
+    const diagRecs: DiagResponse[] = diagSourceRecs.map((r) => ({
       participantId: r.participantPseudonym,
       itemId: r.qmQuestionId,
       demandLevel: r.demandLevel,

@@ -526,8 +526,14 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
     });
 
     const seedResponses: SeedResponse[] = aResp.map((r) => {
-      const resp: SeedResponse = { p: r.participant_id, i: r.item_id, s: Number(r.answer_score) };
-      resp.answerGivenChoiceNumber = r.answer_given_choice_number;
+      const resp: SeedResponse = {
+        p: r.participant_id,
+        i: r.item_id,
+        s: Number(r.answer_score),
+        answerGiven: r.answer_given,
+        answerGivenChoiceNumber: r.answer_given_choice_number,
+        responseTime: r.response_time,
+      };
       // Answered iff answer_given_choice_number is present — answer_given carries
       // QM's "<Not defined>" sentinel for an unanswered item, so it is never used here.
       if (r.answer_given_choice_number == null) resp.a = false;
@@ -565,12 +571,17 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
       .filter(([, status]) => isTechnicalIncidentStatus(status))
       .map(([p, status]) => ({ p, status }));
 
-    const ordered = [...aResp].sort((x, y) => (x.created_at < y.created_at ? -1 : 1));
+    // Max Score = 0 items (instructions/stimuli) were never scored — exclude their
+    // responses here too, so they don't inflate omission/completion/correlation inputs
+    // (mirrors buildLiveCycleData's diagSourceRecs filter).
+    const scoredItemIds = new Set(aItems.filter((it) => (it.max_score ?? 1) >= 1).map((it) => it.id));
+    const diagSourceResp = aResp.filter((r) => scoredItemIds.has(r.item_id));
+    const ordered = [...diagSourceResp].sort((x, y) => (x.created_at < y.created_at ? -1 : 1));
     const order = new Map<string, number>();
     for (const r of ordered) if (!order.has(r.item_id)) order.set(r.item_id, order.size);
     const demandByItem = new Map(aItems.map((it) => [it.id, it.demand_level]));
     const itemSetByItem = new Map(aItems.map((it) => [it.id, it.item_set]));
-    const diagRecs: DiagResponse[] = aResp.map((r) => ({
+    const diagRecs: DiagResponse[] = diagSourceResp.map((r) => ({
       participantId: r.participant_id,
       itemId: r.item_id,
       demandLevel: demandByItem.get(r.item_id) ?? null,

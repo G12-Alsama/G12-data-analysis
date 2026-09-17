@@ -80,6 +80,10 @@ export interface SeedResponse {
    * unanswered item), this is genuinely blank/null with no sentinel ambiguity.
    */
   answerGivenChoiceNumber?: string | null;
+  /** The QM `AnswerGiven` value (raw answer text/choice), for the cleaned export. */
+  answerGiven?: string | null;
+  /** The QM response time in seconds, for the cleaned export. */
+  responseTime?: number | null;
 }
 
 /** A participant whose sitting of this assessment finished with a technical-fault status. */

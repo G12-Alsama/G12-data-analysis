@@ -1440,6 +1440,12 @@ export class InMemoryDataProvider implements DataProvider {
     for (const r of a.responses) scoreByKey.set(`${r.p} ${r.i}`, r.s);
     const choiceNumberByKey = new Map<string, string | null>();
     for (const r of a.responses) choiceNumberByKey.set(`${r.p} ${r.i}`, r.answerGivenChoiceNumber ?? null);
+    const answerGivenByKey = new Map<string, string>();
+    const responseTimeByKey = new Map<string, number>();
+    for (const r of a.responses) {
+      if (r.answerGiven != null) answerGivenByKey.set(`${r.p} ${r.i}`, r.answerGiven);
+      if (r.responseTime != null) responseTimeByKey.set(`${r.p} ${r.i}`, r.responseTime);
+    }
     const incident = new Map<string, string>();
     for (const ti of a.technicalIncidents ?? []) incident.set(ti.p, ti.status);
     const scored = items.filter((it) => (it.maxScore ?? 1) >= 1);
@@ -1469,8 +1475,13 @@ export class InMemoryDataProvider implements DataProvider {
           QuestionMinimumScore: "0",
           QuestionMaximumScore: String(it.maxScore ?? 1),
           QuestionStatus: "Normal",
+          AnswerGiven: answerGivenByKey.get(`${p.id} ${it.id}`) ?? "",
           AnswerScore: String(score),
           AnswerGivenChoiceNumber: choiceNumberByKey.get(`${p.id} ${it.id}`) ?? "",
+          AnswerResponseTimeSeconds:
+            responseTimeByKey.get(`${p.id} ${it.id}`) !== undefined
+              ? String(responseTimeByKey.get(`${p.id} ${it.id}`))
+              : "",
           AssessmentId: a.id,
           AssessmentName: a.name,
           // Participant identity, carried as its OWN column (the email = the
@@ -1815,7 +1826,8 @@ export class InMemoryDataProvider implements DataProvider {
     // response from that item's cohort psychometrics. With no per-student
     // exclusions this is byte-identical to the seed (parity-verified).
     const live = this.liveItemStats(cycleId, a);
-    const items: ItemRow[] = a.items.map((it) => {
+    const scoredItems = a.items.filter((it) => (it.maxScore ?? 1) >= 1);
+    const items: ItemRow[] = scoredItems.map((it) => {
       const s = live.get(it.id);
       return {
         id: it.id,
@@ -1869,7 +1881,7 @@ export class InMemoryDataProvider implements DataProvider {
       assessment: ref,
       assessments: refs,
       kpis: {
-        items: a.items.length,
+        items: scoredItems.length,
         excluded: excluded.size,
         medianDifficulty,
         cohortMean,
@@ -1884,6 +1896,9 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getItemDetail(cycleId: string, assessmentId: string, itemId: string): ItemDetailModel | null {
+    // Note: unlike getReview(), this still looks up by itemId across all of a.items,
+    // so a Max Score = 0 item is still reachable here even though it no longer
+    // appears as a row in the Review table. Possible follow-up, not fixed here.
     const a = this.assessment(assessmentId);
     if (cycleId !== this.seed.liveCycle.id || !a) return null;
     const index = a.items.findIndex((it) => it.id === itemId);
@@ -3636,16 +3651,22 @@ export class InMemoryDataProvider implements DataProvider {
     const items: ItemMeta[] = [];
     for (const a of this.seed.liveCycle.assessments) {
       const excluded = this.excludedSet(cycleId, a.id);
+      // Never-scored (Max Score = 0) items — instructions/stimuli — never entered
+      // scoring either (getRawData/getNaiveScores apply the same maxScore>=1 gate),
+      // so they're dropped here too, before the exclusion filter below.
+      const scoredItemIds = new Set(
+        a.items.filter((it) => !excluded.has(it.id) && (it.maxScore ?? 1) >= 1).map((it) => it.id),
+      );
       // responsesOf already drops participants removed at the Clean stage, so the
       // cohort α is computed over reflects the cleaned set — the same way scoring
       // does. (excludedSet also folds in Clean-stage column removals.) This is what
       // makes a Clean change propagate into the reliability output.
       for (const r of this.responsesOf(a)) {
-        if (excluded.has(r.itemId)) continue;
+        if (!scoredItemIds.has(r.itemId)) continue;
         responses.push(r);
       }
       for (const it of a.items) {
-        if (excluded.has(it.id)) continue;
+        if (!scoredItemIds.has(it.id)) continue;
         items.push({
           itemId: it.id,
           assessmentId: a.id,
