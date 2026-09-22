@@ -58,6 +58,20 @@ import {
   type OASittingStudent,
 } from "./overall-analytics";
 import { buildLiveCycleData } from "./build-live-cycle";
+import {
+  buildAssessmentDiagnostics,
+  cleanDiagResponses,
+  type DiagResponse,
+  // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER)
+  __setTempDebugTimingLabel,
+} from "@/lib/diagnostics";
+// TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER): the target assessment
+// confirmed in the production DB. Matched by id OR name so this also fires
+// against local/demo data during testing.
+const __TEMP_DEBUG_TARGET_ASSESSMENT_ID = "56629397-a027-4159-97f9-2bcf2cd38890";
+function __tempDebugIsTargetAssessment(a: { id: string; name: string }): boolean {
+  return a.id === __TEMP_DEBUG_TARGET_ASSESSMENT_ID || a.name.includes("Applicable Math");
+}
 import { doNextForStage } from "./pipeline-route";
 import type { CleanResponse } from "@/lib/ingest/types";
 import type { ValidationReport } from "@/lib/ingest/types";
@@ -686,6 +700,80 @@ export class InMemoryDataProvider implements DataProvider {
       assessmentId: a.id,
       score: r.s,
     }));
+  }
+  /**
+   * Raw diagnostics records for one assessment's CURRENT `items`/`responses` —
+   * unfiltered by participant (the drop-set is applied by the caller via
+   * `cleanDiagResponses`, matching the ingest-time build in `buildLiveCycleData`/
+   * `hydrate`). Only items with `maxScore >= 1` are included — the same filter
+   * those two build paths apply (unscored stimulus/instruction items must not
+   * inflate omission/completion/correlation inputs; see
+   * tests/diagnostics-maxscore-zero.test.ts). Presentation order uses QM's real
+   * per-sitting `questionPresentedNumber` carried on each response — confirmed
+   * against the 700435 fixture to VARY per participant even for the same item, so
+   * it is read per response, never shared globally by item. Falls back to the
+   * item's position in the already-ordered `a.items` array (ingest-time first-
+   * appearance order) ONLY when `questionPresentedNumber` is null/missing for a
+   * given response (defensive; should not fire on real data — logged below so a
+   * fallback firing stays visible). "answered" reads the same `r.a !== false`
+   * signal the rest of the provider uses (itself keyed off AnswerGivenChoiceNumber
+   * upstream).
+   */
+  private diagResponsesFor(a: SeedAssessment): DiagResponse[] {
+    // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER)
+    const __tempDebug = __tempDebugIsTargetAssessment(a);
+    if (__tempDebug) {
+      console.log(`[TEMP-DEBUG] diagResponsesFor(${a.name}): a.items.length=${a.items.length}`);
+      console.log(`[TEMP-DEBUG] diagResponsesFor(${a.name}): a.responses.length=${a.responses.length}`);
+    }
+    const itemMeta = new Map<string, { demand: string | null; itemSet: string | null; fallbackOrder: number }>();
+    let fallbackOrder = 0;
+    const __tempDebugExcludedItemIds: string[] = []; // TEMP-DEBUG
+    for (const it of a.items) {
+      if ((it.maxScore ?? 1) < 1) {
+        if (__tempDebug) __tempDebugExcludedItemIds.push(it.id); // TEMP-DEBUG
+        continue;
+      }
+      itemMeta.set(it.id, { demand: it.demand, itemSet: it.itemSet ?? null, fallbackOrder: fallbackOrder++ });
+    }
+    if (__tempDebug) {
+      console.log(
+        `[TEMP-DEBUG] diagResponsesFor(${a.name}): excluded ${__tempDebugExcludedItemIds.length} item(s) ` +
+          `by (maxScore ?? 1) < 1: [${__tempDebugExcludedItemIds.join(", ")}]`,
+      );
+    }
+    const out: DiagResponse[] = [];
+    let fallbackOrderCount = 0;
+    for (const r of a.responses) {
+      const meta = itemMeta.get(r.i);
+      if (!meta) continue;
+      let order = r.questionPresentedNumber ?? null;
+      if (order == null) {
+        order = meta.fallbackOrder;
+        fallbackOrderCount += 1;
+      }
+      out.push({
+        participantId: r.p,
+        itemId: r.i,
+        demandLevel: meta.demand,
+        itemSet: meta.itemSet,
+        order,
+        answered: r.a !== false,
+        correct: r.s === 1,
+        responseTime: r.responseTime ?? null,
+      });
+    }
+    if (fallbackOrderCount > 0) {
+      console.warn(
+        `diagResponsesFor: ${a.name} — ${fallbackOrderCount} response(s) had no questionPresentedNumber; ` +
+          `fell back to item-array-position proxy for presentation order.`,
+      );
+    }
+    // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER)
+    if (__tempDebug) {
+      console.log(`[TEMP-DEBUG] diagResponsesFor(${a.name}): returned DiagResponse[].length=${out.length}`);
+    }
+    return out;
   }
   /**
    * participantId -> full subject score for one assessment, composed from the
@@ -1438,8 +1526,21 @@ export class InMemoryDataProvider implements DataProvider {
 
     const scoreByKey = new Map<string, number>();
     for (const r of a.responses) scoreByKey.set(`${r.p} ${r.i}`, r.s);
+    const choiceNumberByKey = new Map<string, string | null>();
+    for (const r of a.responses) choiceNumberByKey.set(`${r.p} ${r.i}`, r.answerGivenChoiceNumber ?? null);
+    const presentedNumberByKey = new Map<string, number | null>();
+    for (const r of a.responses) presentedNumberByKey.set(`${r.p} ${r.i}`, r.questionPresentedNumber ?? null);
+    const answerGivenByKey = new Map<string, string>();
+    const responseTimeByKey = new Map<string, number>();
+    for (const r of a.responses) {
+      if (r.answerGiven != null) answerGivenByKey.set(`${r.p} ${r.i}`, r.answerGiven);
+      if (r.responseTime != null) responseTimeByKey.set(`${r.p} ${r.i}`, r.responseTime);
+    }
     const incident = new Map<string, string>();
     for (const ti of a.technicalIncidents ?? []) incident.set(ti.p, ti.status);
+    // Max-0 items (instruction/stimulus pages) are never real responses — excluded
+    // from both the score totals and the exported rows below, so a passage intro
+    // doesn't show up as a full row in the Clean step's export.
     const scored = items.filter((it) => (it.maxScore ?? 1) >= 1);
     const maxTotal = scored.reduce((n, it) => n + (it.maxScore ?? 1), 0);
 
@@ -1450,7 +1551,7 @@ export class InMemoryDataProvider implements DataProvider {
       for (const it of scored) total += scoreByKey.get(`${p.id} ${it.id}`) ?? 0;
       const pct = maxTotal ? Math.round((total / maxTotal) * 1000) / 10 : 0;
       const resultStatus = incident.get(p.id) ?? "Finished OK";
-      for (const it of items) {
+      for (const it of scored) {
         const score = scoreByKey.get(`${p.id} ${it.id}`);
         if (score === undefined) continue; // a row per presented (answered) question
         const rec: Partial<Record<CleanedDataColumn, string>> = {
@@ -1463,11 +1564,18 @@ export class InMemoryDataProvider implements DataProvider {
           QuestionDescription: it.wording ?? "",
           QuestionType: "Multiple Choice",
           QuestionSubElement: it.sub ?? "",
+          QuestionPresentedNumber: presentedNumberByKey.get(`${p.id} ${it.id}`) != null ? String(presentedNumberByKey.get(`${p.id} ${it.id}`)) : "",
           QuestionWording: it.wording ?? "",
           QuestionMinimumScore: "0",
           QuestionMaximumScore: String(it.maxScore ?? 1),
           QuestionStatus: "Normal",
+          AnswerGiven: answerGivenByKey.get(`${p.id} ${it.id}`) ?? "",
           AnswerScore: String(score),
+          AnswerGivenChoiceNumber: choiceNumberByKey.get(`${p.id} ${it.id}`) ?? "",
+          AnswerResponseTimeSeconds:
+            responseTimeByKey.get(`${p.id} ${it.id}`) !== undefined
+              ? String(responseTimeByKey.get(`${p.id} ${it.id}`))
+              : "",
           AssessmentId: a.id,
           AssessmentName: a.name,
           // Participant identity, carried as its OWN column (the email = the
@@ -1812,7 +1920,8 @@ export class InMemoryDataProvider implements DataProvider {
     // response from that item's cohort psychometrics. With no per-student
     // exclusions this is byte-identical to the seed (parity-verified).
     const live = this.liveItemStats(cycleId, a);
-    const items: ItemRow[] = a.items.map((it) => {
+    const scoredItems = a.items.filter((it) => (it.maxScore ?? 1) >= 1);
+    const items: ItemRow[] = scoredItems.map((it) => {
       const s = live.get(it.id);
       return {
         id: it.id,
@@ -1866,7 +1975,7 @@ export class InMemoryDataProvider implements DataProvider {
       assessment: ref,
       assessments: refs,
       kpis: {
-        items: a.items.length,
+        items: scoredItems.length,
         excluded: excluded.size,
         medianDifficulty,
         cohortMean,
@@ -1881,6 +1990,9 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getItemDetail(cycleId: string, assessmentId: string, itemId: string): ItemDetailModel | null {
+    // Note: unlike getReview(), this still looks up by itemId across all of a.items,
+    // so a Max Score = 0 item is still reachable here even though it no longer
+    // appears as a row in the Review table. Possible follow-up, not fixed here.
     const a = this.assessment(assessmentId);
     if (cycleId !== this.seed.liveCycle.id || !a) return null;
     const index = a.items.findIndex((it) => it.id === itemId);
@@ -3633,16 +3745,22 @@ export class InMemoryDataProvider implements DataProvider {
     const items: ItemMeta[] = [];
     for (const a of this.seed.liveCycle.assessments) {
       const excluded = this.excludedSet(cycleId, a.id);
+      // Never-scored (Max Score = 0) items — instructions/stimuli — never entered
+      // scoring either (getRawData/getNaiveScores apply the same maxScore>=1 gate),
+      // so they're dropped here too, before the exclusion filter below.
+      const scoredItemIds = new Set(
+        a.items.filter((it) => !excluded.has(it.id) && (it.maxScore ?? 1) >= 1).map((it) => it.id),
+      );
       // responsesOf already drops participants removed at the Clean stage, so the
       // cohort α is computed over reflects the cleaned set — the same way scoring
       // does. (excludedSet also folds in Clean-stage column removals.) This is what
       // makes a Clean change propagate into the reliability output.
       for (const r of this.responsesOf(a)) {
-        if (excluded.has(r.itemId)) continue;
+        if (!scoredItemIds.has(r.itemId)) continue;
         responses.push(r);
       }
       for (const it of a.items) {
-        if (excluded.has(it.id)) continue;
+        if (!scoredItemIds.has(it.id)) continue;
         items.push({
           itemId: it.id,
           assessmentId: a.id,
@@ -3760,21 +3878,41 @@ export class InMemoryDataProvider implements DataProvider {
     };
   }
 
+  /**
+   * Assessment Health diagnostics, recomputed live from each assessment's CURRENT
+   * `items`/`responses` on every read — never the static ingest-time snapshot
+   * (`this.seed.liveCycle.diagnostics`) — so a Clean-stage participant removal
+   * (per-subject `setCleanRemoval` or cohort-wide `excludeParticipantFromCohort`)
+   * is reflected immediately, the same way `getReliability`/`getNaiveScores`
+   * already recompute over `responsesOf`'s corrected cohort.
+   */
   getDiagnostics(cycleId: string): DiagnosticsModel | null {
     if (cycleId !== this.seed.liveCycle.id) return null;
-    const shortOf = new Map(this.seed.liveCycle.assessments.map((a) => [a.id, a.shortName]));
+    const cohortExcluded = this.cohortExcludedSet();
     return {
       cycleId,
-      assessments: (this.seed.liveCycle.diagnostics ?? []).map((d) => ({
-        assessmentId: d.assessmentId,
-        assessmentName: d.assessmentName,
-        shortName: shortOf.get(d.assessmentId) ?? d.assessmentName,
-        whole: d.whole,
-        byDemand: d.byDemand,
-        byItemSet: d.byItemSet,
-        timingByDemand: d.timingByDemand,
-        omissionByPosition: d.omissionByPosition,
-      })),
+      assessments: this.seed.liveCycle.assessments.map((a) => {
+        const removed = this.cleanRowSet(a.id);
+        const excludedParticipantIds = removed && removed.size ? new Set([...removed, ...cohortExcluded]) : cohortExcluded;
+        const cleanDiag = cleanDiagResponses(this.diagResponsesFor(a), { excludedParticipantIds });
+        // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER): gate
+        // timingPerformance()'s internal [TEMP-DEBUG] logging to this one
+        // assessment, then reset immediately so nothing else logs.
+        const __tempDebugTarget = __tempDebugIsTargetAssessment(a);
+        if (__tempDebugTarget) __setTempDebugTimingLabel(a.name);
+        const d = buildAssessmentDiagnostics(cleanDiag);
+        if (__tempDebugTarget) __setTempDebugTimingLabel(null);
+        return {
+          assessmentId: a.id,
+          assessmentName: a.name,
+          shortName: a.shortName,
+          whole: d.whole,
+          byDemand: d.byDemand,
+          byItemSet: d.byItemSet,
+          timingByDemand: d.timingByDemand,
+          omissionByPosition: d.omissionByPosition,
+        };
+      }),
     };
   }
 
