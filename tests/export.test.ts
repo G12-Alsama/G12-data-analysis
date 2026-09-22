@@ -493,12 +493,12 @@ describe("grades workbook — canonical layout", () => {
 describe("performance report workbook — Students_Performance_Report layout", () => {
   const CYCLE = "may-2026";
 
-  function build(): XLSXR.WorkBook {
+  async function build(): Promise<XLSXR.WorkBook> {
     const provider = new InMemoryDataProvider();
     // Bring real candidates into the upper bands so the level rows are populated.
     provider.setBoundary(CYCLE, "applicable-math", { cuts: [60, 40, 20] });
     const report = provider.getPerformanceReport(CYCLE)!;
-    const wb = buildPerformanceReportWorkbook({
+    const buf = await buildPerformanceReportWorkbook({
       ...report,
       alterations: [],
       audit: provider.getAuditLog(CYCLE, "all", "").entries.map((e) => ({
@@ -510,12 +510,11 @@ describe("performance report workbook — Students_Performance_Report layout", (
         entityId: e.cycleId ?? "",
       })),
     });
-    const buf = workbookToBuffer(wb);
     return XLSXR.read(buf, { type: "buffer" });
   }
 
-  it("emits the three matched sheets, then alterations + audit, in order", () => {
-    const wb = build();
+  it("emits the three matched sheets, then alterations + audit, in order", async () => {
+    const wb = await build();
     expect(wb.SheetNames.slice(0, 3)).toEqual([...PERFORMANCE_REPORT_SHEETS]);
     expect(wb.SheetNames).toContain("Alterations");
     expect(wb.SheetNames).toContain("Audit Trail");
@@ -524,8 +523,8 @@ describe("performance report workbook — Students_Performance_Report layout", (
     expect(wb.SheetNames.indexOf("Audit Trail")).toBeGreaterThan(2);
   });
 
-  it("Class Performance has the title, a row per performance level, and the award block", () => {
-    const wb = build();
+  it("Class Performance has the title, a row per performance level, and the award block", async () => {
+    const wb = await build();
     const report = new InMemoryDataProvider().getPerformanceReport(CYCLE)!;
     const aoa = aoaOf(wb, "Class Performance");
     expect(aoa[0]?.[0]).toBe("Class Performance Report");
@@ -541,28 +540,50 @@ describe("performance report workbook — Students_Performance_Report layout", (
     expect(aoa[awardTitle + 1]).toEqual(["Award Level", "Number of Students", "% of Class"]);
   });
 
-  it("Student Summary matches the canonical 8-column header with one row per student", () => {
-    const wb = build();
+  it("Student Summary matches the canonical 9-column header (Student ID first) with one row per student", async () => {
+    const wb = await build();
     const report = new InMemoryDataProvider().getPerformanceReport(CYCLE)!;
     const aoa = aoaOf(wb, "Student Summary");
     expect(aoa[2]?.slice(0, STUDENT_SUMMARY_HEADERS.length)).toEqual([...STUDENT_SUMMARY_HEADERS]);
+    expect(STUDENT_SUMMARY_HEADERS[0]).toBe("Student ID");
     // one data row per student, last column "Open profile"
     expect(aoa[3]?.[STUDENT_SUMMARY_HEADERS.length - 1]).toBe("Open profile");
     const dataRows = aoa.slice(3).filter((r) => r && r[0]);
     expect(dataRows.length).toBe(report.students.length);
-    // Legend block sits in the right-hand column (col J = index 9)
-    expect(aoa[0]?.[9]).toBe("Legend");
+    // Legend block sits one column past the data table (a blank spacer column between).
+    expect(aoa[0]?.[STUDENT_SUMMARY_HEADERS.length + 1]).toBe("Legend");
   });
 
-  it("Student Profiles repeats an Award Level / Subject block per student", () => {
-    const wb = build();
+  it("Student Profiles repeats an Award Level / Subject block per student, with a working Back link", async () => {
+    const wb = await build();
     const report = new InMemoryDataProvider().getPerformanceReport(CYCLE)!;
     const aoa = aoaOf(wb, "Student Profiles");
     const flat = aoa.map((r) => String(r?.[0] ?? ""));
     expect(flat.filter((v) => v === "Award Level").length).toBe(report.students.length);
     expect(flat.filter((v) => v === "Subject").length).toBe(report.students.length);
-    // "Back" appears in the last column of each student's name row
-    const backs = aoa.filter((r) => r?.[2] === "Back");
+    // "Back" appears in the last column (H, index 7) of each student's name row
+    const backs = aoa.filter((r) => r?.[7] === "Back");
     expect(backs.length).toBe(report.students.length);
+  });
+
+  it("links Student Summary ⇄ Student Profiles to the correct row for every student, both directions", async () => {
+    const wb = await build();
+    const report = new InMemoryDataProvider().getPerformanceReport(CYCLE)!;
+    const numSubjects = report.summarySubjects.length;
+    const summaryWs = wb.Sheets["Student Summary"]!;
+    const profilesWs = wb.Sheets["Student Profiles"]!;
+    const location = (cell: unknown) =>
+      String((cell as { l?: { location?: string } } | undefined)?.l?.location ?? "").replace(/&apos;/g, "'");
+
+    report.students.forEach((_st, i) => {
+      const summaryRow0 = 3 + i; // 0-based: row 4 (1-based) is the first student
+      const nameCell = summaryWs[XLSXR.utils.encode_cell({ r: summaryRow0, c: 1 })];
+      const expectedCardRow1Based = 3 + i * (numSubjects + 4);
+      expect(location(nameCell)).toBe(`'Student Profiles'!A${expectedCardRow1Based}`);
+
+      const backCell = profilesWs[XLSXR.utils.encode_cell({ r: expectedCardRow1Based - 1, c: 7 })];
+      const expectedSummaryRow1Based = 4 + i;
+      expect(location(backCell)).toBe(`'Student Summary'!A${expectedSummaryRow1Based}`);
+    });
   });
 });

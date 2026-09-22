@@ -122,3 +122,49 @@ export function roundOrNull(value: number | null, decimals: number): number | nu
   const r = Math.round(value * f) / f;
   return r === 0 ? 0 : r;
 }
+
+// --- Students' Performance Report brand palette ------------------------------
+//
+// Shared by lib/export/performance-report.ts, which builds that workbook on
+// ExcelJS (not xlsx-js-style) because it needs image embedding and freeze
+// panes that xlsx-js-style/xlsx cannot write. These constants live here,
+// rather than in that file, purely so a second builder can reuse the same
+// 4-tier color scale without duplicating hex values.
+
+/** Brand accent (title bars, hyperlink text) for the Students' Performance Report. */
+export const PERFORMANCE_REPORT_BRAND = "B2375B";
+/** Standard sheet-wide divider/border color for the Students' Performance Report. */
+export const PERFORMANCE_REPORT_BORDER = "B7C9D6";
+/** Dark (not pure-black) body text used throughout the Students' Performance Report. */
+export const PERFORMANCE_REPORT_TEXT = "1F1F1F";
+/** Accent for the "Performance levels" legend heading — dark blue, distinct from the brand maroon. */
+export const PERFORMANCE_REPORT_LEGEND_ACCENT = "1F4E78";
+export const PERFORMANCE_REPORT_FONT = "Aptos";
+
+export type LevelColorPalette = "classPerformance" | "summary";
+
+const LEVEL_FILLS: Record<LevelColorPalette, readonly string[]> = {
+  // Class Performance uses a slightly more saturated tier-1 green and a
+  // stronger tier-4 red than Student Summary / Student Profiles.
+  classPerformance: ["A9D18E", "E2F0D9", "FFF2CC", "FFC7CE"],
+  summary: ["C6E0B4", "E2F0D9", "FFF2CC", "F4CCCC"],
+};
+/** Tier-4 gets red-tinted text (confirmed against the reference file); the rest use the standard dark body text. */
+const LEVEL_TEXT: readonly string[] = [
+  PERFORMANCE_REPORT_TEXT,
+  PERFORMANCE_REPORT_TEXT,
+  PERFORMANCE_REPORT_TEXT,
+  "9C0006",
+];
+
+/**
+ * The 4-tier color scale shared by every "performance level" / "award level"
+ * cell in the Students' Performance Report (Class Performance, Student
+ * Summary, Student Profiles legend + data cells). Keyed off the value's RANK
+ * (0 = best) among the configured levels — never by string-matching label
+ * text — so relabelling a level doesn't break the color.
+ */
+export function colorForLevel(rankIndex: number, palette: LevelColorPalette): { fill: string; text: string } {
+  const i = Math.min(Math.max(rankIndex, 0), LEVEL_TEXT.length - 1);
+  return { fill: LEVEL_FILLS[palette][i]!, text: LEVEL_TEXT[i]! };
+}

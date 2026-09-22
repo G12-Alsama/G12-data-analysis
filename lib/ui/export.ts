@@ -50,6 +50,18 @@ export async function downloadWorkbook(filename: string, wb: XLSXType.WorkBook):
   downloadBlob(new Blob([bytes], { type: XLSX_MIME }), filename);
 }
 
+/**
+ * Download an already-serialised xlsx buffer directly (e.g. from
+ * `buildPerformanceReportWorkbook`, which writes via ExcelJS — the only
+ * builder in lib/export that needs an embedded image and freeze panes, so it
+ * returns finished bytes instead of the shared xlsx-js-style WorkBook shape).
+ */
+export function downloadXlsxBuffer(filename: string, buf: ArrayBuffer | Uint8Array): void {
+  const bytes = new Uint8Array(buf.byteLength);
+  bytes.set(buf instanceof Uint8Array ? buf : new Uint8Array(buf));
+  downloadBlob(new Blob([bytes], { type: XLSX_MIME }), filename);
+}
+
 /** Normalise a label into a file-name stem: lowercased, words → underscores. */
 export function fileStem(...parts: string[]): string {
   return parts
