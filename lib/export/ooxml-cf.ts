@@ -109,14 +109,41 @@ function injectDxfs(stylesXml: string, newDxfs: string[]): { xml: string; baseCo
   return { xml: stylesXml.replace("</styleSheet>", `${block}</styleSheet>`), baseCount: 0 };
 }
 
-/** Insert `<conditionalFormatting>` blocks at the schema-correct position:
- * after mergeCells/sheetData, before dataValidations/pageMargins. */
+/**
+ * Insert `<conditionalFormatting>` blocks at the schema-correct position.
+ *
+ * CT_Worksheet's child order is fixed: ... sheetData, sheetCalcPr,
+ * sheetProtection, protectedRanges, scenarios, autoFilter, sortState,
+ * dataConsolidate, customSheetViews, mergeCells, phoneticPr,
+ * conditionalFormatting, dataValidations, hyperlinks, printOptions,
+ * pageMargins, pageSetup, headerFooter, rowBreaks, colBreaks,
+ * customProperties, cellWatches, ignoredErrors, smartTags, drawing, ...
+ *
+ * `ignoredErrors` — which xlsx-js-style writes whenever a numeric-looking
+ * value is stored as text (exactly what this module's own "n/a"/"Not
+ * sourced" text cells produce) — sits near the very END of that sequence,
+ * long after every element this used to search forward for
+ * (dataValidations/pageMargins/pageSetup/extLst). Searching forward for a
+ * "comes after" landmark and falling back to "just before </worksheet>"
+ * when none matched put `<conditionalFormatting>` AFTER `<ignoredErrors>`
+ * whenever one was present — a schema-order violation that made Excel
+ * treat the whole part as corrupt and silently drop its `<sheetData>` on
+ * repair (every sheet blank except the CF-free README). Anchoring
+ * BACKWARD from `</mergeCells>` (or `</sheetData>` when a sheet has no
+ * merges) instead is unconditionally correct: conditionalFormatting must
+ * come right after mergeCells/sheetData and strictly before every other
+ * optional element this module or xlsx-js-style ever writes.
+ */
 function injectSheetCf(sheetXml: string, cfXml: string): string {
   if (cfXml === "") return sheetXml;
-  for (const marker of ["<dataValidations", "<pageMargins", "<pageSetup", "<extLst"]) {
-    const idx = sheetXml.indexOf(marker);
-    if (idx !== -1) return sheetXml.slice(0, idx) + cfXml + sheetXml.slice(idx);
+  for (const closeTag of ["</mergeCells>", "</sheetData>"]) {
+    const idx = sheetXml.indexOf(closeTag);
+    if (idx !== -1) {
+      const insertAt = idx + closeTag.length;
+      return sheetXml.slice(0, insertAt) + cfXml + sheetXml.slice(insertAt);
+    }
   }
+  // No sheetData at all (should not happen for a real sheet) — last resort.
   return sheetXml.replace("</worksheet>", `${cfXml}</worksheet>`);
 }
 

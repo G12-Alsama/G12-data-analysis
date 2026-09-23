@@ -158,3 +158,58 @@ describe("Timing workbook", () => {
     expect(cell?.v).toBe(first.whole.timing.pearson ?? "n/a");
   });
 });
+
+// --- OOXML validity ---------------------------------------------------------
+// Regression coverage for a real corruption bug: xlsx-js-style writes
+// <ignoredErrors> (whenever a numeric-looking value is stored as text — e.g.
+// this module's own "n/a"/"Not sourced" cells) near the very end of
+// CT_Worksheet's fixed child sequence, well after <conditionalFormatting>'s
+// required position (right after <mergeCells>/<sheetData>). Landing the
+// patched-in <conditionalFormatting> after <ignoredErrors> is a schema-order
+// violation that made Excel treat the sheet as corrupt and drop its
+// <sheetData> entirely on repair — every sheet came out blank except the
+// CF-free README. Structural checks against openpyxl/JSZip alone didn't catch
+// this (both parse the misordered XML leniently), so this guards the actual
+// element order and cross-checks with SheetJS's stricter reader.
+describe("Generated workbooks are valid OOXML (not just structurally similar)", () => {
+  async function assertCfBeforeIgnoredErrors(bytes: Uint8Array, sheetIndex: number): Promise<void> {
+    const xml = await sheetXml(bytes, sheetIndex);
+    const cfIdx = xml.indexOf("<conditionalFormatting");
+    const ignoredIdx = xml.indexOf("<ignoredErrors");
+    if (cfIdx === -1) return; // sheet carries no CF (e.g. an empty "not available" placeholder)
+    if (ignoredIdx !== -1) expect(cfIdx).toBeLessThan(ignoredIdx);
+  }
+
+  it("orders <conditionalFormatting> before <ignoredErrors> on every Reliability data sheet", async () => {
+    const built = buildReliabilityWorkbook({ cycleName: cycle.name, reliability });
+    const bytes = await built.bytes();
+    for (let i = 1; i < RELIABILITY_SHEETS.length; i++) await assertCfBeforeIgnoredErrors(bytes, i);
+  });
+
+  it("orders <conditionalFormatting> before <ignoredErrors> on every Speededness/Timing data sheet", async () => {
+    const spd = await buildSpeedednessWorkbook({ cycleName: cycle.name, reliability, diagnostics }).bytes();
+    const tim = await buildTimingWorkbook({ cycleName: cycle.name, reliability, diagnostics }).bytes();
+    for (let i = 1; i < SPEEDEDNESS_SHEETS.length; i++) await assertCfBeforeIgnoredErrors(spd, i);
+    for (let i = 1; i < TIMING_SHEETS.length; i++) await assertCfBeforeIgnoredErrors(tim, i);
+  });
+
+  it("round-trips through SheetJS's strict reader with the right sheet count and dimensions for every workbook", async () => {
+    const XLSX = await import("xlsx");
+    const cases: [ReturnType<typeof buildReliabilityWorkbook> | ReturnType<typeof buildSpeedednessWorkbook> | ReturnType<typeof buildTimingWorkbook>, readonly string[]][] = [
+      [buildReliabilityWorkbook({ cycleName: cycle.name, reliability }), RELIABILITY_SHEETS],
+      [buildSpeedednessWorkbook({ cycleName: cycle.name, reliability, diagnostics }), SPEEDEDNESS_SHEETS],
+      [buildTimingWorkbook({ cycleName: cycle.name, reliability, diagnostics }), TIMING_SHEETS],
+    ];
+    for (const [built, sheetNames] of cases) {
+      const bytes = await built.bytes();
+      // WTF: true makes SheetJS throw instead of silently tolerating malformed OOXML.
+      const parsed = XLSX.read(bytes, { type: "buffer", WTF: true });
+      expect(parsed.SheetNames).toEqual([...sheetNames]);
+      for (const name of sheetNames) {
+        const ref = parsed.Sheets[name]!["!ref"];
+        const expected = built.workbook.Sheets[name]!["!ref"];
+        expect(ref).toBe(expected);
+      }
+    }
+  });
+});
