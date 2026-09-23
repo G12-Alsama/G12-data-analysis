@@ -3676,6 +3676,14 @@ export class InMemoryDataProvider implements DataProvider {
       note: g.note,
       lowItems: g.lowItems,
       smallSample: g.smallSample,
+      totalParticipants: g.totalParticipants,
+      itemResponses: g.itemResponses,
+      spearmanBrown: g.spearmanBrown,
+      sbMultiplier80: g.sbMultiplier80,
+      sbMultiplier90: g.sbMultiplier90,
+      avgInterItemCorrelation: g.avgInterItemCorrelation,
+      status: g.status,
+      interpretation: g.interpretation,
     }));
     const overall = rows.find((r) => r.level === "overall")!;
     return {

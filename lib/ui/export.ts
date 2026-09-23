@@ -50,6 +50,15 @@ export async function downloadWorkbook(filename: string, wb: XLSXType.WorkBook):
   downloadBlob(new Blob([bytes], { type: XLSX_MIME }), filename);
 }
 
+/** Download already-serialised xlsx bytes (e.g. from a builder whose `bytes()`
+ * has patched in real conditional-formatting XML after xlsx-js-style wrote
+ * the base file — see lib/export/ooxml-cf.ts). */
+export function downloadWorkbookBytes(filename: string, bytes: Uint8Array): void {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  downloadBlob(new Blob([copy], { type: XLSX_MIME }), filename);
+}
+
 /** Normalise a label into a file-name stem: lowercased, words → underscores. */
 export function fileStem(...parts: string[]): string {
   return parts

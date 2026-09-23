@@ -1,12 +1,19 @@
 /**
- * Excel export module (Section 9). Generates the three workbooks that match the
- * current templates and a helper to serialise to a Buffer.
+ * Excel export module (Section 9). Generates the workbooks that match the
+ * team's reference templates and a helper to serialise to a Buffer.
  *
  * Generation uses `xlsx-js-style` (a drop-in SheetJS fork) so cell fills are
  * written — the item-analysis rating columns are colour-coded green/amber/red.
  * The item-analysis workbook is reconciled to the exact `MCQ_Item_Analysis`
  * layout: a "README & Summary" sheet plus one titled sheet per assessment with
  * the canonical 20-column header and a single Remove/Reason pair.
+ *
+ * The Assessment Health step exports three separate workbooks — Reliability,
+ * Speededness, Timing — each reconciled cell-by-cell against its own original
+ * manual-analysis file (see reference/assessment_health_reports/originals).
+ * Their live conditional-formatting rules go beyond what xlsx-js-style can
+ * write, so each builder's `bytes()` patches real `<conditionalFormatting>`/
+ * `<dxf>` XML in afterwards — see lib/export/ooxml-cf.ts.
  */
 
 export {
@@ -44,11 +51,20 @@ export {
   ALTERATIONS_SHEET_NAME,
 } from "./alterations";
 export {
-  buildDiagnosticsWorkbook,
-  DIAGNOSTICS_SHEETS,
-  RELIABILITY_HEADERS,
-} from "./diagnostics";
-export type { DiagnosticsExportInput } from "./diagnostics";
+  buildReliabilityWorkbook,
+  RELIABILITY_SHEETS,
+} from "./reliability-report";
+export type { ReliabilityReportInput, ReliabilityBuildResult } from "./reliability-report";
+export {
+  buildSpeedednessWorkbook,
+  SPEEDEDNESS_SHEETS,
+} from "./speededness-report";
+export type { SpeededednessReportInput, SpeededednessBuildResult } from "./speededness-report";
+export {
+  buildTimingWorkbook,
+  TIMING_SHEETS,
+} from "./timing-report";
+export type { TimingReportInput, TimingBuildResult } from "./timing-report";
 export {
   buildBoundariesWorkbook,
   BOUNDARIES_SHEETS,

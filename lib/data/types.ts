@@ -710,7 +710,25 @@ export interface ReliabilityRow {
   lowItems: boolean;
   /** n below the small-sample threshold — α is unstable. */
   smallSample: boolean;
+  /** Every participant who attempted at least one item in the group (not just the complete-case n used for α). */
+  totalParticipants: number;
+  /** Raw item-response rows feeding the group (one per participant × item they answered). */
+  itemResponses: number;
+  /** Predicted α if the group's item count were doubled with similar-quality items. */
+  spearmanBrown: number | null;
+  /** Test-length multiplier needed to reach α = 0.80 (Spearman-Brown prophecy). */
+  sbMultiplier80: number | null;
+  /** Test-length multiplier needed to reach α = 0.90 (Spearman-Brown prophecy). */
+  sbMultiplier90: number | null;
+  /** Average pairwise Pearson correlation across the group's items (complete-case). */
+  avgInterItemCorrelation: number | null;
+  /** Interpretation band for α. */
+  status: ReliabilityStatus;
+  /** Plain-language reading of `status`. */
+  interpretation: string;
 }
+
+export type ReliabilityStatus = "Excellent" | "Good" | "Acceptable" | "Questionable" | "Flag / Low" | "Not Available";
 
 export interface ReliabilityModel {
   cycleId: string;
