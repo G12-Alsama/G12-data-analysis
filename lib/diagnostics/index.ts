@@ -208,9 +208,40 @@ export function cleanDiagResponses(
   return [...byCell.values()];
 }
 
+// TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER): a caller (currently
+// only in-memory-provider.ts's getDiagnostics()) sets this to a label right
+// before invoking buildAssessmentDiagnostics()/timingPerformance() for the one
+// assessment under investigation, so timingPerformance() below knows whether to
+// emit [TEMP-DEBUG] log lines. Purely a logging gate — never read by any
+// computation, so it cannot change a computed value. Set via
+// __setTempDebugTimingLabel() (a plain module-level `let` can't be assigned
+// from another module's live-binding import).
+let __TEMP_DEBUG_TIMING_LABEL: string | null = null;
+export function __setTempDebugTimingLabel(label: string | null): void {
+  __TEMP_DEBUG_TIMING_LABEL = label;
+}
+
 /** Timing–performance correlation over one group of responses. */
 export function timingPerformance(records: readonly DiagResponse[]): TimingResult {
+  // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER)
+  const __tempDebugLabel = __TEMP_DEBUG_TIMING_LABEL;
+  const __TEMP_DEBUG_ZERO_ITEM_ID = "29cebc7b-adea-4fa7-b99a-e163dceef141";
+  if (__tempDebugLabel) {
+    const zeroItemLeaked = records.some((r) => r.itemId === __TEMP_DEBUG_ZERO_ITEM_ID && r.responseTime !== null);
+    console.log(
+      `[TEMP-DEBUG] timingPerformance(${__tempDebugLabel}): records.length=${records.length}; ` +
+        `item ${__TEMP_DEBUG_ZERO_ITEM_ID} responseTime present in input=${zeroItemLeaked}`,
+    );
+  }
   // Aggregate to student level: score % (correct ÷ presented) and median item time.
+  // Every presented (scored) item contributes its responseTime to the median,
+  // answered or not — QM logs dwell time on a question even when the student
+  // leaves it blank, and that time is valid timing signal (ground-truth
+  // methodology: "Median Response Time per Item = median of each student's
+  // AnswerResponseTimeSeconds inside the analysis unit", no answered-only
+  // filter). Only a genuinely missing/non-finite responseTime is excluded below
+  // — that's real data absence, distinct from "left blank but still timed".
+  // (`answered` still drives omission/completion in speededness(), untouched.)
   const byStudent = new Map<string, { correct: number; presented: number; times: number[] }>();
   for (const r of records) {
     let s = byStudent.get(r.participantId);
@@ -219,15 +250,31 @@ export function timingPerformance(records: readonly DiagResponse[]): TimingResul
     if (r.correct) s.correct += 1;
     if (r.responseTime !== null && Number.isFinite(r.responseTime)) s.times.push(r.responseTime);
   }
+  if (__tempDebugLabel) {
+    console.log(`[TEMP-DEBUG] timingPerformance(${__tempDebugLabel}): total students discovered=${byStudent.size}`);
+  }
   const scorePct: number[] = [];
   const medTime: number[] = [];
-  for (const s of byStudent.values()) {
+  for (const [participantId, s] of byStudent) {
     if (s.presented === 0 || s.times.length === 0) continue;
-    scorePct.push((s.correct / s.presented) * 100);
-    medTime.push(median(s.times));
+    const pct = (s.correct / s.presented) * 100;
+    const mt = median(s.times);
+    if (__tempDebugLabel) {
+      console.log(
+        `[TEMP-DEBUG] timingPerformance(${__tempDebugLabel}): participantId=${participantId} ` +
+          `timesCount=${s.times.length} medTime=${mt} scorePct=${pct}`,
+      );
+    }
+    scorePct.push(pct);
+    medTime.push(mt);
   }
   const p = pearson(medTime, scorePct);
   const sp = spearman(medTime, scorePct);
+  if (__tempDebugLabel) {
+    const pairs = medTime.map((mt, i) => [mt, scorePct[i]]);
+    console.log(`[TEMP-DEBUG] timingPerformance(${__tempDebugLabel}): (medTime, scorePct) pairs=${JSON.stringify(pairs)}`);
+    console.log(`[TEMP-DEBUG] timingPerformance(${__tempDebugLabel}): nStudents=${scorePct.length} pearson=${p} spearman=${sp}`);
+  }
   return {
     nStudents: scorePct.length,
     pearson: p === null ? null : rnd(p),

@@ -50,13 +50,18 @@ export async function downloadWorkbook(filename: string, wb: XLSXType.WorkBook):
   downloadBlob(new Blob([bytes], { type: XLSX_MIME }), filename);
 }
 
-/** Download already-serialised xlsx bytes (e.g. from a builder whose `bytes()`
- * has patched in real conditional-formatting XML after xlsx-js-style wrote
- * the base file — see lib/export/ooxml-cf.ts). */
-export function downloadWorkbookBytes(filename: string, bytes: Uint8Array): void {
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  downloadBlob(new Blob([copy], { type: XLSX_MIME }), filename);
+/**
+ * Download an already-serialised xlsx buffer directly — e.g. from
+ * `buildPerformanceReportWorkbook` (ExcelJS, for an embedded image and freeze
+ * panes) or from the Assessment Health report builders, whose `bytes()` has
+ * patched real conditional-formatting XML into an xlsx-js-style base file
+ * (see lib/export/ooxml-cf.ts). Either way the caller already has finished
+ * bytes, not the shared xlsx-js-style WorkBook shape.
+ */
+export function downloadXlsxBuffer(filename: string, buf: ArrayBuffer | Uint8Array): void {
+  const bytes = new Uint8Array(buf.byteLength);
+  bytes.set(buf instanceof Uint8Array ? buf : new Uint8Array(buf));
+  downloadBlob(new Blob([bytes], { type: XLSX_MIME }), filename);
 }
 
 /** Normalise a label into a file-name stem: lowercased, words → underscores. */

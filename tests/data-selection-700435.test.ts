@@ -208,4 +208,19 @@ describe("sitting 700435 — data selection & aggregation", () => {
     const { cleanedResponses } = ingestThreeExports(files());
     for (const r of cleanedResponses) expect(r.questionType).toBe("Multiple Choice");
   });
+
+  // ── F. getCleanedData excludes the max-0 stimulus item from exported rows ──
+  it("F. the Applicable Math max-0 stimulus item never appears as a row in getCleanedData", () => {
+    const { p, built, assessmentByName } = buildProvider(true);
+    const mathId = assessmentByName(/Applicable Math$/);
+    const math = built.assessments.find((a) => a.id === mathId)!;
+    const stimulusItem = math.items.find((it) => (it.maxScore ?? 1) < 1)!;
+    expect(stimulusItem).toBeTruthy();
+
+    const cleaned = p.getCleanedData(CYCLE, mathId)!;
+    const qIdx = cleaned.headers.indexOf("QuestionId");
+    const maxIdx = cleaned.headers.indexOf("QuestionMaximumScore");
+    expect(cleaned.rows.some((r) => r[qIdx] === stimulusItem.id)).toBe(false);
+    for (const r of cleaned.rows) expect(Number(r[maxIdx])).toBeGreaterThanOrEqual(1);
+  });
 });

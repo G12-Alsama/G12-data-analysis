@@ -58,11 +58,25 @@ import {
   type OASittingStudent,
 } from "./overall-analytics";
 import { buildLiveCycleData } from "./build-live-cycle";
+import {
+  buildAssessmentDiagnostics,
+  cleanDiagResponses,
+  type DiagResponse,
+  // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER)
+  __setTempDebugTimingLabel,
+} from "@/lib/diagnostics";
+// TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER): the target assessment
+// confirmed in the production DB. Matched by id OR name so this also fires
+// against local/demo data during testing.
+const __TEMP_DEBUG_TARGET_ASSESSMENT_ID = "56629397-a027-4159-97f9-2bcf2cd38890";
+function __tempDebugIsTargetAssessment(a: { id: string; name: string }): boolean {
+  return a.id === __TEMP_DEBUG_TARGET_ASSESSMENT_ID || a.name.includes("Applicable Math");
+}
 import { doNextForStage } from "./pipeline-route";
 import type { CleanResponse } from "@/lib/ingest/types";
 import type { ValidationReport } from "@/lib/ingest/types";
 import type { CanonicalModel } from "@/lib/ingest/qm";
-import { SUBJECT_CATALOG, isSurveyAssessment } from "./subject-catalog";
+import { SUBJECT_CATALOG, isSurveyAssessment, canonicalSubjectName } from "./subject-catalog";
 import { isTechnicalIncidentStatus } from "./result-status";
 import { isEssaySubject, reservedEssayMax, ESSAY_ITEM_MAX } from "./essays";
 import type {
@@ -688,6 +702,80 @@ export class InMemoryDataProvider implements DataProvider {
     }));
   }
   /**
+   * Raw diagnostics records for one assessment's CURRENT `items`/`responses` —
+   * unfiltered by participant (the drop-set is applied by the caller via
+   * `cleanDiagResponses`, matching the ingest-time build in `buildLiveCycleData`/
+   * `hydrate`). Only items with `maxScore >= 1` are included — the same filter
+   * those two build paths apply (unscored stimulus/instruction items must not
+   * inflate omission/completion/correlation inputs; see
+   * tests/diagnostics-maxscore-zero.test.ts). Presentation order uses QM's real
+   * per-sitting `questionPresentedNumber` carried on each response — confirmed
+   * against the 700435 fixture to VARY per participant even for the same item, so
+   * it is read per response, never shared globally by item. Falls back to the
+   * item's position in the already-ordered `a.items` array (ingest-time first-
+   * appearance order) ONLY when `questionPresentedNumber` is null/missing for a
+   * given response (defensive; should not fire on real data — logged below so a
+   * fallback firing stays visible). "answered" reads the same `r.a !== false`
+   * signal the rest of the provider uses (itself keyed off AnswerGivenChoiceNumber
+   * upstream).
+   */
+  private diagResponsesFor(a: SeedAssessment): DiagResponse[] {
+    // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER)
+    const __tempDebug = __tempDebugIsTargetAssessment(a);
+    if (__tempDebug) {
+      console.log(`[TEMP-DEBUG] diagResponsesFor(${a.name}): a.items.length=${a.items.length}`);
+      console.log(`[TEMP-DEBUG] diagResponsesFor(${a.name}): a.responses.length=${a.responses.length}`);
+    }
+    const itemMeta = new Map<string, { demand: string | null; itemSet: string | null; fallbackOrder: number }>();
+    let fallbackOrder = 0;
+    const __tempDebugExcludedItemIds: string[] = []; // TEMP-DEBUG
+    for (const it of a.items) {
+      if ((it.maxScore ?? 1) < 1) {
+        if (__tempDebug) __tempDebugExcludedItemIds.push(it.id); // TEMP-DEBUG
+        continue;
+      }
+      itemMeta.set(it.id, { demand: it.demand, itemSet: it.itemSet ?? null, fallbackOrder: fallbackOrder++ });
+    }
+    if (__tempDebug) {
+      console.log(
+        `[TEMP-DEBUG] diagResponsesFor(${a.name}): excluded ${__tempDebugExcludedItemIds.length} item(s) ` +
+          `by (maxScore ?? 1) < 1: [${__tempDebugExcludedItemIds.join(", ")}]`,
+      );
+    }
+    const out: DiagResponse[] = [];
+    let fallbackOrderCount = 0;
+    for (const r of a.responses) {
+      const meta = itemMeta.get(r.i);
+      if (!meta) continue;
+      let order = r.questionPresentedNumber ?? null;
+      if (order == null) {
+        order = meta.fallbackOrder;
+        fallbackOrderCount += 1;
+      }
+      out.push({
+        participantId: r.p,
+        itemId: r.i,
+        demandLevel: meta.demand,
+        itemSet: meta.itemSet,
+        order,
+        answered: r.a !== false,
+        correct: r.s === 1,
+        responseTime: r.responseTime ?? null,
+      });
+    }
+    if (fallbackOrderCount > 0) {
+      console.warn(
+        `diagResponsesFor: ${a.name} — ${fallbackOrderCount} response(s) had no questionPresentedNumber; ` +
+          `fell back to item-array-position proxy for presentation order.`,
+      );
+    }
+    // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER)
+    if (__tempDebug) {
+      console.log(`[TEMP-DEBUG] diagResponsesFor(${a.name}): returned DiagResponse[].length=${out.length}`);
+    }
+    return out;
+  }
+  /**
    * participantId -> full subject score for one assessment, composed from the
    * three components (retained MCQ + essay + alterations). The map values are the
    * engine's ParticipantScore, so callers can read the total (`raw`), `max`,
@@ -743,6 +831,7 @@ export class InMemoryDataProvider implements DataProvider {
     return a.items.map((it) => ({
       itemId: it.id,
       assessmentId: a.id,
+      wording: it.wording,
       majorElement: it.major,
       subElement: it.sub,
       demandLevel: it.demand,
@@ -1438,8 +1527,21 @@ export class InMemoryDataProvider implements DataProvider {
 
     const scoreByKey = new Map<string, number>();
     for (const r of a.responses) scoreByKey.set(`${r.p} ${r.i}`, r.s);
+    const choiceNumberByKey = new Map<string, string | null>();
+    for (const r of a.responses) choiceNumberByKey.set(`${r.p} ${r.i}`, r.answerGivenChoiceNumber ?? null);
+    const presentedNumberByKey = new Map<string, number | null>();
+    for (const r of a.responses) presentedNumberByKey.set(`${r.p} ${r.i}`, r.questionPresentedNumber ?? null);
+    const answerGivenByKey = new Map<string, string>();
+    const responseTimeByKey = new Map<string, number>();
+    for (const r of a.responses) {
+      if (r.answerGiven != null) answerGivenByKey.set(`${r.p} ${r.i}`, r.answerGiven);
+      if (r.responseTime != null) responseTimeByKey.set(`${r.p} ${r.i}`, r.responseTime);
+    }
     const incident = new Map<string, string>();
     for (const ti of a.technicalIncidents ?? []) incident.set(ti.p, ti.status);
+    // Max-0 items (instruction/stimulus pages) are never real responses — excluded
+    // from both the score totals and the exported rows below, so a passage intro
+    // doesn't show up as a full row in the Clean step's export.
     const scored = items.filter((it) => (it.maxScore ?? 1) >= 1);
     const maxTotal = scored.reduce((n, it) => n + (it.maxScore ?? 1), 0);
 
@@ -1450,7 +1552,7 @@ export class InMemoryDataProvider implements DataProvider {
       for (const it of scored) total += scoreByKey.get(`${p.id} ${it.id}`) ?? 0;
       const pct = maxTotal ? Math.round((total / maxTotal) * 1000) / 10 : 0;
       const resultStatus = incident.get(p.id) ?? "Finished OK";
-      for (const it of items) {
+      for (const it of scored) {
         const score = scoreByKey.get(`${p.id} ${it.id}`);
         if (score === undefined) continue; // a row per presented (answered) question
         const rec: Partial<Record<CleanedDataColumn, string>> = {
@@ -1463,11 +1565,18 @@ export class InMemoryDataProvider implements DataProvider {
           QuestionDescription: it.wording ?? "",
           QuestionType: "Multiple Choice",
           QuestionSubElement: it.sub ?? "",
+          QuestionPresentedNumber: presentedNumberByKey.get(`${p.id} ${it.id}`) != null ? String(presentedNumberByKey.get(`${p.id} ${it.id}`)) : "",
           QuestionWording: it.wording ?? "",
           QuestionMinimumScore: "0",
           QuestionMaximumScore: String(it.maxScore ?? 1),
           QuestionStatus: "Normal",
+          AnswerGiven: answerGivenByKey.get(`${p.id} ${it.id}`) ?? "",
           AnswerScore: String(score),
+          AnswerGivenChoiceNumber: choiceNumberByKey.get(`${p.id} ${it.id}`) ?? "",
+          AnswerResponseTimeSeconds:
+            responseTimeByKey.get(`${p.id} ${it.id}`) !== undefined
+              ? String(responseTimeByKey.get(`${p.id} ${it.id}`))
+              : "",
           AssessmentId: a.id,
           AssessmentName: a.name,
           // Participant identity, carried as its OWN column (the email = the
@@ -1812,7 +1921,8 @@ export class InMemoryDataProvider implements DataProvider {
     // response from that item's cohort psychometrics. With no per-student
     // exclusions this is byte-identical to the seed (parity-verified).
     const live = this.liveItemStats(cycleId, a);
-    const items: ItemRow[] = a.items.map((it) => {
+    const scoredItems = a.items.filter((it) => (it.maxScore ?? 1) >= 1);
+    const items: ItemRow[] = scoredItems.map((it) => {
       const s = live.get(it.id);
       return {
         id: it.id,
@@ -1866,7 +1976,7 @@ export class InMemoryDataProvider implements DataProvider {
       assessment: ref,
       assessments: refs,
       kpis: {
-        items: a.items.length,
+        items: scoredItems.length,
         excluded: excluded.size,
         medianDifficulty,
         cohortMean,
@@ -1881,6 +1991,9 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getItemDetail(cycleId: string, assessmentId: string, itemId: string): ItemDetailModel | null {
+    // Note: unlike getReview(), this still looks up by itemId across all of a.items,
+    // so a Max Score = 0 item is still reachable here even though it no longer
+    // appears as a row in the Review table. Possible follow-up, not fixed here.
     const a = this.assessment(assessmentId);
     if (cycleId !== this.seed.liveCycle.id || !a) return null;
     const index = a.items.findIndex((it) => it.id === itemId);
@@ -2686,7 +2799,26 @@ export class InMemoryDataProvider implements DataProvider {
           if (!subOrder[it.major]!.includes(it.sub)) subOrder[it.major]!.push(it.sub);
         }
       }
-      subjects.push({ assessmentId: a.id, name: a.name, majorElements: majorOrder, subElements: subOrder });
+      // Essay subjects (English/Arabic) carry an offline-marked "Writing" major
+      // element with no MCQ items behind it, so it never appears in `a.items` —
+      // add it here (same detector + label resolver the raw-scores view uses)
+      // or it silently disappears from the report for exactly those subjects.
+      const essayMax = reservedEssayMax(a);
+      const essayWriting = isEssaySubject(a) && essayMax > 0 ? resolveEssayWritingLabel(this.elementLabels, a.name) : null;
+      if (essayWriting) {
+        majorOrder.push(essayWriting.label);
+        // No itemized sub-elements behind an offline essay mark — an explicit
+        // empty list (rather than no entry at all) keeps every major element
+        // uniformly keyed into `subElements`, itemized or not.
+        subOrder[essayWriting.label] ??= [];
+      }
+
+      // Canonical display name (raw→display mapped ONCE, here, right after
+      // reading the source data) so Class Performance and every downstream
+      // consumer of `subjects`/`summarySubjects` key and label this assessment
+      // identically — a raw-scripted name (e.g. the Arabic source name) and its
+      // canonical label never diverge into "two subjects" again.
+      subjects.push({ assessmentId: a.id, name: canonicalSubjectName(a.name), majorElements: majorOrder, subElements: subOrder });
 
       const excluded = this.excludedSet(cycleId, a.id);
       // accumulate raw/n per (participant, major) and per (participant, major, sub)
@@ -2724,6 +2856,17 @@ export class InMemoryDataProvider implements DataProvider {
         }
         pMap.set(pid, lvls);
       }
+      // Classify the essay "Writing" mark into the same performance-level scale
+      // (the subject's own boundary cuts), the same way every MCQ major element
+      // above was classified — so it shows a real level, not a blank cell.
+      if (essayWriting) {
+        for (const m of this.essayMarksFor(cycleId, a.id)) {
+          const pct = (m.mark / essayMax) * 100;
+          const lvls = pMap.get(m.participantId) ?? new Map<string, string>();
+          lvls.set(essayWriting.label, classify(pct, perfLevels, cuts));
+          pMap.set(m.participantId, lvls);
+        }
+      }
       elementLevelByP.set(a.id, pMap);
 
       const pSubMap = new Map<string, Map<string, Map<string, string>>>();
@@ -2760,16 +2903,15 @@ export class InMemoryDataProvider implements DataProvider {
       return { participantId: row.id, name: row.label, award: row.award, subjects: sub };
     });
 
-    // canonical Student-Summary columns mapped by subject alias (keyword)
+    // The five canonical Student-Summary columns, resolved through the SAME
+    // catalog matcher `subjects` above was canonicalised with (never a second,
+    // hand-rolled alias regex) — so a raw name that only that matcher
+    // recognises (e.g. an Arabic-script name) still finds its assessment here.
     const refs = grades.assessments;
-    const aliasFor = (re: RegExp) => refs.find((r) => re.test(r.id) || re.test(r.name))?.id ?? null;
-    const summarySubjects: PerfReportSummarySubject[] = [
-      { label: "Applicable Maths", assessmentId: aliasFor(/applicable math/i) },
-      { label: "Scientific Thinking", assessmentId: aliasFor(/scientific/i) },
-      { label: "Arabic 1st Language", assessmentId: aliasFor(/arabic/i) },
-      { label: "English 2nd Language", assessmentId: aliasFor(/english/i) },
-      { label: "Life Success Skills", assessmentId: aliasFor(/life/i) },
-    ];
+    const summarySubjects: PerfReportSummarySubject[] = SUBJECT_CATALOG.map((cat) => ({
+      label: cat.name,
+      assessmentId: refs.find((r) => cat.matchesRawName(r.name))?.id ?? null,
+    }));
 
     const n = grades.rows.length;
     const awardDistribution = grades.distribution.map((d) => ({
@@ -3633,16 +3775,22 @@ export class InMemoryDataProvider implements DataProvider {
     const items: ItemMeta[] = [];
     for (const a of this.seed.liveCycle.assessments) {
       const excluded = this.excludedSet(cycleId, a.id);
+      // Never-scored (Max Score = 0) items — instructions/stimuli — never entered
+      // scoring either (getRawData/getNaiveScores apply the same maxScore>=1 gate),
+      // so they're dropped here too, before the exclusion filter below.
+      const scoredItemIds = new Set(
+        a.items.filter((it) => !excluded.has(it.id) && (it.maxScore ?? 1) >= 1).map((it) => it.id),
+      );
       // responsesOf already drops participants removed at the Clean stage, so the
       // cohort α is computed over reflects the cleaned set — the same way scoring
       // does. (excludedSet also folds in Clean-stage column removals.) This is what
       // makes a Clean change propagate into the reliability output.
       for (const r of this.responsesOf(a)) {
-        if (excluded.has(r.itemId)) continue;
+        if (!scoredItemIds.has(r.itemId)) continue;
         responses.push(r);
       }
       for (const it of a.items) {
-        if (excluded.has(it.id)) continue;
+        if (!scoredItemIds.has(it.id)) continue;
         items.push({
           itemId: it.id,
           assessmentId: a.id,
@@ -3751,10 +3899,41 @@ export class InMemoryDataProvider implements DataProvider {
     const stats: ItemStat[] = [];
     const facts: ItemResponseFact[] = [];
     const reviews: Record<string, ItemReviewDecision> = {};
+    const items: ItemMeta[] = [];
     for (const a of this.seed.liveCycle.assessments) {
-      stats.push(...engine.computeItemStats({ responses: this.responsesOf(a), scoringConfig: this.scoringConfig() }));
+      // Pass item metadata through so ItemStat carries wording/majorElement/
+      // subElement/demandLevel (the export reads these columns straight off the
+      // stat — see lib/export/item-analysis.ts). Without `items` here the engine
+      // has nothing to key metadata off and those columns render blank.
+      const aItemMetas = this.itemMetasFor(a);
+      stats.push(
+        ...engine.computeItemStats({
+          responses: this.responsesOf(a),
+          items: aItemMetas,
+          scoringConfig: this.scoringConfig(),
+        }),
+      );
+      // Carried through so assembleItemAnalysis can exclude maxScore:0
+      // stimulus/instruction items (STIMULUS_ITEM) from every row and
+      // aggregate — see lib/clean/flags.ts `isScoredItem`.
+      items.push(...aItemMetas);
       const excluded = this.excludedSet(cycleId, a.id);
-      for (const r of a.responses) facts.push({ assessmentId: a.id, itemId: r.i, participantId: r.p, answered: true, responseTime: null });
+      // Per-item average response time, already computed at hydration time from
+      // the real `responses.response_time` column (see supabase-hydrate.ts /
+      // build-live-cycle.ts). SeedResponse carries no per-response time, so the
+      // known item-level average is threaded onto every fact for that item —
+      // averaging it back out in assembleItemAnalysis reproduces the same value
+      // without re-deriving it from anything.
+      const avgTimeByItem = new Map(a.items.map((it) => [it.id, it.avgResponseTime]));
+      for (const r of a.responses) {
+        facts.push({
+          assessmentId: a.id,
+          itemId: r.i,
+          participantId: r.p,
+          answered: r.a !== false,
+          responseTime: avgTimeByItem.get(r.i) ?? null,
+        });
+      }
       for (const it of a.items) {
         if (excluded.has(it.id)) reviews[it.id] = { exclude: true, reason: this.reasons.get(`${cycleId}:${a.id}:${it.id}`) ?? null };
       }
@@ -3765,24 +3944,46 @@ export class InMemoryDataProvider implements DataProvider {
       stats,
       facts,
       reviews,
+      qualityThresholds: this.scoringConfig().quality,
+      items,
     };
   }
 
+  /**
+   * Assessment Health diagnostics, recomputed live from each assessment's CURRENT
+   * `items`/`responses` on every read — never the static ingest-time snapshot
+   * (`this.seed.liveCycle.diagnostics`) — so a Clean-stage participant removal
+   * (per-subject `setCleanRemoval` or cohort-wide `excludeParticipantFromCohort`)
+   * is reflected immediately, the same way `getReliability`/`getNaiveScores`
+   * already recompute over `responsesOf`'s corrected cohort.
+   */
   getDiagnostics(cycleId: string): DiagnosticsModel | null {
     if (cycleId !== this.seed.liveCycle.id) return null;
-    const shortOf = new Map(this.seed.liveCycle.assessments.map((a) => [a.id, a.shortName]));
+    const cohortExcluded = this.cohortExcludedSet();
     return {
       cycleId,
-      assessments: (this.seed.liveCycle.diagnostics ?? []).map((d) => ({
-        assessmentId: d.assessmentId,
-        assessmentName: d.assessmentName,
-        shortName: shortOf.get(d.assessmentId) ?? d.assessmentName,
-        whole: d.whole,
-        byDemand: d.byDemand,
-        byItemSet: d.byItemSet,
-        timingByDemand: d.timingByDemand,
-        omissionByPosition: d.omissionByPosition,
-      })),
+      assessments: this.seed.liveCycle.assessments.map((a) => {
+        const removed = this.cleanRowSet(a.id);
+        const excludedParticipantIds = removed && removed.size ? new Set([...removed, ...cohortExcluded]) : cohortExcluded;
+        const cleanDiag = cleanDiagResponses(this.diagResponsesFor(a), { excludedParticipantIds });
+        // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER): gate
+        // timingPerformance()'s internal [TEMP-DEBUG] logging to this one
+        // assessment, then reset immediately so nothing else logs.
+        const __tempDebugTarget = __tempDebugIsTargetAssessment(a);
+        if (__tempDebugTarget) __setTempDebugTimingLabel(a.name);
+        const d = buildAssessmentDiagnostics(cleanDiag);
+        if (__tempDebugTarget) __setTempDebugTimingLabel(null);
+        return {
+          assessmentId: a.id,
+          assessmentName: a.name,
+          shortName: a.shortName,
+          whole: d.whole,
+          byDemand: d.byDemand,
+          byItemSet: d.byItemSet,
+          timingByDemand: d.timingByDemand,
+          omissionByPosition: d.omissionByPosition,
+        };
+      }),
     };
   }
 
