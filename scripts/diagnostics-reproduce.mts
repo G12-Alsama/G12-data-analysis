@@ -40,6 +40,7 @@ const records: DiagResponse[] = cleanDiagResponses(
     itemId: r.qmQuestionId,
     demandLevel: r.demandLevel,
     itemSet: r.itemSet,
+    majorElement: r.majorElement,
     order: itemOrder.get(r.qmQuestionId)!,
     // AnswerGiven carries QM's "<Not defined>" sentinel for an unanswered item
     // (truthy), so omission/speededness/timing key off AnswerGivenChoiceNumber,

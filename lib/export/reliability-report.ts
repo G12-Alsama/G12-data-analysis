@@ -10,12 +10,12 @@
  * for the additive fields: Spearman-Brown, average inter-item correlation,
  * total participants, item-response counts, status/interpretation bands).
  *
- * Two sheets have no data source in this app and are intentionally left as
- * structure-only with an explanatory note rather than fabricated numbers —
- * see NOT_SOURCED_NOTE below.
+ * Column widths, merge spans, freeze panes and tab color are hardcoded from
+ * the original files (per-sheet, not derived from any auto-fit heuristic) —
+ * see verify_fidelity.py in the PR for how these were checked.
  */
 import type { ReliabilityModel, ReliabilityRow } from "@/lib/data/types";
-import { XLSX, styleCell, type CellStyle } from "./sheet-utils";
+import { XLSX, styleCell, setColumnWidths, type CellStyle } from "./sheet-utils";
 import { applyConditionalFormatting, rangeRef, type SheetCf } from "./ooxml-cf";
 
 export const RELIABILITY_SHEETS = [
@@ -33,6 +33,8 @@ export interface ReliabilityReportInput {
 }
 
 const DEMAND_ORDER = ["D1", "D2", "D3"] as const;
+const FREEZE_A5 = { ySplit: 4, topLeftCell: "A5" } as const;
+const TAB_COLOR = "FFB2375B";
 
 // --- styling (matches the original workbook's palette/fonts) ---------------
 
@@ -64,6 +66,8 @@ const DATA_STYLE: CellStyle = {
   alignment: { horizontal: "center", vertical: "center", wrapText: true },
   border: { bottom: THIN_DATA_BORDER },
 };
+const README_TOPIC_HEADER_STYLE: CellStyle = { font: { bold: true } };
+const README_SECTION_STYLE: CellStyle = { font: { bold: true, sz: 12 } };
 
 const FMT_ALPHA = "0.000";
 const FMT_MULT = "0.00";
@@ -88,18 +92,13 @@ function setNumberFormat(ws: XLSX.WorkSheet, r: number, c: number, fmt: string):
  * `participants` picks whether the sheet shows one participant count (Overall
  * — "all assessments together" has no separate complete-case notion worth a
  * second column) or two (every other sheet: raw attempts + complete-case n),
- * matching the originals exactly. */
+ * matching the originals exactly. Unsourceable/undefined metrics are left as
+ * `null` (a genuinely blank cell), never a placeholder string, so they never
+ * sit as text inside a numerically-formatted column. */
 function metricCells(row: ReliabilityRow, participants: "single" | "dual", includeAvgInterItem: boolean): unknown[] {
   const cells: unknown[] = participants === "single" ? [row.totalParticipants] : [row.totalParticipants, row.n];
-  cells.push(
-    row.k,
-    row.itemResponses,
-    row.alpha ?? "n/a",
-    row.spearmanBrown ?? "n/a",
-    row.sbMultiplier80 ?? "n/a",
-    row.sbMultiplier90 ?? "n/a",
-  );
-  if (includeAvgInterItem) cells.push(row.avgInterItemCorrelation ?? "n/a");
+  cells.push(row.k, row.itemResponses, row.alpha, row.spearmanBrown, row.sbMultiplier80, row.sbMultiplier90);
+  if (includeAvgInterItem) cells.push(row.avgInterItemCorrelation);
   cells.push(row.status, row.interpretation);
   return cells;
 }
@@ -121,54 +120,78 @@ function metricHeaders(participants: "single" | "dual", includeAvgInterItem: boo
   return [...head, ...(includeAvgInterItem ? METRIC_TAIL_WITH_AVG : METRIC_TAIL_NO_AVG)];
 }
 
-function readmeSheet(cycleName: string): XLSX.WorkSheet {
-  const aoa: unknown[][] = [
-    ["G12++ MCQ Reliability & Internal Consistency Analysis"],
-    [],
-    [`Purpose — ${cycleName}`],
-    ["This workbook evaluates how consistently MCQ items work together using Cronbach's Alpha and Spearman-Brown reliability indicators."],
-    [],
-    ["Topic", "Explanation"],
-    ["Analysis Levels", "Overall, Assessment Level, Assessment × Major Element, Demand Level, and Assessment × Demand Level."],
-    ["Cronbach's Alpha", "Internal-consistency coefficient. Higher values indicate that items are more consistently measuring the same score construct."],
-    ["Spearman-Brown Reliability if Test Length Doubled", "Predicted reliability if the test section length were doubled with similar-quality items: SB = (2 × Alpha) / (1 + Alpha)."],
-    ["Spearman-Brown Multiplier to Reach 0.80 / 0.90", "Estimated test length multiplier needed to reach the target reliability: n = target × (1 - Alpha) / [Alpha × (1 - target)]."],
-    ["Important Caution", "Small cohorts make major-element and demand-level reliability estimates unstable — treat them as screening evidence, not final psychometric proof."],
-    [],
-    [],
-    ["Reliability Status Thresholds"],
-    ["Alpha Range", "Status", "Interpretation", "Recommended Use"],
-    ["≥ 0.90", "Excellent", "Very strong consistency", "Use confidently; check redundancy if extremely high"],
-    ["0.80 – 0.89", "Good", "Strong consistency", "Suitable for group-level reporting"],
-    ["0.70 – 0.79", "Acceptable", "Adequate consistency", "Generally usable with normal caution"],
-    ["0.60 – 0.69", "Questionable", "Limited consistency", "Use cautiously and review alignment"],
-    ["< 0.60", "Flag / Low", "Weak consistency", "Review item quality, construct alignment, and sample size"],
-  ];
+/** README's exact original layout (title, Purpose label + paragraph, topic
+ * table, status-threshold table), built with a running row index so a
+ * merge/style can never drift out of sync with what it's meant to decorate —
+ * see lib/export/ooxml-cf.ts's schema-order lesson for why hardcoded row
+ * numbers are the thing to avoid here. */
+function readmeSheet(): XLSX.WorkSheet {
+  const aoa: unknown[][] = [];
+  const merges: { s: { r: number; c: number }; e: { r: number; c: number } }[] = [];
+  const styled: { r0: number; c0: number; r1: number; c1: number; style: CellStyle }[] = [];
+  let row = 0;
+  const push = (cells: unknown[]): number => {
+    aoa.push(cells);
+    return row++;
+  };
+  const mergeFull = (r: number, c1: number): void => { merges.push({ s: { r, c: 0 }, e: { r, c: c1 } }); };
+
+  const titleRow = push(["G12++ MCQ Reliability & Internal Consistency Analysis"]);
+  mergeFull(titleRow, 8);
+  styled.push({ r0: titleRow, c0: 0, r1: titleRow, c1: 8, style: TITLE_STYLE });
+
+  const purposeLabelRow = push(["Purpose"]);
+  mergeFull(purposeLabelRow, 8);
+  styled.push({ r0: purposeLabelRow, c0: 0, r1: purposeLabelRow, c1: 8, style: SUBTITLE_STYLE });
+
+  const purposeTextRow = push(["This workbook evaluates how consistently MCQ items work together using Cronbach's Alpha and Spearman-Brown reliability indicators."]);
+  mergeFull(purposeTextRow, 8);
+  styled.push({ r0: purposeTextRow, c0: 0, r1: purposeTextRow, c1: 8, style: SUBTITLE_STYLE });
+
+  push([]);
+
+  const topicHeaderRow = push(["Topic", "Explanation"]);
+  styled.push({ r0: topicHeaderRow, c0: 0, r1: topicHeaderRow, c1: 1, style: README_TOPIC_HEADER_STYLE });
+  push(["Analysis Levels", "Overall, Assessment Level, Assessment × Major Element, Demand Level, and Assessment × Demand Level."]);
+  push(["Cronbach's Alpha", "Internal-consistency coefficient. Higher values indicate that items are more consistently measuring the same score construct."]);
+  push(["Spearman-Brown Reliability if Test Length Doubled", "Predicted reliability if the test section length were doubled with similar-quality items: SB = (2 × Alpha) / (1 + Alpha)."]);
+  push(["Spearman-Brown Multiplier to Reach 0.80 / 0.90", "Estimated test length multiplier needed to reach the target reliability: n = target × (1 - Alpha) / [Alpha × (1 - target)]."]);
+  push(["Important Caution", "Small cohorts make major-element and demand-level reliability estimates unstable — treat them as screening evidence, not final psychometric proof."]);
+
+  push([]);
+  push([]);
+
+  const statusSectionRow = push(["Reliability Status Thresholds"]);
+  mergeFull(statusSectionRow, 3);
+  styled.push({ r0: statusSectionRow, c0: 0, r1: statusSectionRow, c1: 0, style: README_SECTION_STYLE });
+
+  const statusHeaderRow = push(["Alpha Range", "Status", "Interpretation", "Recommended Use"]);
+  styled.push({ r0: statusHeaderRow, c0: 0, r1: statusHeaderRow, c1: 3, style: HEADER_STYLE });
+  push(["≥ 0.90", "Excellent", "Very strong consistency", "Use confidently; check redundancy if extremely high"]);
+  push(["0.80 – 0.89", "Good", "Strong consistency", "Suitable for group-level reporting"]);
+  push(["0.70 – 0.79", "Acceptable", "Adequate consistency", "Generally usable with normal caution"]);
+  push(["0.60 – 0.69", "Questionable", "Limited consistency", "Use cautiously and review alignment"]);
+  push(["< 0.60", "Flag / Low", "Weak consistency", "Review item quality, construct alignment, and sample size"]);
+
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: 8 } },
-    { s: { r: 2, c: 0 }, e: { r: 2, c: 8 } },
-    { s: { r: 3, c: 0 }, e: { r: 3, c: 8 } },
-    { s: { r: 12, c: 0 }, e: { r: 12, c: 3 } },
-  ];
-  styleRange(ws, 0, 0, 0, 8, TITLE_STYLE);
-  styleRange(ws, 2, 0, 3, 8, SUBTITLE_STYLE);
-  styleRange(ws, 5, 0, 5, 1, HEADER_STYLE);
-  styleRange(ws, 13, 0, 13, 0, { font: { bold: true, sz: 12 } });
-  styleRange(ws, 14, 0, 14, 3, HEADER_STYLE);
-  ws["!cols"] = [{ wch: 44 }, { wch: 90 }, { wch: 30 }, { wch: 36 }];
+  ws["!merges"] = merges;
+  for (const s of styled) styleRange(ws, s.r0, s.c0, s.r1, s.c1, s.style);
+  setColumnWidths(ws, { A: 44.109375, B: 101.88671875, C: 30.0, D: 36.0, E: 12.0 }, 9);
   return ws;
 }
 
 /** Build one metrics sheet (Overall / By_Assessment / By_Assessment_Major /
  * By_Demand_Level / By_Assessment_Demand) — same title/header/data styling,
- * only the leading label column(s) and row set differ. */
+ * only the leading label column(s), row set, and per-sheet layout constants
+ * (titleMergeEndCol, columnWidths) differ. */
 function metricsSheet(opts: {
   title: string;
   subtitle: string;
   labelHeaders: readonly string[];
   participants: "single" | "dual";
   includeAvgInterItem: boolean;
+  titleMergeEndCol: number;
+  columnWidths: Record<string, number>;
   rows: { labels: unknown[]; row: ReliabilityRow }[];
 }): { ws: XLSX.WorkSheet; alphaCol: number; sbRelCol: number; statusCol: number } {
   const headers = [...opts.labelHeaders, ...metricHeaders(opts.participants, opts.includeAvgInterItem)];
@@ -179,8 +202,8 @@ function metricsSheet(opts: {
   }
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: Math.min(lastCol, 6) } },
-    { s: { r: 1, c: 0 }, e: { r: 1, c: Math.min(lastCol, 6) } },
+    { s: { r: 0, c: 0 }, e: { r: 0, c: opts.titleMergeEndCol } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: opts.titleMergeEndCol } },
   ];
   styleRange(ws, 0, 0, 0, lastCol, TITLE_STYLE);
   styleRange(ws, 1, 0, 1, lastCol, SUBTITLE_STYLE);
@@ -202,7 +225,7 @@ function metricsSheet(opts: {
     setNumberFormat(ws, r, sb90Col, FMT_MULT);
     if (avgCol >= 0) setNumberFormat(ws, r, avgCol, FMT_ALPHA);
   }
-  ws["!cols"] = headers.map((h) => ({ wch: Math.min(55, Math.max(14, String(h).length + 2)) }));
+  setColumnWidths(ws, opts.columnWidths, headers.length);
   return { ws, alphaCol, sbRelCol, statusCol };
 }
 
@@ -214,6 +237,8 @@ function reliabilityCf(sheetIndex: number, firstRow: number, lastRow: number, al
   const statusCell = `$${XLSX.utils.encode_col(statusCol)}${firstRow}`;
   return {
     sheetIndex,
+    freeze: FREEZE_A5,
+    tabColor: TAB_COLOR,
     rules: [
       { kind: "cellIs", sqref: valueRange, operator: "greaterThanOrEqual", formula: ["0.8"], dxf: { fillColor: "FFDDEAD6", fillAttr: "fg" } },
       { kind: "cellIs", sqref: valueRange, operator: "between", formula: ["0.6", "0.799999"], dxf: { fillColor: "FFFFF2CC", fillAttr: "fg" } },
@@ -248,39 +273,47 @@ export interface ReliabilityBuildResult {
 
 export function buildReliabilityWorkbook(input: ReliabilityReportInput): ReliabilityBuildResult {
   const wb = XLSX.utils.book_new();
-  const cfSheets: SheetCf[] = [];
+  const cfSheets: SheetCf[] = [{ sheetIndex: 0, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR }];
   const r = input.reliability;
 
-  XLSX.utils.book_append_sheet(wb, readmeSheet(input.cycleName), "README");
+  XLSX.utils.book_append_sheet(wb, readmeSheet(), "README");
 
   // Overall (no Average Inter-Item Correlation column — matches the original).
   const overallRows = r ? r.rows.filter((row) => row.level === "overall") : [];
   const overall = metricsSheet({
-    title: `Overall Reliability: All Assessments Together — ${input.cycleName}`,
+    title: "Overall Reliability: All Assessments Together",
     subtitle: "Combines all MCQ items across assessments using unique AssessmentName × QuestionId item keys.",
     labelHeaders: ["Scope"],
     participants: "single",
     includeAvgInterItem: false,
+    titleMergeEndCol: 6,
+    columnWidths: { A: 32.0, B: 25.0, C: 18.0, D: 29.109375, E: 21.0, F: 45.0, G: 42.0, I: 15.0, J: 55.0 },
     rows: overallRows.map((row) => ({ labels: ["All Assessments Together"], row })),
   });
   XLSX.utils.book_append_sheet(wb, overall.ws, "Overall");
   if (overallRows.length > 0) {
     cfSheets.push(reliabilityCf(1, 5, 4 + overallRows.length, overall.alphaCol, overall.sbRelCol, overall.statusCol));
+  } else {
+    cfSheets.push({ sheetIndex: 1, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR });
   }
 
   // By_Assessment (no Average Inter-Item Correlation column).
   const subjectRows = r ? r.rows.filter((row) => row.level === "subject") : [];
   const bySubject = metricsSheet({
-    title: `Assessment Level Reliability — ${input.cycleName}`,
+    title: "Assessment Level Reliability",
     subtitle: "Cronbach's Alpha and Spearman-Brown indicators calculated separately for each assessment.",
     labelHeaders: ["AssessmentName"],
     participants: "dual",
     includeAvgInterItem: false,
+    titleMergeEndCol: 5,
+    columnWidths: { A: 34.0, B: 25.0, C: 34.0, D: 18.0, E: 27.0, F: 25.0, G: 45.0, H: 42.0, I: 41.33203125, J: 15.0, K: 104.5546875 },
     rows: subjectRows.map((row) => ({ labels: [row.assessmentName ?? row.label], row })),
   });
   XLSX.utils.book_append_sheet(wb, bySubject.ws, "By_Assessment");
   if (subjectRows.length > 0) {
     cfSheets.push(reliabilityCf(2, 5, 4 + subjectRows.length, bySubject.alphaCol, bySubject.sbRelCol, bySubject.statusCol));
+  } else {
+    cfSheets.push({ sheetIndex: 2, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR });
   }
 
   // By_Assessment_Major — grouped by assessment (appearance order), major element alphabetical within.
@@ -291,32 +324,40 @@ export function buildReliabilityWorkbook(input: ReliabilityReportInput): Reliabi
     majorOrdered.push(...[...group].sort((a, b) => a.label.localeCompare(b.label)));
   }
   const byMajor = metricsSheet({
-    title: `Major Element Level Reliability — ${input.cycleName}`,
+    title: "Major Element Level Reliability",
     subtitle: "Reliability indicators calculated by Assessment × QuestionMajorElement.",
     labelHeaders: ["AssessmentName", "QuestionMajorElement"],
     participants: "dual",
     includeAvgInterItem: true,
+    titleMergeEndCol: 5,
+    columnWidths: { A: 34.0, B: 31.0, C: 25.0, D: 34.0, E: 18.0, F: 27.0, G: 24.0, H: 45.0, I: 42.0, K: 33.0, L: 15.0, M: 104.5546875 },
     rows: majorOrdered.map((row) => ({ labels: [row.assessmentName ?? "", row.label], row })),
   });
   XLSX.utils.book_append_sheet(wb, byMajor.ws, "By_Assessment_Major");
   if (majorOrdered.length > 0) {
     cfSheets.push(reliabilityCf(3, 5, 4 + majorOrdered.length, byMajor.alphaCol, byMajor.sbRelCol, byMajor.statusCol));
+  } else {
+    cfSheets.push({ sheetIndex: 3, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR });
   }
 
   // By_Demand_Level — cross-assessment (assessmentId null), fixed D1→D3 order.
   const demandAllRows = r ? r.rows.filter((row) => row.level === "demandLevel" && row.assessmentId === null) : [];
   const demandAllOrdered = sortByDemand(demandAllRows.map((row) => ({ demand: row.label, row })));
   const byDemand = metricsSheet({
-    title: `Demand Level Reliability — ${input.cycleName}`,
+    title: "Demand Level Reliability",
     subtitle: "Reliability indicators calculated across all assessments by DemandLevel.",
     labelHeaders: ["DemandLevel"],
     participants: "dual",
     includeAvgInterItem: true,
+    titleMergeEndCol: 4,
+    columnWidths: { A: 14.0, B: 25.0, C: 34.0, D: 18.0, E: 27.0, F: 22.0, G: 45.0, H: 42.0, J: 33.0, K: 15.0, L: 54.5546875 },
     rows: demandAllOrdered.map(({ demand, row }) => ({ labels: [demand], row })),
   });
   XLSX.utils.book_append_sheet(wb, byDemand.ws, "By_Demand_Level");
   if (demandAllOrdered.length > 0) {
     cfSheets.push(reliabilityCf(4, 5, 4 + demandAllOrdered.length, byDemand.alphaCol, byDemand.sbRelCol, byDemand.statusCol));
+  } else {
+    cfSheets.push({ sheetIndex: 4, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR });
   }
 
   // By_Assessment_Demand — grouped by assessment (appearance order), D1→D3 within.
@@ -327,11 +368,13 @@ export function buildReliabilityWorkbook(input: ReliabilityReportInput): Reliabi
     assessmentDemandOrdered.push(...sortByDemand(group.map((row) => ({ demand: row.label, row }))).map((x) => x.row));
   }
   const byAssessmentDemand = metricsSheet({
-    title: `Assessment × Demand Level Reliability — ${input.cycleName}`,
+    title: "Assessment × Demand Level Reliability",
     subtitle: "Additional diagnostic table showing reliability within each Assessment × DemandLevel.",
     labelHeaders: ["AssessmentName", "DemandLevel"],
     participants: "dual",
     includeAvgInterItem: true,
+    titleMergeEndCol: 8,
+    columnWidths: { A: 34.0, B: 14.0, C: 25.0, D: 34.0, E: 18.0, F: 27.0, G: 23.0, H: 45.0, I: 42.0, K: 33.0, L: 13.0, M: 54.77734375 },
     rows: assessmentDemandOrdered.map((row) => ({ labels: [row.assessmentName ?? "", row.label], row })),
   });
   XLSX.utils.book_append_sheet(wb, byAssessmentDemand.ws, "By_Assessment_Demand");
@@ -339,6 +382,8 @@ export function buildReliabilityWorkbook(input: ReliabilityReportInput): Reliabi
     cfSheets.push(
       reliabilityCf(5, 5, 4 + assessmentDemandOrdered.length, byAssessmentDemand.alphaCol, byAssessmentDemand.sbRelCol, byAssessmentDemand.statusCol),
     );
+  } else {
+    cfSheets.push({ sheetIndex: 5, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR });
   }
 
   return {

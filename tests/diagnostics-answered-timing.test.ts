@@ -32,7 +32,7 @@ function r(
   correct: boolean,
   responseTime: number | null,
 ): DiagResponse {
-  return { participantId, itemId, demandLevel: null, itemSet: null, order: 0, answered, correct, responseTime };
+  return { participantId, itemId, demandLevel: null, itemSet: null, majorElement: null, order: 0, answered, correct, responseTime };
 }
 
 describe("timingPerformance() — unanswered-but-timed vs genuinely-missing responseTime", () => {

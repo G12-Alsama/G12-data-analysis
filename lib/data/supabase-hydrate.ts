@@ -589,6 +589,7 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
     for (const r of ordered) if (!orderFallback.has(r.item_id)) orderFallback.set(r.item_id, orderFallback.size);
     const demandByItem = new Map(aItems.map((it) => [it.id, it.demand_level]));
     const itemSetByItem = new Map(aItems.map((it) => [it.id, it.item_set]));
+    const majorByItem = new Map(aItems.map((it) => [it.id, it.major_element]));
     let fallbackOrderCount = 0;
     const diagRecs: DiagResponse[] = diagSourceResp.map((r) => {
       let order = r.question_presented_number;
@@ -601,6 +602,7 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
         itemId: r.item_id,
         demandLevel: demandByItem.get(r.item_id) ?? null,
         itemSet: itemSetByItem.get(r.item_id) ?? null,
+        majorElement: majorByItem.get(r.item_id) ?? null,
         order,
         // answer_given carries QM's "<Not defined>" sentinel for an unanswered item
         // (never null), so omission/speededness/timing key off

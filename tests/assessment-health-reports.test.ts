@@ -100,12 +100,16 @@ describe("Speededness workbook", () => {
     expect(styles).toMatch(/<dxfs count="\d+">/);
   });
 
-  it("marks the unsourced Major Element Level sheet instead of fabricating rows", () => {
+  it("fills the Major Element Level sheet with real speededByMajorElement() rows, not a placeholder", () => {
+    if (!diagnostics || diagnostics.assessments.length === 0) return;
     const ws = built.workbook.Sheets["Major Element Level"]!;
-    expect(ws["A5"]?.v).toBe("Not available");
+    const first = diagnostics.assessments.find((a) => a.byMajorElement.length > 0);
+    if (!first) return;
+    expect(ws["A5"]?.v).toBe(first.assessmentName);
+    expect(ws["B5"]?.v).toBe(first.byMajorElement[0]!.majorElement);
   });
 
-  it("marks Median AnswerResponseTimeSeconds and Overall Accuracy as not sourced on Assessment Level", () => {
+  it("carries the app's own median response time and overall accuracy through to Assessment Level (additive SpeededResult fields)", () => {
     const ws = built.workbook.Sheets["Assessment Level"]!;
     const header: string[] = [];
     for (let c = 0; ws[`${String.fromCharCode(65 + c)}4`]; c++) header.push(String(ws[`${String.fromCharCode(65 + c)}4`]!.v));
@@ -114,8 +118,9 @@ describe("Speededness workbook", () => {
     expect(medianTimeCol).toBeGreaterThanOrEqual(0);
     expect(overallAccCol).toBeGreaterThanOrEqual(0);
     if (diagnostics && diagnostics.assessments.length > 0) {
-      expect(ws[`${String.fromCharCode(65 + medianTimeCol)}5`]?.v).toBe("Not sourced");
-      expect(ws[`${String.fromCharCode(65 + overallAccCol)}5`]?.v).toBe("Not sourced");
+      const first = diagnostics.assessments[0]!;
+      expect(ws[`${String.fromCharCode(65 + medianTimeCol)}5`]?.v).toBe(first.whole.speeded.medianResponseTime ?? undefined);
+      expect(ws[`${String.fromCharCode(65 + overallAccCol)}5`]?.v).toBe(first.whole.speeded.overallAccuracy);
     }
   });
 });
@@ -144,9 +149,13 @@ describe("Timing workbook", () => {
     expect(styles).toMatch(/<dxfs count="\d+">/);
   });
 
-  it("marks the unsourced Major Element Level sheet instead of fabricating rows", () => {
+  it("fills the Major Element Level sheet with real timingByMajorElement() rows, not a placeholder", () => {
+    if (!diagnostics || diagnostics.assessments.length === 0) return;
     const ws = built.workbook.Sheets["Major Element Level"]!;
-    expect(ws["A7"]?.v).toBe("Not available");
+    const first = diagnostics.assessments.find((a) => a.timingByMajorElement.length > 0);
+    if (!first) return;
+    expect(ws["A7"]?.v).toBe(first.assessmentName);
+    expect(ws["B7"]?.v).toBe(first.timingByMajorElement[0]!.majorElement);
   });
 
   it("carries the app's own Pearson/Spearman correlations through to the Assessment Level sheet", () => {
@@ -155,7 +164,7 @@ describe("Timing workbook", () => {
     const first = diagnostics.assessments[0]!;
     // Column K (index 10) is Time–Performance Correlation (Pearson), row 7 is the first data row.
     const cell = ws["K7"];
-    expect(cell?.v).toBe(first.whole.timing.pearson ?? "n/a");
+    expect(cell?.v).toBe(first.whole.timing.pearson ?? undefined);
   });
 });
 

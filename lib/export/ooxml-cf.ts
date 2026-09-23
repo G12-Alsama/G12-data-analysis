@@ -37,6 +37,10 @@ export interface SheetCf {
   /** 0-based index matching the order sheets were appended via book_append_sheet. */
   sheetIndex: number;
   rules: CfRuleSpec[];
+  /** Freeze panes to restore — xlsx-js-style has no `!freeze`/pane support at all. */
+  freeze?: { ySplit: number; topLeftCell: string };
+  /** Sheet tab color (RGB, e.g. "FFB2375B") — also unsupported by xlsx-js-style. */
+  tabColor?: string;
 }
 
 /** An A1 range spanning [c0,r0]..[c1,r1] (0-based columns via XLSX.utils.encode_col,
@@ -134,6 +138,41 @@ function injectDxfs(stylesXml: string, newDxfs: string[]): { xml: string; baseCo
  * come right after mergeCells/sheetData and strictly before every other
  * optional element this module or xlsx-js-style ever writes.
  */
+/**
+ * Insert a frozen-pane `<pane>`/`<selection>` into the sheet's `<sheetView>`.
+ * xlsx-js-style always writes a self-closing `<sheetView .../>` with no
+ * children, so this converts it to an open/close pair with `<pane>` as its
+ * required-first child (CT_SheetView: pane?, selection*, ...).
+ */
+function injectFreeze(sheetXml: string, freeze: { ySplit: number; topLeftCell: string }): string {
+  const pane =
+    `<pane ySplit="${freeze.ySplit}" topLeftCell="${freeze.topLeftCell}" activePane="bottomLeft" state="frozen"/>` +
+    `<selection pane="bottomLeft" activeCell="${freeze.topLeftCell}" sqref="${freeze.topLeftCell}"/>`;
+  const selfClosing = sheetXml.match(/<sheetView([^>]*)\/>/);
+  if (selfClosing) {
+    return sheetXml.replace(selfClosing[0], `<sheetView${selfClosing[1]}>${pane}</sheetView>`);
+  }
+  // Already has children (shouldn't happen from xlsx-js-style, but stay safe):
+  // insert right after the opening <sheetView ...> tag.
+  const openTag = sheetXml.match(/<sheetView[^>]*>/);
+  if (!openTag) return sheetXml;
+  const idx = sheetXml.indexOf(openTag[0]) + openTag[0].length;
+  return sheetXml.slice(0, idx) + pane + sheetXml.slice(idx);
+}
+
+/**
+ * Insert `<sheetPr><tabColor rgb="..."/></sheetPr>` as the first child of
+ * `<worksheet>` — CT_Worksheet requires `sheetPr` (when present) before
+ * everything else, including `dimension`.
+ */
+function injectTabColor(sheetXml: string, rgb: string): string {
+  const tag = `<sheetPr><tabColor rgb="${rgb}"/></sheetPr>`;
+  const openTag = sheetXml.match(/<worksheet[^>]*>/);
+  if (!openTag) return sheetXml;
+  const idx = sheetXml.indexOf(openTag[0]) + openTag[0].length;
+  return sheetXml.slice(0, idx) + tag + sheetXml.slice(idx);
+}
+
 function injectSheetCf(sheetXml: string, cfXml: string): string {
   if (cfXml === "") return sheetXml;
   for (const closeTag of ["</mergeCells>", "</sheetData>"]) {
@@ -177,22 +216,27 @@ export async function applyConditionalFormatting(
   zip.file("xl/styles.xml", patchedStyles);
 
   for (const sheet of sheets) {
-    if (sheet.rules.length === 0) continue;
+    if (sheet.rules.length === 0 && !sheet.freeze && !sheet.tabColor) continue;
     const path = `xl/worksheets/sheet${sheet.sheetIndex + 1}.xml`;
     const sheetFile = zip.file(path);
     if (!sheetFile) throw new Error(`applyConditionalFormatting: ${path} missing from workbook`);
-    const sheetXml = await sheetFile.async("string");
+    let sheetXml = await sheetFile.async("string");
 
-    const groups = groupBySqref(sheet.rules);
-    let priority = 1;
-    const blocks: string[] = [];
-    for (const [sqref, rules] of groups) {
-      const inner = rules
-        .map((r) => cfRuleXml(r, priority++, r.kind === "colorScale" ? null : baseCount + dxfIdOf.get(r)!))
-        .join("");
-      blocks.push(`<conditionalFormatting sqref="${sqref}">${inner}</conditionalFormatting>`);
+    if (sheet.rules.length > 0) {
+      const groups = groupBySqref(sheet.rules);
+      let priority = 1;
+      const blocks: string[] = [];
+      for (const [sqref, rules] of groups) {
+        const inner = rules
+          .map((r) => cfRuleXml(r, priority++, r.kind === "colorScale" ? null : baseCount + dxfIdOf.get(r)!))
+          .join("");
+        blocks.push(`<conditionalFormatting sqref="${sqref}">${inner}</conditionalFormatting>`);
+      }
+      sheetXml = injectSheetCf(sheetXml, blocks.join(""));
     }
-    zip.file(path, injectSheetCf(sheetXml, blocks.join("")));
+    if (sheet.freeze) sheetXml = injectFreeze(sheetXml, sheet.freeze);
+    if (sheet.tabColor) sheetXml = injectTabColor(sheetXml, sheet.tabColor);
+    zip.file(path, sheetXml);
   }
 
   return zip.generateAsync({ type: "uint8array" });

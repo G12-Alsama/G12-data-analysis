@@ -3,25 +3,24 @@
  * original `Timing_Performance_Analysis_*.xlsx` manual analysis. Three
  * sheets: "README", "Assessment Level", "Major Element Level".
  *
- * This app's TimingResult (lib/diagnostics/index.ts) only carries the
- * correlation pair (Pearson/Spearman between median item time and score %)
- * plus the student count — no raw response-time or score aggregate reaches
- * it. Number of Items/Item Responses are cross-referenced from the sibling
- * SpeededResult for the same assessment (already computed off the same
- * response set); Number of Participants from the sibling ReliabilityRow.
- * Median/mean response-time figures, the score-percentage aggregates, median
- * completion rate, and the separate "Total Time–Performance Correlation"
- * have no source anywhere in the app and are written as the literal text
- * "Not sourced" rather than fabricated.
- *
- * The "Major Element Level" sheet has no data source at all — the
- * diagnostics pipeline's DiagResponse records carry a demand-level and an
- * item-set tag but no major-element tag. It keeps the original's exact
- * header/style/CF shape with one explanatory row instead of fabricated rows.
+ * Every metric here is real, sourced data. The seven aggregates that used to
+ * ship as "Not sourced" (median/mean response time, total response time,
+ * mean/median score %, median completion rate, the total-time correlation)
+ * are additive fields on TimingResult (lib/diagnostics/index.ts) — all pure
+ * derivations of the SAME per-student `medTime`/`scorePct` arrays
+ * `timingPerformance()` already builds to compute its Pearson/Spearman
+ * pair, just newly returned instead of discarded. The Major Element Level
+ * sheet is real data too, from `timingByMajorElement()` — the majorElement
+ * tag is the same curriculum-content-area field lib/engine/reliability.ts
+ * already groups its own By_Assessment_Major sheet by, just newly plumbed
+ * onto DiagResponse. Number of Items/Item Responses are cross-referenced
+ * from the sibling SpeededResult for the same (assessment, major element)
+ * group — already computed off the same response set; Number of
+ * Participants from the sibling ReliabilityRow.
  */
 import type { DiagnosticsModel, ReliabilityModel } from "@/lib/data/types";
 import type { TimingResult } from "@/lib/diagnostics";
-import { XLSX, styleCell, type CellStyle } from "./sheet-utils";
+import { XLSX, styleCell, setColumnWidths, type CellStyle } from "./sheet-utils";
 import { applyConditionalFormatting, rangeRef, type SheetCf } from "./ooxml-cf";
 
 export const TIMING_SHEETS = ["README", "Assessment Level", "Major Element Level"] as const;
@@ -32,7 +31,8 @@ export interface TimingReportInput {
   diagnostics: DiagnosticsModel | null;
 }
 
-const NOT_SOURCED = "Not sourced";
+const FREEZE_A7 = { ySplit: 6, topLeftCell: "A7" } as const;
+const TAB_COLOR = "FFB2375B";
 
 const TITLE_STYLE: CellStyle = {
   font: { name: "Barlow Semi Condensed", sz: 18, bold: true, color: { rgb: "FF25232E" } },
@@ -49,6 +49,7 @@ const DATA_STYLE: CellStyle = {
   font: { name: "Barlow", sz: 10 },
   alignment: { horizontal: "center" },
 };
+const README_SECTION_STYLE: CellStyle = { font: { bold: true, sz: 13 } };
 
 function styleRange(ws: XLSX.WorkSheet, r0: number, c0: number, r1: number, c1: number, style: CellStyle): void {
   for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) styleCell(ws, r, c, style);
@@ -96,52 +97,86 @@ const ROW_HEADERS = [
   "Total Time–Performance Correlation (Pearson)", "Correlation Strength", "Review Status", "Interpretation",
 ] as const;
 
-function rowCells(participants: number | string, items: number, itemResponses: number, timing: TimingResult): unknown[] {
+function rowCells(participants: number | null, items: number, itemResponses: number, timing: TimingResult): unknown[] {
   return [
     participants,
     items,
     itemResponses,
-    NOT_SOURCED, NOT_SOURCED, NOT_SOURCED,
-    NOT_SOURCED, NOT_SOURCED, NOT_SOURCED,
-    timing.pearson ?? "n/a",
-    timing.spearman ?? "n/a",
-    NOT_SOURCED,
+    timing.medianResponseTimePerItem,
+    timing.meanResponseTimePerItem,
+    timing.medianTotalResponseTime,
+    timing.meanScorePct,
+    timing.medianScorePct,
+    timing.medianCompletionRate,
+    timing.pearson,
+    timing.spearman,
+    timing.totalTimePearson,
     STRENGTH_LABEL[magnitudeOf(timing.pearson)],
     reviewStatus(timing.pearson),
     interpretationOf(timing.pearson),
   ];
 }
 
+/** README's exact original layout (title, intro paragraph, Methodology,
+ * Metrics and formulas, Important interpretation notes, source footer) —
+ * built with a running row index, see reliability-report.ts's readmeSheet
+ * for why hardcoded row numbers are the thing to avoid here. */
 function readmeSheet(cycleName: string): XLSX.WorkSheet {
-  const aoa: unknown[][] = [
-    [`G12++ MCQ Timing & Performance Analysis — ${cycleName}`],
-    [],
-    ["This workbook analyses whether students who spent more time tended to perform better or worse. The primary time metric is the participant-level median item response time because it is less affected by pauses and extreme outliers than average time."],
-    [],
-    ["Methodology"],
-    ["• The primary correlation is between each student's median item response time and their score percentage, computed with both Pearson and Spearman coefficients."],
-    ["• Positive correlation means students who took more time tended to score higher; negative correlation means students who took more time tended to score lower."],
-    [],
-    ["Correlation Strength bands"],
-    ["|r| < 0.10", "Very weak / negligible"],
-    ["0.10 – 0.29", "Weak"],
-    ["0.30 – 0.49", "Moderate"],
-    ["0.50 – 0.69", "Strong"],
-    ["≥ 0.70", "Very strong"],
-    [],
-    ["Important interpretation notes"],
-    ["• Correlation does not prove causation. A negative value may reflect fatigue, uncertainty, time pressure, or weaker students spending longer."],
-    ["• Small participant counts make correlations unstable, so the Review Status should guide discussion rather than be used as a final decision alone."],
-    [],
-    ["Not sourced by this app's diagnostics engine (see column notes on the data sheets)", "Median/Mean Response Time, Mean/Median Score, Median Completion Rate, Total Time–Performance Correlation, and the Major Element Level breakdown."],
-  ];
+  const aoa: unknown[][] = [];
+  const merges: { s: { r: number; c: number }; e: { r: number; c: number } }[] = [];
+  const styled: { r0: number; c0: number; r1: number; c1: number; style: CellStyle }[] = [];
+  let row = 0;
+  const push = (cells: unknown[]): number => { aoa.push(cells); return row++; };
+  const merge = (r0: number, r1: number, c0: number, c1: number): void => { merges.push({ s: { r: r0, c: c0 }, e: { r: r1, c: c1 } }); };
+  const bullet = (text: string): number => {
+    const r = push([undefined, `• ${text}`]);
+    merge(r, r, 1, 8);
+    return r;
+  };
+  const section = (title: string): number => {
+    const r = push([undefined, title]);
+    merge(r, r, 1, 8);
+    styled.push({ r0: r, c0: 1, r1: r, c1: 1, style: README_SECTION_STYLE });
+    return r;
+  };
+
+  const titleRow = push(["G12++ MCQ Timing & Performance Analysis"]);
+  merge(titleRow, titleRow + 1, 0, 7);
+  styled.push({ r0: titleRow, c0: 0, r1: titleRow, c1: 7, style: TITLE_STYLE });
+  push([]);
+
+  const introRow = push(["This workbook analyses whether students who spent more time tended to perform better or worse. The primary time metric is the participant-level median item response time because it is less affected by pauses and extreme outliers than average time."]);
+  merge(introRow, introRow + 1, 0, 7);
+  styled.push({ r0: introRow, c0: 0, r1: introRow, c1: 7, style: SUBTITLE_STYLE });
+  push([]);
+  push([]);
+  push([]);
+
+  section("Methodology");
+  bullet(`Rows were analysed at student-response level using ParticipantID, AssessmentName, QuestionMajorElement, QuestionId, AnswerScore, and AnswerResponseTimeSeconds — this cycle: ${cycleName}.`);
+  bullet("For each Assessment or Major Element, student-level score percentage and time metrics were calculated first; correlations were then calculated across students.");
+  bullet("The primary correlation uses Median Item Response Time vs Score Percentage. Total Time vs Score Percentage is included as an additional supporting indicator.");
+  push([]);
+
+  section("Metrics and formulas");
+  bullet("Score Percentage = mean(AnswerScore) for each student inside the analysis unit.");
+  bullet("Median Response Time per Item = median of each student's AnswerResponseTimeSeconds inside the analysis unit.");
+  bullet("Time–Performance Correlation (Pearson) = correlation(student median item time, student score percentage).");
+  bullet("Time–Performance Correlation (Spearman) = rank correlation between the same two variables, useful when relationships are monotonic but not linear.");
+  bullet("Positive correlation means students who took more time tended to score higher; negative correlation means students who took more time tended to score lower.");
+  push([]);
+
+  section("Important interpretation notes");
+  bullet("Correlation does not prove causation. A negative value may reflect fatigue, uncertainty, time pressure, or weaker students spending longer.");
+  bullet("Small participant counts make correlations unstable, so the Review Status should guide discussion rather than be used as a final decision alone.");
+  push([]);
+  const footerRow = push([undefined, `Source: this cycle's live QM export | Cycle: ${cycleName}`]);
+  merge(footerRow, footerRow, 1, 8);
+
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 8 } }, { s: { r: 2, c: 0 }, e: { r: 2, c: 8 } }];
-  styleRange(ws, 0, 0, 0, 8, TITLE_STYLE);
-  styleRange(ws, 2, 0, 2, 8, SUBTITLE_STYLE);
-  styleRange(ws, 4, 0, 4, 0, { font: { bold: true, sz: 13 } });
-  styleRange(ws, 8, 0, 8, 0, { font: { bold: true, sz: 13 } });
-  ws["!cols"] = [{ wch: 26 }, { wch: 70 }];
+  ws["!merges"] = merges;
+  for (const s of styled) styleRange(ws, s.r0, s.c0, s.r1, s.c1, s.style);
+  setColumnWidths(ws, { A: 3.6640625, B: 28.6640625, C: 18.6640625, I: 25.6640625 }, 9);
   return ws;
 }
 
@@ -164,11 +199,13 @@ function timingCf(sheetIndex: number, firstRow: number, lastRow: number, meanSco
   };
   return {
     sheetIndex,
+    freeze: FREEZE_A7,
+    tabColor: TAB_COLOR,
     rules: [colorScaleRule(meanScoreCol), colorScaleRule(medianScoreCol), ...bandRules(pearsonCol), ...bandRules(spearmanCol)],
   };
 }
 
-function dataSheet(opts: { title: string; subtitle: string; labelHeaders: readonly string[]; rows: unknown[][] }): {
+function dataSheet(opts: { title: string; subtitle: string; labelHeaders: readonly string[]; columnWidths: Record<string, number>; rows: unknown[][] }): {
   ws: XLSX.WorkSheet;
   meanScoreCol: number;
   medianScoreCol: number;
@@ -188,12 +225,14 @@ function dataSheet(opts: { title: string; subtitle: string; labelHeaders: readon
   styleRange(ws, headerRow + 1, 0, lastRow, lastCol, DATA_STYLE);
 
   const base = opts.labelHeaders.length;
-  const meanScoreCol = base + 6, medianScoreCol = base + 7, completionCol = base + 8, pearsonCol = base + 9, spearmanCol = base + 10;
+  const timeCol = base + 3, meanTimeCol = base + 4, totalTimeCol = base + 5;
+  const meanScoreCol = base + 6, medianScoreCol = base + 7, completionCol = base + 8, pearsonCol = base + 9, spearmanCol = base + 10, totalTimeCorrCol = base + 11;
   for (let r = headerRow + 1; r <= lastRow; r++) {
+    for (const c of [timeCol, meanTimeCol, totalTimeCol]) setNumberFormat(ws, r, c, "0.000");
     for (const c of [meanScoreCol, medianScoreCol, completionCol]) setNumberFormat(ws, r, c, "0.0%");
-    for (const c of [pearsonCol, spearmanCol]) setNumberFormat(ws, r, c, "0.000");
+    for (const c of [pearsonCol, spearmanCol, totalTimeCorrCol]) setNumberFormat(ws, r, c, "0.000");
   }
-  ws["!cols"] = headers.map((h) => ({ wch: Math.min(48, Math.max(14, String(h).length + 2)) }));
+  setColumnWidths(ws, opts.columnWidths, headers.length);
   return { ws, meanScoreCol, medianScoreCol, pearsonCol, spearmanCol };
 }
 
@@ -204,7 +243,7 @@ export interface TimingBuildResult {
 
 export function buildTimingWorkbook(input: TimingReportInput): TimingBuildResult {
   const wb = XLSX.utils.book_new();
-  const cfSheets: SheetCf[] = [];
+  const cfSheets: SheetCf[] = [{ sheetIndex: 0, rules: [], tabColor: TAB_COLOR }];
 
   XLSX.utils.book_append_sheet(wb, readmeSheet(input.cycleName), "README");
 
@@ -216,12 +255,16 @@ export function buildTimingWorkbook(input: TimingReportInput): TimingBuildResult
 
   const assessmentRows = assessments.map((a) => [
     a.assessmentName,
-    ...rowCells(participantsByAssessment.get(a.assessmentId) ?? NOT_SOURCED, a.whole.speeded.nItems, a.whole.speeded.nPresentations, a.whole.timing),
+    ...rowCells(participantsByAssessment.get(a.assessmentId) ?? null, a.whole.speeded.nItems, a.whole.speeded.nPresentations, a.whole.timing),
   ]);
   const assessmentLevel = dataSheet({
-    title: `Assessment Level Timing & Performance — ${input.cycleName}`,
+    title: "Assessment Level Timing & Performance",
     subtitle: "Primary indicator: Pearson correlation between each student's median item response time and score percentage by assessment.",
     labelHeaders: ["AssessmentName"],
+    columnWidths: {
+      A: 22.5546875, B: 22.44140625, C: 16.109375, D: 25.6640625, E: 35.33203125, F: 33.6640625, G: 32.33203125,
+      H: 15.109375, I: 16.77734375, J: 23.109375, K: 39.0, L: 40.77734375, M: 44.21875, N: 19.77734375, O: 43.88671875, P: 47.109375,
+    },
     rows: assessmentRows,
   });
   XLSX.utils.book_append_sheet(wb, assessmentLevel.ws, "Assessment Level");
@@ -231,31 +274,36 @@ export function buildTimingWorkbook(input: TimingReportInput): TimingBuildResult
     );
   }
 
-  // Major Element Level — no data source (no major-element tag on DiagResponse).
-  const majorHeaders = ["AssessmentName", "QuestionMajorElement", ...ROW_HEADERS];
-  const majorLastCol = majorHeaders.length - 1;
-  const majorAoa: unknown[][] = [
-    [`Major Element Level Timing & Performance — ${input.cycleName}`],
-    ["Primary indicator: Pearson correlation between each student's median item response time and score percentage by Assessment × Major Element."],
-    [],
-    [],
-    [],
-    majorHeaders,
-    ["Not available", "This app's diagnostics pipeline does not currently tag MCQ items with a major-element construct for speededness/timing — only demand-level and item-set groupings exist. See the PR notes.", ...majorHeaders.slice(2).map(() => "")],
-  ];
-  const majorWs = XLSX.utils.aoa_to_sheet(majorAoa);
-  majorWs["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: Math.min(majorLastCol, 5) } },
-    { s: { r: 1, c: 0 }, e: { r: 2, c: Math.min(majorLastCol, 5) } },
-    { s: { r: 6, c: 1 }, e: { r: 6, c: majorLastCol } },
-  ];
-  styleRange(majorWs, 0, 0, 0, majorLastCol, TITLE_STYLE);
-  styleRange(majorWs, 1, 0, 1, majorLastCol, SUBTITLE_STYLE);
-  styleRange(majorWs, 5, 0, 5, majorLastCol, HEADER_STYLE);
-  styleRange(majorWs, 6, 0, 6, majorLastCol, DATA_STYLE);
-  majorWs["!cols"] = majorHeaders.map((h) => ({ wch: Math.min(48, Math.max(14, String(h).length + 2)) }));
-  XLSX.utils.book_append_sheet(wb, majorWs, "Major Element Level");
-  cfSheets.push(timingCf(2, 7, 7, 2 + 6, 2 + 7, 2 + 9, 2 + 10));
+  // Major Element Level — real data from timingByMajorElement(), grouped by
+  // assessment (appearance order) with major elements alphabetical within,
+  // matching By_Assessment_Major's ordering in the reliability workbook.
+  // Items/Item Responses are cross-referenced from the matching entry in
+  // byMajorElement (same group, already computed off the same responses).
+  const majorRows: unknown[][] = [];
+  for (const a of assessments) {
+    const participants = participantsByAssessment.get(a.assessmentId) ?? null;
+    const speededByMajor = new Map(a.byMajorElement.map((m) => [m.majorElement, m.speeded]));
+    for (const m of a.timingByMajorElement) {
+      const speeded = speededByMajor.get(m.majorElement);
+      majorRows.push([a.assessmentName, m.majorElement, ...rowCells(participants, speeded?.nItems ?? 0, speeded?.nPresentations ?? 0, m.timing)]);
+    }
+  }
+  const majorElementLevel = dataSheet({
+    title: "Major Element Level Timing & Performance",
+    subtitle: "Primary indicator: Pearson correlation between each student's median item response time and score percentage by Assessment × Major Element.",
+    labelHeaders: ["AssessmentName", "QuestionMajorElement"],
+    columnWidths: {
+      A: 22.5546875, B: 39.77734375, C: 26.88671875, D: 20.5546875, E: 30.109375, F: 39.77734375, G: 38.109375,
+      H: 36.77734375, I: 21.6640625, J: 21.21875, K: 27.5546875, L: 43.44140625, M: 45.21875, N: 48.6640625, O: 24.21875, P: 43.88671875, Q: 47.109375,
+    },
+    rows: majorRows,
+  });
+  XLSX.utils.book_append_sheet(wb, majorElementLevel.ws, "Major Element Level");
+  if (majorRows.length > 0) {
+    cfSheets.push(
+      timingCf(2, 7, 6 + majorRows.length, majorElementLevel.meanScoreCol, majorElementLevel.medianScoreCol, majorElementLevel.pearsonCol, majorElementLevel.spearmanCol),
+    );
+  }
 
   return {
     workbook: wb,

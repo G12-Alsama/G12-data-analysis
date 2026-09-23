@@ -103,6 +103,28 @@ export const IA_GUIDE_STYLE: CellStyle = {
   alignment: { wrapText: true, vertical: "top", horizontal: "left" },
 };
 
+/**
+ * SheetJS's `!cols[i].wch` writer adds a constant ~5px default-font padding
+ * when it converts "characters" to the stored `width` attribute — empirically
+ * exactly 0.83203125 on every column, on every sheet, regardless of the
+ * target width (confirmed against several reference files' actual stored
+ * widths). Subtract it from a hardcoded original width before passing it as
+ * `wch`, and the round-tripped stored width matches the original exactly.
+ */
+export const WCH_WIDTH_PADDING = 0.83203125;
+
+/** Set `!cols` from a per-column-letter width map (already-correct original
+ * widths, e.g. `{ A: 34.0, C: 25.0 }`) — columns not in the map keep Excel's
+ * default width. Compensates for `WCH_WIDTH_PADDING` automatically. */
+export function setColumnWidths(ws: XLSX.WorkSheet, widths: Record<string, number>, colCount: number): void {
+  const cols: { wch?: number }[] = [];
+  for (let i = 0; i < colCount; i++) {
+    const letter = XLSX.utils.encode_col(i);
+    cols[i] = widths[letter] ? { wch: widths[letter] - WCH_WIDTH_PADDING } : {};
+  }
+  ws["!cols"] = cols;
+}
+
 export const IA_HEADER_STYLE: CellStyle = {
   font: { bold: true },
   alignment: { horizontal: "center", vertical: "center", wrapText: true },

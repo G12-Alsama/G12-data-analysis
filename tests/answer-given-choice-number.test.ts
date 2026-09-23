@@ -151,6 +151,7 @@ describe("build-live-cycle.ts — 'answered' keys off answerGivenChoiceNumber", 
       itemId: r.qmQuestionId,
       demandLevel: r.demandLevel,
       itemSet: r.itemSet,
+      majorElement: r.majorElement,
       order: i,
       answered: !!r.answerGiven, // the old, buggy determination
       correct: r.answerScore === 1,

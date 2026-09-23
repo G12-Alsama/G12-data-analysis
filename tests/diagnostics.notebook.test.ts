@@ -115,6 +115,7 @@ describe("timing/speededness reproduce the analyst notebooks", () => {
       itemId: String(r.qid),
       demandLevel: null,
       itemSet: null,
+      majorElement: null,
       order: i,
       answered: true,
       correct: r.score === 1,
@@ -137,7 +138,7 @@ describe("timing/speededness reproduce the analyst notebooks", () => {
 
   describe("cleanDiagResponses builds P-B's matrix (dedupe last + drop excluded)", () => {
     const base = (over: Partial<DiagResponse> = {}): DiagResponse => ({
-      participantId: "S1", itemId: "Q1", demandLevel: null, itemSet: null, order: 0, answered: true, correct: true, responseTime: 10, ...over,
+      participantId: "S1", itemId: "Q1", demandLevel: null, itemSet: null, majorElement: null, order: 0, answered: true, correct: true, responseTime: 10, ...over,
     });
 
     it("dedupes (participant, item) keeping the LAST row", () => {

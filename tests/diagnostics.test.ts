@@ -20,8 +20,8 @@ import {
 } from "@/lib/diagnostics";
 import { InMemoryDataProvider } from "@/lib/data/in-memory-provider";
 
-function r(participantId: string, itemId: string, order: number, answered: boolean, correct: boolean, responseTime: number | null, demandLevel: string | null = null, itemSet: string | null = null): DiagResponse {
-  return { participantId, itemId, demandLevel, itemSet, order, answered, correct, responseTime };
+function r(participantId: string, itemId: string, order: number, answered: boolean, correct: boolean, responseTime: number | null, demandLevel: string | null = null, itemSet: string | null = null, majorElement: string | null = null): DiagResponse {
+  return { participantId, itemId, demandLevel, itemSet, majorElement, order, answered, correct, responseTime };
 }
 
 describe("late-item selection", () => {

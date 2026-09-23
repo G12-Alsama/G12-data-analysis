@@ -31,6 +31,8 @@ export interface DiagResponse {
   demandLevel: string | null;
   /** Item-set / shared-stimulus name of the item, or null when ungrouped. */
   itemSet: string | null;
+  /** Major-element (curriculum content area) of the item, or null when untagged — the same tag lib/engine/reliability.ts groups by, e.g. "Numerical and quantitative reasoning". */
+  majorElement: string | null;
   /** Presentation order (lower = earlier). */
   order: number;
   /** Whether a (non-blank) answer was given. */
@@ -56,6 +58,10 @@ export interface SpeededResult {
   omissionStatus: DiagStatus;
   completionStatus: DiagStatus;
   speededStatus: DiagStatus;
+  /** Correct ÷ answered across ALL presentations (not just the early/late split). */
+  overallAccuracy: number;
+  /** Median response time (seconds) across every item presentation in the group; null when no presentation has a response time. */
+  medianResponseTime: number | null;
 }
 
 export interface TimingResult {
@@ -64,6 +70,20 @@ export interface TimingResult {
   spearman: number | null;
   pearsonStrength: string;
   spearmanStrength: string;
+  /** Median, across students, of each student's median per-item response time. */
+  medianResponseTimePerItem: number | null;
+  /** Mean, across students, of each student's median per-item response time. */
+  meanResponseTimePerItem: number | null;
+  /** Median, across students, of each student's total (summed) response time. */
+  medianTotalResponseTime: number | null;
+  /** Mean score percentage across students. */
+  meanScorePct: number | null;
+  /** Median score percentage across students. */
+  medianScorePct: number | null;
+  /** Median, across students, of (answered ÷ presented). */
+  medianCompletionRate: number | null;
+  /** Pearson correlation between each student's TOTAL response time and score % — a supporting indicator alongside the primary median-item-time correlation. */
+  totalTimePearson: number | null;
 }
 
 const rnd = (v: number, d = 4) => {
@@ -157,6 +177,8 @@ export function speededness(records: readonly DiagResponse[]): SpeededResult {
   const lateAccuracy = accuracyOf(isLate);
 
   const speedednessIndex = (Math.max(0, lateOmission - earlyOmission) + Math.max(0, earlyAccuracy - lateAccuracy)) / 2;
+  const overallAccuracy = accuracyOf(() => true);
+  const responseTimes = records.map((r) => r.responseTime).filter((t): t is number => t !== null && Number.isFinite(t));
 
   return {
     nItems: items.size,
@@ -171,6 +193,8 @@ export function speededness(records: readonly DiagResponse[]): SpeededResult {
     omissionStatus: band(omissionRate, (v) => v <= 0.05, (v) => v <= 0.1),
     completionStatus: band(1 - omissionRate, (v) => v >= 0.95, (v) => v >= 0.9),
     speededStatus: band(speedednessIndex, (v) => v <= 0.05, (v) => v <= 0.15),
+    overallAccuracy: rnd(overallAccuracy),
+    medianResponseTime: responseTimes.length ? median(responseTimes) : null,
   };
 }
 
@@ -180,6 +204,16 @@ function median(xs: number[]): number {
   const s = [...xs].sort((a, b) => a - b);
   const m = Math.floor(s.length / 2);
   return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
+}
+
+/** Mean of a numeric array; null when empty. */
+function mean(xs: readonly number[]): number | null {
+  return xs.length === 0 ? null : xs.reduce((a, b) => a + b, 0) / xs.length;
+}
+
+/** Median of a numeric array; null when empty (unlike `median`, which returns 0). */
+function medianOrNull(xs: readonly number[]): number | null {
+  return xs.length === 0 ? null : median([...xs]);
 }
 
 /**
@@ -242,12 +276,13 @@ export function timingPerformance(records: readonly DiagResponse[]): TimingResul
   // filter). Only a genuinely missing/non-finite responseTime is excluded below
   // — that's real data absence, distinct from "left blank but still timed".
   // (`answered` still drives omission/completion in speededness(), untouched.)
-  const byStudent = new Map<string, { correct: number; presented: number; times: number[] }>();
+  const byStudent = new Map<string, { correct: number; presented: number; answered: number; times: number[] }>();
   for (const r of records) {
     let s = byStudent.get(r.participantId);
-    if (!s) { s = { correct: 0, presented: 0, times: [] }; byStudent.set(r.participantId, s); }
+    if (!s) { s = { correct: 0, presented: 0, answered: 0, times: [] }; byStudent.set(r.participantId, s); }
     s.presented += 1;
     if (r.correct) s.correct += 1;
+    if (r.answered) s.answered += 1;
     if (r.responseTime !== null && Number.isFinite(r.responseTime)) s.times.push(r.responseTime);
   }
   if (__tempDebugLabel) {
@@ -255,6 +290,8 @@ export function timingPerformance(records: readonly DiagResponse[]): TimingResul
   }
   const scorePct: number[] = [];
   const medTime: number[] = [];
+  const totalTime: number[] = [];
+  const completionRate: number[] = [];
   for (const [participantId, s] of byStudent) {
     if (s.presented === 0 || s.times.length === 0) continue;
     const pct = (s.correct / s.presented) * 100;
@@ -267,9 +304,12 @@ export function timingPerformance(records: readonly DiagResponse[]): TimingResul
     }
     scorePct.push(pct);
     medTime.push(mt);
+    totalTime.push(s.times.reduce((a, b) => a + b, 0));
+    completionRate.push(s.answered / s.presented);
   }
   const p = pearson(medTime, scorePct);
   const sp = spearman(medTime, scorePct);
+  const totalP = pearson(totalTime, scorePct);
   if (__tempDebugLabel) {
     const pairs = medTime.map((mt, i) => [mt, scorePct[i]]);
     console.log(`[TEMP-DEBUG] timingPerformance(${__tempDebugLabel}): (medTime, scorePct) pairs=${JSON.stringify(pairs)}`);
@@ -281,6 +321,13 @@ export function timingPerformance(records: readonly DiagResponse[]): TimingResul
     spearman: sp === null ? null : rnd(sp),
     pearsonStrength: correlationStrength(p),
     spearmanStrength: correlationStrength(sp),
+    medianResponseTimePerItem: medianOrNull(medTime),
+    meanResponseTimePerItem: mean(medTime),
+    medianTotalResponseTime: medianOrNull(totalTime),
+    meanScorePct: mean(scorePct),
+    medianScorePct: medianOrNull(scorePct),
+    medianCompletionRate: medianOrNull(completionRate),
+    totalTimePearson: totalP === null ? null : rnd(totalP),
   };
 }
 
@@ -356,6 +403,44 @@ export function speededByItemSet(records: readonly DiagResponse[]): ItemSetSpeed
     .map((set) => ({ itemSet: set, speeded: speededness(groups.get(set)!) }));
 }
 
+/** Speededness/omission for one major element (curriculum content area). */
+export interface MajorElementSpeeded {
+  majorElement: string;
+  speeded: SpeededResult;
+}
+
+/**
+ * Speededness/omission/completion split by major element — the same
+ * curriculum-content-area tag lib/engine/reliability.ts already groups by for
+ * its By_Assessment_Major reliability view. Listed alphabetically; untagged
+ * (null) items are ignored. Reuses the identical `speededness()` formula per
+ * group, restricted to that major element's items.
+ */
+export function speededByMajorElement(records: readonly DiagResponse[]): MajorElementSpeeded[] {
+  const groups = groupBy(records, (r) => r.majorElement);
+  return [...groups.keys()]
+    .sort((a, b) => a.localeCompare(b))
+    .map((major) => ({ majorElement: major, speeded: speededness(groups.get(major)!) }));
+}
+
+/** Timing–performance for one major element (curriculum content area). */
+export interface MajorElementTiming {
+  majorElement: string;
+  timing: TimingResult;
+}
+
+/**
+ * Timing–performance split by major element, mirroring `timingByDemand`:
+ * the identical `timingPerformance()` formula applied per major-element
+ * group. Listed alphabetically; untagged (null) items are ignored.
+ */
+export function timingByMajorElement(records: readonly DiagResponse[]): MajorElementTiming[] {
+  const groups = groupBy(records, (r) => r.majorElement);
+  return [...groups.keys()]
+    .sort((a, b) => a.localeCompare(b))
+    .map((major) => ({ majorElement: major, timing: timingPerformance(groups.get(major)!) }));
+}
+
 /** Omission rate for the item at one presentation position. */
 export interface PositionOmission {
   /** 1-based item position by earliest presented order. */
@@ -423,6 +508,8 @@ export interface AssessmentDiagnostics {
   byItemSet: ItemSetSpeeded[];
   timingByDemand: DemandTiming[];
   omissionByPosition: PositionOmission[];
+  byMajorElement: MajorElementSpeeded[];
+  timingByMajorElement: MajorElementTiming[];
 }
 
 export function buildAssessmentDiagnostics(records: readonly DiagResponse[]): AssessmentDiagnostics {
@@ -432,5 +519,7 @@ export function buildAssessmentDiagnostics(records: readonly DiagResponse[]): As
     byItemSet: speededByItemSet(records),
     timingByDemand: timingByDemand(records),
     omissionByPosition: omissionByPosition(records),
+    byMajorElement: speededByMajorElement(records),
+    timingByMajorElement: timingByMajorElement(records),
   };
 }

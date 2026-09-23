@@ -3,22 +3,18 @@
  * team's original `Speededness_OmissionRate_*.xlsx` manual analysis. Three
  * sheets: "README & Methodology", "Assessment Level", "Major Element Level".
  *
- * Two fields have no source in this app's diagnostics engine
- * (lib/diagnostics/index.ts's SpeededResult carries no response-time or
- * combined-accuracy figure) and are written as the literal text "Not sourced"
- * rather than fabricated: Median AnswerResponseTimeSeconds and Overall
- * Accuracy on the Assessment Level sheet.
- *
- * The whole "Major Element Level" sheet has no data source at all: the
- * diagnostics pipeline's DiagResponse records carry a demand-level and an
- * item-set tag but no major-element tag, so there is nothing to group by. It
- * is built with the original's exact headers/styling/CF and one explanatory
- * row instead of fabricated numbers — see the module doc in
- * lib/export/timing-report.ts for the matching gap on that workbook.
+ * Median AnswerResponseTimeSeconds and Overall Accuracy are additive fields
+ * on SpeededResult (lib/diagnostics/index.ts) — both are pure derivations of
+ * data that function's existing `accuracyOf`/records loop already gathers,
+ * not new statistics. The Major Element Level breakdown is real data too,
+ * from `speededByMajorElement()` (see lib/diagnostics/index.ts) — the
+ * majorElement tag is the same curriculum-content-area field
+ * lib/engine/reliability.ts already groups its own By_Assessment_Major sheet
+ * by, just newly plumbed onto DiagResponse.
  */
 import type { DiagnosticsModel, ReliabilityModel } from "@/lib/data/types";
 import type { SpeededResult, DiagStatus } from "@/lib/diagnostics";
-import { XLSX, styleCell, type CellStyle } from "./sheet-utils";
+import { XLSX, styleCell, setColumnWidths, type CellStyle } from "./sheet-utils";
 import { applyConditionalFormatting, rangeRef, type SheetCf } from "./ooxml-cf";
 
 export const SPEEDEDNESS_SHEETS = ["README & Methodology", "Assessment Level", "Major Element Level"] as const;
@@ -28,8 +24,6 @@ export interface SpeededednessReportInput {
   reliability: ReliabilityModel | null;
   diagnostics: DiagnosticsModel | null;
 }
-
-const NOT_SOURCED = "Not sourced";
 
 const TITLE_STYLE: CellStyle = {
   font: { name: "Carlito", sz: 16, bold: true, color: { rgb: "FFFFFFFF" } },
@@ -87,12 +81,12 @@ const ROW_HEADERS = [
   "Early Accuracy", "Late Accuracy", "Early Omission Rate", "Late Omission Rate", "Overall Accuracy", "Notes",
 ] as const;
 
-function rowCells(participants: number | string, speeded: SpeededResult): unknown[] {
+function rowCells(participants: number | null, speeded: SpeededResult): unknown[] {
   return [
     participants,
     speeded.nItems,
     speeded.nPresentations,
-    NOT_SOURCED,
+    speeded.medianResponseTime,
     speeded.speedednessIndex,
     speedednessStatusLabel(speeded.speededStatus),
     speeded.omissionRate,
@@ -103,32 +97,79 @@ function rowCells(participants: number | string, speeded: SpeededResult): unknow
     speeded.lateAccuracy,
     speeded.earlyOmission,
     speeded.lateOmission,
-    NOT_SOURCED,
+    speeded.overallAccuracy,
     speedednessNote(speeded.speededStatus),
   ];
 }
 
-function readmeSheet(cycleName: string): XLSX.WorkSheet {
-  const aoa: unknown[][] = [
-    [`MCQ Psychometric Analysis — Assessment Level — ${cycleName}`],
-    ["Source: this cycle's live QM export (response-time + answer columns)."],
-    [],
-    ["Metric", "Formula / Calculation", "Interpretation / Thresholds"],
-    ["Number of Participants", "Distinct participants attempting at least one MCQ item in the assessment.", "Higher count = more stable interpretation."],
-    ["Omission Rate", "Omitted item presentations ÷ total item presentations. An item is omitted when no answer was given.", "Good ≤ 5%; Review > 5% and ≤ 10%; Flag > 10%."],
-    ["Completion Rate", "Completed item presentations ÷ total item presentations = 1 − Omission Rate.", "Good ≥ 95%; Review ≥ 90% and < 95%; Flag < 90%."],
-    ["Speededness Index", "Average of two late-test signals: max(0, Late Omission − Early Omission) and max(0, Early Accuracy − Late Accuracy). Late items are the final 25% of unique items by presentation order.", "Good ≤ 5%; Review > 5% and ≤ 15%; Flag > 15%. Higher values suggest potential time pressure on later items."],
-    ["Early / Late Accuracy", "Mean correctness for early items and late items respectively.", "Used internally to support the speededness calculation."],
-    ["Early / Late Omission Rate", "Omission rate separately for early items and final-quartile late items.", "Used internally to support the speededness calculation."],
-    [],
-    ["Not sourced by this app's diagnostics engine (see column notes on the data sheets)", "Median AnswerResponseTimeSeconds, Overall Accuracy, and the Major Element Level breakdown."],
-  ];
+/** README & Methodology's exact original layout: a 4-column methodology
+ * table (Metric / Formula / Data Used / Interpretation) plus a separate
+ * Summary/Value side-table one gap column to the right — built with a
+ * running row index (see reliability-report.ts's readmeSheet for why). The
+ * Summary/Value counts are computed live from the SAME assessments feeding
+ * the data sheets below, not copied from the original file. */
+function readmeSheet(summary: { totalResponses: number; assessmentGroups: number; majorElementGroups: number; assessmentFlags: number; majorElementFlags: number }): XLSX.WorkSheet {
+  const aoa: unknown[][] = [];
+  const merges: { s: { r: number; c: number }; e: { r: number; c: number } }[] = [];
+  const styled: { r0: number; c0: number; r1: number; c1: number; style: CellStyle }[] = [];
+  let row = 0;
+  const push = (cells: unknown[]): number => { aoa.push(cells); return row++; };
+  const mergeFull = (r: number, c1: number): void => { merges.push({ s: { r, c: 0 }, e: { r, c: c1 } }); };
+
+  const titleRow = push(["MCQ Psychometric Analysis — Assessment & Major Element Level"]);
+  mergeFull(titleRow, 11);
+  styled.push({ r0: titleRow, c0: 0, r1: titleRow, c1: 11, style: TITLE_STYLE });
+
+  const sourceRow = push(["Source dataset: this cycle's live QM export"]);
+  mergeFull(sourceRow, 11);
+  styled.push({ r0: sourceRow, c0: 0, r1: sourceRow, c1: 11, style: SUBTITLE_STYLE });
+
+  push([]);
+
+  const headerRow = push(["Metric", "Formula / Calculation", "Data Used", "Interpretation / Thresholds", undefined, "Summary", "Value"]);
+  styled.push({ r0: headerRow, c0: 0, r1: headerRow, c1: 3, style: HEADER_STYLE });
+  styled.push({ r0: headerRow, c0: 5, r1: headerRow, c1: 6, style: HEADER_STYLE });
+
+  push([
+    "Number of Participants", "Unique count of ParticipantID within the assessment or major element. ParticipantEmail/ResultId used only as fallback if needed.",
+    "ParticipantID, ParticipantEmail, ResultId", "Higher count = more stable interpretation.", undefined,
+    "Total MCQ item response records used", summary.totalResponses,
+  ]);
+  push([
+    "Median AnswerResponseTimeSeconds", "Median of AnswerResponseTimeSeconds across all item presentations in the unit.",
+    "AnswerResponseTimeSeconds", "Median was selected instead of average because response time is usually skewed by pauses/outliers.", undefined,
+    "Assessment groups produced", summary.assessmentGroups,
+  ]);
+  push([
+    "Omission Rate", "Omitted item presentations ÷ total item presentations. An item is omitted when AnswerGivenChoiceNumber is blank or undefined.",
+    "AnswerGivenChoiceNumber", "Good ≤ 5%; Review > 5% and ≤ 10%; Flag > 10%.", undefined,
+    "Assessment × Major Element groups produced", summary.majorElementGroups,
+  ]);
+  push([
+    "Completion Rate", "Completed item presentations ÷ total item presentations = 1 − Omission Rate.",
+    "AnswerGivenChoiceNumber", "Good ≥ 95%; Review ≥ 90% and < 95%; Flag < 90%.", undefined,
+    "Assessment-level rows flagged for possible speededness", summary.assessmentFlags,
+  ]);
+  push([
+    "Speededness Index",
+    "Average of two positive late-test signals: max(0, Late Omission Rate − Early Omission Rate) and max(0, Early Accuracy − Late Accuracy). Late items are the final 25% of unique items by QuestionPresentedNumber within the analysis unit.",
+    "QuestionPresentedNumber, AnswerGivenChoiceNumber, AnswerScore",
+    "Good ≤ 5%; Review > 5% and ≤ 15%; Flag > 15%. Higher values suggest potential time pressure on later items.", undefined,
+    "Major-element rows flagged for possible speededness", summary.majorElementFlags,
+  ]);
+  push([
+    "Early / Late Accuracy", "Mean AnswerScore for early items and late items. Omitted items contribute 0 because AnswerScore is 0/blank for unanswered rows.",
+    "AnswerScore, QuestionPresentedNumber", "Used internally to support the speededness calculation.",
+  ]);
+  push([
+    "Early / Late Omission Rate", "Omission rate separately for early items and final-quartile late items.",
+    "AnswerGivenChoiceNumber, QuestionPresentedNumber", "Used internally to support the speededness calculation.",
+  ]);
+
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 11 } }, { s: { r: 1, c: 0 }, e: { r: 1, c: 11 } }];
-  styleRange(ws, 0, 0, 0, 11, TITLE_STYLE);
-  styleRange(ws, 1, 0, 1, 11, SUBTITLE_STYLE);
-  styleRange(ws, 3, 0, 3, 2, HEADER_STYLE);
-  ws["!cols"] = [{ wch: 32 }, { wch: 58 }, { wch: 60 }];
+  ws["!merges"] = merges;
+  for (const s of styled) styleRange(ws, s.r0, s.c0, s.r1, s.c1, s.style);
+  setColumnWidths(ws, { A: 32.796875, B: 58.0, C: 34.0, D: 91.8984375, F: 42.0, G: 18.0 }, 12);
   return ws;
 }
 
@@ -163,6 +204,7 @@ function dataSheet(opts: {
   title: string;
   subtitle: string;
   labelHeaders: readonly string[];
+  columnWidths: Record<string, number>;
   rows: unknown[][];
 }): { ws: XLSX.WorkSheet; speedCol: number; omitCol: number; compCol: number } {
   const headers = [...opts.labelHeaders, ...ROW_HEADERS];
@@ -177,12 +219,14 @@ function dataSheet(opts: {
   styleRange(ws, 4, 0, lastRow, lastCol, DATA_STYLE);
 
   const base = opts.labelHeaders.length;
+  const medianTimeCol = base + 3;
   const speedCol = base + 4, omitCol = base + 6, compCol = base + 7;
   const pctCols = [speedCol, omitCol, compCol, base + 10, base + 11, base + 12, base + 13]; // Speed/Omission/Completion/EarlyAcc/LateAcc/EarlyOmRate/LateOmRate
   for (let r = 4; r <= lastRow; r++) {
+    setNumberFormat(ws, r, medianTimeCol, "0.0");
     for (const c of pctCols) setNumberFormat(ws, r, c, "0.0%");
   }
-  ws["!cols"] = headers.map((h) => ({ wch: Math.min(48, Math.max(14, String(h).length + 2)) }));
+  setColumnWidths(ws, opts.columnWidths, headers.length);
   return { ws, speedCol, omitCol, compCol };
 }
 
@@ -192,24 +236,54 @@ export interface SpeededednessBuildResult {
 }
 
 export function buildSpeedednessWorkbook(input: SpeededednessReportInput): SpeededednessBuildResult {
-  const wb = XLSX.utils.book_new();
-  const cfSheets: SheetCf[] = [];
-
-  XLSX.utils.book_append_sheet(wb, readmeSheet(input.cycleName), "README & Methodology");
-
   const assessments = input.diagnostics?.assessments ?? [];
   const participantsByAssessment = new Map<string, number>();
   for (const row of input.reliability?.rows ?? []) {
     if (row.level === "subject" && row.assessmentId) participantsByAssessment.set(row.assessmentId, row.totalParticipants);
   }
 
+  // Compute every sheet's rows up front — README's live Summary/Value table
+  // needs the other two sheets' row counts, and building it first (rather
+  // than appending it last and reordering `wb.SheetNames`) keeps sheet
+  // append order matching reading order matching CF sheetIndex, with no
+  // indirection to keep in sync.
   const assessmentRows = assessments.map((a) =>
-    [a.assessmentName, ...rowCells(participantsByAssessment.get(a.assessmentId) ?? NOT_SOURCED, a.whole.speeded)],
+    [a.assessmentName, ...rowCells(participantsByAssessment.get(a.assessmentId) ?? null, a.whole.speeded)],
   );
+  const majorRows: unknown[][] = [];
+  for (const a of assessments) {
+    const participants = participantsByAssessment.get(a.assessmentId) ?? null;
+    for (const m of a.byMajorElement) {
+      majorRows.push([a.assessmentName, m.majorElement, ...rowCells(participants, m.speeded)]);
+    }
+  }
+  const totalResponses = assessments.reduce((acc, a) => acc + a.whole.speeded.nPresentations, 0);
+  const assessmentFlags = assessments.filter((a) => a.whole.speeded.speededStatus === "Flag").length;
+  const majorElementFlags = assessments.reduce(
+    (acc, a) => acc + a.byMajorElement.filter((m) => m.speeded.speededStatus === "Flag").length,
+    0,
+  );
+
+  const wb = XLSX.utils.book_new();
+  const cfSheets: SheetCf[] = [];
+
+  XLSX.utils.book_append_sheet(
+    wb,
+    readmeSheet({
+      totalResponses,
+      assessmentGroups: assessments.length,
+      majorElementGroups: majorRows.length,
+      assessmentFlags,
+      majorElementFlags,
+    }),
+    "README & Methodology",
+  );
+
   const assessmentLevel = dataSheet({
-    title: `Assessment-Level Speededness, Omission, and Completion Analysis — ${input.cycleName}`,
+    title: "Assessment-Level Speededness, Omission, and Completion Analysis",
     subtitle: "Interpret Speededness together with Omission Rate and Completion Rate. Small units can fluctuate because one or two students/items may change percentages substantially.",
     labelHeaders: ["AssessmentName"],
+    columnWidths: { A: 28.0, B: 15.0, E: 28.796875, F: 15.0, J: 24.0, L: 15.0, Q: 48.0 },
     rows: assessmentRows,
   });
   XLSX.utils.book_append_sheet(wb, assessmentLevel.ws, "Assessment Level");
@@ -217,31 +291,20 @@ export function buildSpeedednessWorkbook(input: SpeededednessReportInput): Speed
     cfSheets.push(speedednessCf(1, 5, 4 + assessmentRows.length, assessmentLevel.speedCol, assessmentLevel.omitCol, assessmentLevel.compCol));
   }
 
-  // Major Element Level — no data source (DiagResponse carries demand-level and
-  // item-set tags, but no major-element tag), so the sheet keeps the original's
-  // exact header/style/CF shape with one explanatory row instead of numbers.
-  const majorHeaders = ["AssessmentName", "QuestionMajorElement", ...ROW_HEADERS];
-  const majorAoa: unknown[][] = [
-    [`Major Element-Level Speededness, Omission, and Completion Analysis — ${input.cycleName}`],
-    ["Interpret Speededness together with Omission Rate and Completion Rate. Small units can fluctuate because one or two students/items may change percentages substantially."],
-    [],
-    majorHeaders,
-    ["Not available", "This app's diagnostics pipeline does not currently tag MCQ items with a major-element construct for speededness/timing — only demand-level and item-set groupings exist. See the PR notes.", ...majorHeaders.slice(2).map(() => "")],
-  ];
-  const majorWs = XLSX.utils.aoa_to_sheet(majorAoa);
-  const majorLastCol = majorHeaders.length - 1;
-  majorWs["!merges"] = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: 11 } },
-    { s: { r: 1, c: 0 }, e: { r: 1, c: 11 } },
-    { s: { r: 4, c: 1 }, e: { r: 4, c: majorLastCol } },
-  ];
-  styleRange(majorWs, 0, 0, 0, majorLastCol, TITLE_STYLE);
-  styleRange(majorWs, 1, 0, 1, majorLastCol, SUBTITLE_STYLE);
-  styleRange(majorWs, 3, 0, 3, majorLastCol, HEADER_STYLE);
-  styleRange(majorWs, 4, 0, 4, majorLastCol, DATA_STYLE);
-  majorWs["!cols"] = majorHeaders.map((h) => ({ wch: Math.min(48, Math.max(14, String(h).length + 2)) }));
-  XLSX.utils.book_append_sheet(wb, majorWs, "Major Element Level");
-  cfSheets.push(speedednessCf(2, 5, 5, 2 + 4, 2 + 6, 2 + 7));
+  // Major Element Level — real data from speededByMajorElement(), grouped by
+  // assessment (appearance order) with major elements alphabetical within,
+  // matching By_Assessment_Major's ordering in the reliability workbook.
+  const majorElementLevel = dataSheet({
+    title: "Major Element-Level Speededness, Omission, and Completion Analysis",
+    subtitle: "Interpret Speededness together with Omission Rate and Completion Rate. Small units can fluctuate because one or two students/items may change percentages substantially.",
+    labelHeaders: ["AssessmentName", "QuestionMajorElement"],
+    columnWidths: { A: 23.0, B: 39.09765625, C: 15.0, F: 32.796875, G: 15.0, H: 24.19921875, I: 15.0, K: 24.0, M: 15.0, R: 72.19921875 },
+    rows: majorRows,
+  });
+  XLSX.utils.book_append_sheet(wb, majorElementLevel.ws, "Major Element Level");
+  if (majorRows.length > 0) {
+    cfSheets.push(speedednessCf(2, 5, 4 + majorRows.length, majorElementLevel.speedCol, majorElementLevel.omitCol, majorElementLevel.compCol));
+  }
 
   return {
     workbook: wb,

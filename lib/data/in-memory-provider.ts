@@ -726,7 +726,7 @@ export class InMemoryDataProvider implements DataProvider {
       console.log(`[TEMP-DEBUG] diagResponsesFor(${a.name}): a.items.length=${a.items.length}`);
       console.log(`[TEMP-DEBUG] diagResponsesFor(${a.name}): a.responses.length=${a.responses.length}`);
     }
-    const itemMeta = new Map<string, { demand: string | null; itemSet: string | null; fallbackOrder: number }>();
+    const itemMeta = new Map<string, { demand: string | null; itemSet: string | null; major: string | null; fallbackOrder: number }>();
     let fallbackOrder = 0;
     const __tempDebugExcludedItemIds: string[] = []; // TEMP-DEBUG
     for (const it of a.items) {
@@ -734,7 +734,7 @@ export class InMemoryDataProvider implements DataProvider {
         if (__tempDebug) __tempDebugExcludedItemIds.push(it.id); // TEMP-DEBUG
         continue;
       }
-      itemMeta.set(it.id, { demand: it.demand, itemSet: it.itemSet ?? null, fallbackOrder: fallbackOrder++ });
+      itemMeta.set(it.id, { demand: it.demand, itemSet: it.itemSet ?? null, major: it.major ?? null, fallbackOrder: fallbackOrder++ });
     }
     if (__tempDebug) {
       console.log(
@@ -757,6 +757,7 @@ export class InMemoryDataProvider implements DataProvider {
         itemId: r.i,
         demandLevel: meta.demand,
         itemSet: meta.itemSet,
+        majorElement: meta.major,
         order,
         answered: r.a !== false,
         correct: r.s === 1,
@@ -3982,6 +3983,8 @@ export class InMemoryDataProvider implements DataProvider {
           byItemSet: d.byItemSet,
           timingByDemand: d.timingByDemand,
           omissionByPosition: d.omissionByPosition,
+          byMajorElement: d.byMajorElement,
+          timingByMajorElement: d.timingByMajorElement,
         };
       }),
     };
