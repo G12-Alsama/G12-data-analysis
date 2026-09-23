@@ -76,9 +76,9 @@ export interface TimingResult {
   meanResponseTimePerItem: number | null;
   /** Median, across students, of each student's total (summed) response time. */
   medianTotalResponseTime: number | null;
-  /** Mean score percentage across students. */
+  /** Mean score across students, as a fraction (0–1, e.g. 0.5 = 50%) — matches `medianCompletionRate`'s scale for a "0.0%"-formatted cell. */
   meanScorePct: number | null;
-  /** Median score percentage across students. */
+  /** Median score across students, as a fraction (0–1). */
   medianScorePct: number | null;
   /** Median, across students, of (answered ÷ presented). */
   medianCompletionRate: number | null;
@@ -310,6 +310,11 @@ export function timingPerformance(records: readonly DiagResponse[]): TimingResul
   const p = pearson(medTime, scorePct);
   const sp = spearman(medTime, scorePct);
   const totalP = pearson(totalTime, scorePct);
+  // scorePct is 0–100 (percentage points) for the correlation math above;
+  // meanScorePct/medianScorePct are exported as 0–1 fractions instead, to
+  // match medianCompletionRate's scale for a "0.0%"-formatted spreadsheet cell.
+  const meanScorePctFraction = mean(scorePct);
+  const medianScorePctFraction = medianOrNull(scorePct);
   if (__tempDebugLabel) {
     const pairs = medTime.map((mt, i) => [mt, scorePct[i]]);
     console.log(`[TEMP-DEBUG] timingPerformance(${__tempDebugLabel}): (medTime, scorePct) pairs=${JSON.stringify(pairs)}`);
@@ -324,8 +329,8 @@ export function timingPerformance(records: readonly DiagResponse[]): TimingResul
     medianResponseTimePerItem: medianOrNull(medTime),
     meanResponseTimePerItem: mean(medTime),
     medianTotalResponseTime: medianOrNull(totalTime),
-    meanScorePct: mean(scorePct),
-    medianScorePct: medianOrNull(scorePct),
+    meanScorePct: meanScorePctFraction === null ? null : meanScorePctFraction / 100,
+    medianScorePct: medianScorePctFraction === null ? null : medianScorePctFraction / 100,
     medianCompletionRate: medianOrNull(completionRate),
     totalTimePearson: totalP === null ? null : rnd(totalP),
   };
