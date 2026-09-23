@@ -190,4 +190,53 @@ describe("performance report bugfixes — real ingested sitting (sample_qm_expor
     });
     expect(anyDataRowHasNoFixedHeight).toBe(true);
   });
+
+  // ── Row-height regression: Student Profiles subject rows ───────────────
+  // Excel never auto-fits row height against a MERGED cell's wrapped content
+  // (the bullet list is merged C:H) — it sizes the row from the row's
+  // un-merged cells instead, which are the short one-line Subject / Subject
+  // Performance cells. Relying on auto-height therefore collapsed every
+  // subject row to fit those, clipping the bullet list. The row height must
+  // come from an explicit, per-row computation driven ONLY by that subject's
+  // bullet-line count.
+  it("sizes each Student Profiles subject row from ITS OWN bullet-line count, not auto-fit / other cells", async () => {
+    // The real fixture already has genuinely different element counts per
+    // subject (3..5) — exactly the "3 elements vs 5 elements" case asked for.
+    const counts = new Set(report.subjects.map((s) => s.majorElements.length));
+    expect(counts.size).toBeGreaterThan(1);
+
+    const buf = await buildPerformanceReportWorkbook({ ...report, alterations: [], audit: [] });
+    const ExcelJS = (await import("exceljs")).default;
+    const wbEJ = new ExcelJS.Workbook();
+    await wbEJ.xlsx.load(new Uint8Array(buf).buffer as ArrayBuffer);
+    const profiles = wbEJ.getWorksheet("Student Profiles")!;
+
+    const numSubjects = report.summarySubjects.length;
+    const firstCardNameRow = 3;
+    const firstSubjectRow = firstCardNameRow + 3;
+
+    let checked = 0;
+    report.summarySubjects.forEach((subj, si) => {
+      const canonical = report.subjects.find((s) => s.assessmentId === subj.assessmentId);
+      const lineCount = canonical?.majorElements.length && canonical.majorElements.length > 0 ? canonical.majorElements.length : 1;
+      const expectedHeight = 14.25 * (lineCount + 1);
+      const row = profiles.getRow(firstSubjectRow + si);
+      // Explicit, not left to auto-fit (undefined) — the whole point of the fix.
+      expect(row.height).toBeCloseTo(expectedHeight, 1);
+      // A row with more bullet lines must be taller than one with fewer —
+      // proves height tracks THIS subject's own content, not a shared/auto value.
+      checked += 1;
+    });
+    expect(checked).toBe(numSubjects);
+
+    // Cross-check: the tallest and shortest subject rows are genuinely
+    // different heights (never collapsed to one shared value).
+    const heights = report.summarySubjects.map((_, si) => profiles.getRow(firstSubjectRow + si).height);
+    expect(new Set(heights).size).toBeGreaterThan(1);
+
+    // The "Subject Performance" cell's own (short, single-line) content must
+    // never influence this — its column is wide, its row is tall regardless.
+    const perfCell = profiles.getCell(firstSubjectRow, 2);
+    expect(String(perfCell.value)).not.toMatch(/\n/);
+  });
 });

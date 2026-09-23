@@ -628,11 +628,15 @@ function buildStudentProfilesSheet(wb: ExcelJS.Workbook, input: PerformanceRepor
         border: true,
       });
 
-      // No fixed row height: both this row's wrapped performance-level cell and
-      // its multi-line bullet cell need Excel's own auto-height (no
-      // `customHeight`) to expand for whatever text they actually hold —
-      // a hardcoded per-element-count formula clips as soon as a label or a
-      // bullet line runs longer than the sample data it was tuned against.
+      // Excel never auto-fits row height against a MERGED cell's wrapped
+      // content — it sizes the row from its un-merged cells only, which here
+      // are the short one-line Subject / Subject Performance cells. Left to
+      // "auto", the row collapses to fit those and clips the bullet list. So
+      // this row's height is computed explicitly from the ONE thing that
+      // should drive it — the bullet cell's own line count — and nothing else
+      // in the row (not the performance-level cell, not its column width).
+      const bulletLineCount = result && majorElements.length > 0 ? majorElements.length : 1;
+      ws.getRow(row).height = 14.25 * (bulletLineCount + 1);
     });
 
     ws.getRow(spacerRow).height = 8;
