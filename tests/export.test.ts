@@ -31,10 +31,11 @@ import type {
   ItemResponseFact,
   GradesInput,
 } from "@/lib/export";
-import { getEngine, responsesFromClean } from "@/lib/engine";
+import { DEFAULT_SCORING_CONFIG, getEngine, responsesFromClean } from "@/lib/engine";
 import type { ItemMeta, ItemStat, ResponseRecord } from "@/lib/engine";
 import { parseExport, ingestAndClean } from "@/lib/ingest";
 import { InMemoryDataProvider } from "@/lib/data/in-memory-provider";
+import { canonicalSubjectLabel } from "@/lib/data/subject-catalog";
 import { loadParityFixtures, sampleExportPath } from "./fixtures";
 
 const engine = getEngine();
@@ -145,6 +146,46 @@ describe("item analysis workbook — exact layout", () => {
     expect(oCell.s?.fill?.fgColor?.rgb).toBe(
       (RATING_STYLES[first.overallReview]!.fill as { fgColor: { rgb: string } }).fgColor.rgb,
     );
+    // Exact reference-file colours (ARGB, no alpha) — not just "some fill".
+    expect((RATING_STYLES.Good!.fill as { fgColor: { rgb: string } }).fgColor.rgb).toBe("DFF3E4");
+    expect((RATING_STYLES.Review!.fill as { fgColor: { rgb: string } }).fgColor.rgb).toBe("FFF3CD");
+    expect((RATING_STYLES.Flag!.fill as { fgColor: { rgb: string } }).fgColor.rgb).toBe("FCE4E4");
+  });
+
+  it("pink title bar is merged full-width and the header row is bold/centered with no fill", () => {
+    const ws = wb.Sheets["Applicable Math"]!;
+    type Style = { fill?: { fgColor?: { rgb?: string } }; font?: { bold?: boolean }; alignment?: { horizontal?: string; vertical?: string } };
+    const titleCell = ws[XLSXR.utils.encode_cell({ r: 0, c: 0 })] as { s?: Style };
+    expect(titleCell.s?.fill?.fgColor?.rgb).toBe("B2375B");
+    expect(titleCell.s?.font?.bold).toBe(true);
+
+    const merges = (ws["!merges"] ?? []) as { s: { r: number; c: number }; e: { r: number; c: number } }[];
+    const lastCol = ITEM_ANALYSIS_HEADERS.length - 1;
+    expect(merges).toContainEqual({ s: { r: 0, c: 0 }, e: { r: 0, c: lastCol } });
+    // Reading guide spans rows 3–4 (index 2–3) as ONE merged block.
+    expect(merges).toContainEqual({ s: { r: 2, c: 0 }, e: { r: 3, c: lastCol } });
+
+    const headerCell = ws[XLSXR.utils.encode_cell({ r: 5, c: 0 })] as { s?: Style };
+    expect(headerCell.s?.font?.bold).toBe(true);
+    expect(headerCell.s?.alignment?.horizontal).toBe("center");
+    expect(headerCell.s?.alignment?.vertical).toBe("center");
+    expect(headerCell.s?.fill).toBeUndefined();
+  });
+
+  it("sets number formats on the statistic columns and sizes columns/rows", () => {
+    const ws = wb.Sheets["Applicable Math"]!;
+    type Style = { numFmt?: string };
+    // Row 7 = index 6. Avg Response Time = col 7, P-Value = col 8.
+    const rtCell = ws[XLSXR.utils.encode_cell({ r: 6, c: 7 })] as { s?: Style };
+    const pCell = ws[XLSXR.utils.encode_cell({ r: 6, c: 8 })] as { s?: Style };
+    expect(rtCell.s?.numFmt).toBe("0.0");
+    expect(pCell.s?.numFmt).toBe("0.000");
+
+    expect(ws["!cols"]).toHaveLength(ITEM_ANALYSIS_HEADERS.length);
+    expect((ws["!cols"]![0] as { wch: number }).wch).toBeGreaterThan(0);
+    const rows = ws["!rows"] as { hpt?: number }[];
+    expect(rows[0]?.hpt).toBeGreaterThan(0); // title row sized
+    expect(rows[6]?.hpt).toBeGreaterThan(0); // first data row sized (not Excel default)
   });
 
   it("builds the README & Summary sheet", () => {
@@ -160,6 +201,53 @@ describe("item analysis workbook — exact layout", () => {
     expect(row[4]).toBe(5); // group size
     // Good + Review + Flag counts sum to item count.
     expect(Number(row[5]) + Number(row[6]) + Number(row[7])).toBe(40);
+  });
+
+  it("documents the REAL scoring thresholds in a Methodology & Rating Thresholds table, never retyped", () => {
+    const aoa = aoaOf(wb as unknown as XLSXR.WorkBook, "README & Summary");
+    const flat = aoa.map((r) => String(r?.[0] ?? ""));
+    const methodTitleRow = flat.indexOf("Methodology & Rating Thresholds");
+    expect(methodTitleRow).toBeGreaterThan(0);
+    expect(aoa[methodTitleRow + 1]).toEqual(["Metric", "Definition Used", "Good", "Review", "Flag", "Important Note"]);
+
+    const q = DEFAULT_SCORING_CONFIG.quality; // this fixture never overrides qualityThresholds
+    const pValueRow = aoa[methodTitleRow + 2]!;
+    expect(pValueRow[0]).toBe("P-Value (item difficulty)");
+    // The Good band text is built FROM the config values, not hardcoded literals.
+    expect(String(pValueRow[2])).toContain(String(q.pValue.goodUpTo));
+    expect(String(pValueRow[3])).toContain(String(q.pValue.flagBelow));
+    expect(String(pValueRow[4])).toContain(String(q.pValue.reviewUpTo));
+
+    const itemTotalRow = aoa[methodTitleRow + 3]!;
+    expect(itemTotalRow[0]).toBe("Item-Total Correlation");
+    expect(String(itemTotalRow[2])).toContain(String(q.itemTotal.reviewBelow));
+    expect(String(itemTotalRow[4])).toContain(String(q.itemTotal.flagBelow));
+
+    const noteTitleRow = flat.indexOf("Important interpretation note");
+    expect(noteTitleRow).toBeGreaterThan(methodTitleRow);
+    expect(String(aoa[noteTitleRow + 1]?.[0] ?? "")).toContain("evidence for expert review");
+  });
+
+  it("uses a custom qualityThresholds when the caller supplies one (never falls back silently)", () => {
+    const customQuality = {
+      ...DEFAULT_SCORING_CONFIG.quality,
+      itemTotal: { flagBelow: 0.42, reviewBelow: 0.77 },
+    };
+    const customInput = assembleItemAnalysis({
+      cycleName: "May 2026",
+      assessments: [{ id: ASSESSMENT, name: ASSESSMENT }],
+      stats,
+      facts,
+      qualityThresholds: customQuality,
+    });
+    expect(customInput.qualityThresholds).toBe(customQuality);
+    const customWb = buildItemAnalysisWorkbook(customInput);
+    const aoa = aoaOf(customWb as unknown as XLSXR.WorkBook, "README & Summary");
+    const flat = aoa.map((r) => String(r?.[0] ?? ""));
+    const methodTitleRow = flat.indexOf("Methodology & Rating Thresholds");
+    const itemTotalRow = aoa[methodTitleRow + 3]!;
+    expect(String(itemTotalRow[2])).toContain("0.77");
+    expect(String(itemTotalRow[4])).toContain("0.42");
   });
 
   it("round-trips through a buffer", () => {
@@ -225,6 +313,94 @@ describe("item analysis — average response time from real responses", () => {
         expect(r.participantsPresented).toBeGreaterThan(0);
         expect(r.participantsAnswered).toBeLessThanOrEqual(r.participantsPresented);
       }
+    }
+  });
+
+  it("canonicalizes every sheet title from the raw QM assessment name — Arabic script included", () => {
+    // The real sample export's Arabic sheet name is a raw/local-script label
+    // (straight off the QM export), exactly the case the sheet title must never
+    // be built from directly.
+    const file = readFileSync(sampleExportPath());
+    const { rows } = parseExport(file);
+    const { cleanedResponses } = ingestAndClean(rows);
+    const rawNames = [...new Set(cleanedResponses.map((r) => r.assessmentName))];
+    expect(rawNames.some((n) => /[؀-ۿ]/.test(n))).toBe(true); // sanity: fixture really has raw Arabic
+
+    const responses = responsesFromClean(cleanedResponses);
+    const itemMap = new Map<string, ItemMeta>();
+    for (const r of cleanedResponses) {
+      if (!itemMap.has(r.qmQuestionId)) {
+        itemMap.set(r.qmQuestionId, { itemId: r.qmQuestionId, assessmentId: r.assessmentName });
+      }
+    }
+    const stats = engine.computeItemStats({ responses, items: [...itemMap.values()] });
+    const facts: ItemResponseFact[] = cleanedResponses.map((r) => ({
+      assessmentId: r.assessmentName,
+      itemId: r.qmQuestionId,
+      participantId: r.participantPseudonym,
+      answered: !!r.answerGiven,
+      responseTime: r.responseTime,
+    }));
+    const input = assembleItemAnalysis({
+      cycleName: "Feb 2026",
+      assessments: rawNames.map((name) => ({ id: name, name })),
+      stats,
+      facts,
+    });
+
+    // Every block name is now a canonical English label — never raw/local-script.
+    for (const block of input.blocks) {
+      expect(/[؀-ۿ]/.test(block.name)).toBe(false);
+    }
+    const arabicBlock = input.blocks.find((b) => /arabic/i.test(b.name));
+    expect(arabicBlock?.name).toBe("G12++ Arabic as a 1st Language");
+
+    const wb = buildItemAnalysisWorkbook(input);
+    expect(wb.SheetNames).toContain("G12++ Arabic as a 1st Language");
+    expect(wb.SheetNames.some((n) => /[؀-ۿ]/.test(n))).toBe(false);
+  });
+});
+
+describe("canonicalSubjectLabel — sheet titles never come from a raw/local-script field", () => {
+  it("maps every known raw spelling to its canonical English label, prefix preserved", () => {
+    expect(canonicalSubjectLabel("G12++ اللّغة العربيّة")).toBe("G12++ Arabic as a 1st Language");
+    expect(canonicalSubjectLabel("G12++ Applicable Maths")).toBe("G12++ Applicable Math");
+    expect(canonicalSubjectLabel("G12++ English as 2nd Language")).toBe("G12++ English as a 2nd Language");
+    expect(canonicalSubjectLabel("G12++ Scientific Thinking")).toBe("G12++ Scientific Thinking");
+    expect(canonicalSubjectLabel("G12++ Life Success Skills")).toBe("G12++ Life Success Skills");
+    // No "G12++" prefix in the raw name → none added.
+    expect(canonicalSubjectLabel("Applicable Math")).toBe("Applicable Math");
+    expect(canonicalSubjectLabel("Arabic 1st Language")).toBe("Arabic as a 1st Language");
+  });
+
+  it("leaves an unrecognised name unchanged rather than silently renaming it", () => {
+    expect(canonicalSubjectLabel("User Experience Survey")).toBe("User Experience Survey");
+  });
+});
+
+describe("InMemoryDataProvider.getItemAnalysisData — real production data path", () => {
+  it("populates wording/majorElement/demandLevel and avg response time (not blank)", () => {
+    const provider = new InMemoryDataProvider();
+    const data = provider.getItemAnalysisData("may-2026");
+    expect(data).not.toBeNull();
+    expect(data!.stats.length).toBeGreaterThan(0);
+    // These come straight from items/facts the DB (or seed) already carries —
+    // the export must not leave them blank for lack of being asked for.
+    expect(data!.stats.some((s) => !!s.wording)).toBe(true);
+    expect(data!.stats.some((s) => !!s.majorElement)).toBe(true);
+    expect(data!.stats.some((s) => !!s.demandLevel)).toBe(true);
+    expect(data!.facts.some((f) => f.responseTime !== null)).toBe(true);
+    expect(data!.qualityThresholds).toBeDefined();
+
+    const input = assembleItemAnalysis(data!);
+    const rows = input.blocks.flatMap((b) => b.rows);
+    expect(rows.some((r) => r.avgResponseTime !== null)).toBe(true);
+    expect(rows.some((r) => !!r.stat.wording)).toBe(true);
+
+    // Sheet titles are canonical for every subject, not just Arabic.
+    const wb = buildItemAnalysisWorkbook(input);
+    for (const name of wb.SheetNames) {
+      expect(/[؀-ۿ]/.test(name)).toBe(false);
     }
   });
 });

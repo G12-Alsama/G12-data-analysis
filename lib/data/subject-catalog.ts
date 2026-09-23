@@ -74,3 +74,38 @@ export function isSurveyAssessment(name: string | null | undefined): boolean {
 export function isScoredExamAssessment(name: string | null | undefined): boolean {
   return !isSurveyAssessment(name);
 }
+
+/**
+ * Item-analysis-export spelling for each of the five G12++ subjects — the same
+ * subject IDENTIFICATION as `SUBJECT_CATALOG` (via `matchesRawName` below),
+ * just a different spelling convention ("Applicable Math", not "Applicable
+ * Maths"; "Arabic as a 1st Language", not "Arabic 1st Language") to match the
+ * MCQ_Item_Analysis reference file. Keeping matching in one place (the
+ * predicates above) means this and `canonicalSubjectName` can never disagree
+ * on WHICH subject a raw name is, only on how it's spelled.
+ */
+const ITEM_ANALYSIS_LABEL_BY_CATALOG_ID: Record<string, string> = {
+  "subj-applicable-maths": "Applicable Math",
+  "subj-scientific-thinking": "Scientific Thinking",
+  "subj-arabic-1st-language": "Arabic as a 1st Language",
+  "subj-english-2nd-language": "English as a 2nd Language",
+  "subj-life-success-skills": "Life Success Skills",
+};
+
+/**
+ * Resolve a raw assessment name to its canonical English subject label (the
+ * item-analysis spelling above), preserving any leading label prefix (e.g.
+ * "G12++ ") the raw name carried. A name that matches none of the five known
+ * subjects is returned unchanged — this never silently renames something it
+ * doesn't recognise.
+ */
+export function canonicalSubjectLabel(rawName: string): string {
+  const trimmed = rawName.trim();
+  if (!trimmed) return rawName;
+  const prefixMatch = trimmed.match(/^(G12\+\+\s*)/i);
+  const prefix = prefixMatch?.[1] ?? "";
+  const rest = prefix ? trimmed.slice(prefix.length) : trimmed;
+  const entry = SUBJECT_CATALOG.find((s) => s.matchesRawName(rest) || s.matchesRawName(trimmed));
+  if (!entry) return rawName;
+  return `${prefix}${ITEM_ANALYSIS_LABEL_BY_CATALOG_ID[entry.id] ?? entry.name}`;
+}

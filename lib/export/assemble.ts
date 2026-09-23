@@ -6,7 +6,8 @@
  */
 
 import type { ItemStat } from "@/lib/engine";
-import { discriminationGroupSize } from "@/lib/engine";
+import { DEFAULT_SCORING_CONFIG, discriminationGroupSize } from "@/lib/engine";
+import { canonicalSubjectLabel } from "@/lib/data/subject-catalog";
 import { roundOrNull } from "./sheet-utils";
 import type {
   AssembleItemAnalysisArgs,
@@ -86,7 +87,10 @@ export function assembleItemAnalysis(args: AssembleItemAnalysisArgs): ItemAnalys
     const participantCount = participants.size;
     blocks.push({
       id: assessment.id,
-      name: assessment.name,
+      // Sheet titles/tabs must always read from the canonical English subject
+      // label, never a raw or local-script name straight off the QM export
+      // (e.g. an Arabic-script assessment name) — see canonicalSubjectLabel.
+      name: canonicalSubjectLabel(assessment.name),
       participants: participantCount,
       rowsAnalysed: aFacts.length,
       groupSize: discriminationGroupSize(participantCount),
@@ -94,5 +98,9 @@ export function assembleItemAnalysis(args: AssembleItemAnalysisArgs): ItemAnalys
     });
   }
 
-  return { cycleName, blocks };
+  return {
+    cycleName,
+    blocks,
+    qualityThresholds: args.qualityThresholds ?? DEFAULT_SCORING_CONFIG.quality,
+  };
 }

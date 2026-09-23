@@ -831,6 +831,7 @@ export class InMemoryDataProvider implements DataProvider {
     return a.items.map((it) => ({
       itemId: it.id,
       assessmentId: a.id,
+      wording: it.wording,
       majorElement: it.major,
       subElement: it.sub,
       demandLevel: it.demand,
@@ -3891,9 +3892,34 @@ export class InMemoryDataProvider implements DataProvider {
     const facts: ItemResponseFact[] = [];
     const reviews: Record<string, ItemReviewDecision> = {};
     for (const a of this.seed.liveCycle.assessments) {
-      stats.push(...engine.computeItemStats({ responses: this.responsesOf(a), scoringConfig: this.scoringConfig() }));
+      // Pass item metadata through so ItemStat carries wording/majorElement/
+      // subElement/demandLevel (the export reads these columns straight off the
+      // stat — see lib/export/item-analysis.ts). Without `items` here the engine
+      // has nothing to key metadata off and those columns render blank.
+      stats.push(
+        ...engine.computeItemStats({
+          responses: this.responsesOf(a),
+          items: this.itemMetasFor(a),
+          scoringConfig: this.scoringConfig(),
+        }),
+      );
       const excluded = this.excludedSet(cycleId, a.id);
-      for (const r of a.responses) facts.push({ assessmentId: a.id, itemId: r.i, participantId: r.p, answered: true, responseTime: null });
+      // Per-item average response time, already computed at hydration time from
+      // the real `responses.response_time` column (see supabase-hydrate.ts /
+      // build-live-cycle.ts). SeedResponse carries no per-response time, so the
+      // known item-level average is threaded onto every fact for that item —
+      // averaging it back out in assembleItemAnalysis reproduces the same value
+      // without re-deriving it from anything.
+      const avgTimeByItem = new Map(a.items.map((it) => [it.id, it.avgResponseTime]));
+      for (const r of a.responses) {
+        facts.push({
+          assessmentId: a.id,
+          itemId: r.i,
+          participantId: r.p,
+          answered: r.a !== false,
+          responseTime: avgTimeByItem.get(r.i) ?? null,
+        });
+      }
       for (const it of a.items) {
         if (excluded.has(it.id)) reviews[it.id] = { exclude: true, reason: this.reasons.get(`${cycleId}:${a.id}:${it.id}`) ?? null };
       }
@@ -3904,6 +3930,7 @@ export class InMemoryDataProvider implements DataProvider {
       stats,
       facts,
       reviews,
+      qualityThresholds: this.scoringConfig().quality,
     };
   }
 

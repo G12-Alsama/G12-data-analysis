@@ -14,19 +14,22 @@ export { XLSX };
 
 export type CellStyle = NonNullable<XLSX.CellObject["s"]>;
 
-/** Conditional-format-style fills for the three quality ratings (Excel palette). */
+/**
+ * Conditional-format-style fills for the three quality ratings, matching the
+ * manually-built MCQ_Item_Analysis reference file exactly (ARGB, no alpha).
+ */
 export const RATING_STYLES: Record<string, CellStyle> = {
   Good: {
-    fill: { patternType: "solid", fgColor: { rgb: "C6EFCE" } },
-    font: { color: { rgb: "006100" } },
+    fill: { patternType: "solid", fgColor: { rgb: "DFF3E4" } },
+    font: { color: { rgb: "14532D" } },
   },
   Review: {
-    fill: { patternType: "solid", fgColor: { rgb: "FFEB9C" } },
-    font: { color: { rgb: "9C6500" } },
+    fill: { patternType: "solid", fgColor: { rgb: "FFF3CD" } },
+    font: { color: { rgb: "7C5800" } },
   },
   Flag: {
-    fill: { patternType: "solid", fgColor: { rgb: "FFC7CE" } },
-    font: { color: { rgb: "9C0006" } },
+    fill: { patternType: "solid", fgColor: { rgb: "FCE4E4" } },
+    font: { color: { rgb: "8A1C1C" } },
   },
 };
 
@@ -67,6 +70,104 @@ export const GUIDE_STYLE: CellStyle = {
   font: { color: { rgb: "595959" } },
   alignment: { wrapText: true, vertical: "top" },
 };
+
+/**
+ * Item-analysis-specific styling, matching the manually-built MCQ_Item_Analysis
+ * reference file. Named `IA_*` (rather than reusing the generic TITLE_STYLE /
+ * HEADER_STYLE / etc. above) so this workbook's pink branding never leaks into
+ * the other export templates (Grades, Score Analysis, Boundaries, Diagnostics)
+ * that share those generic constants.
+ */
+const IA_TITLE_BAR_FILL: CellStyle["fill"] = { patternType: "solid", fgColor: { rgb: "B2375B" } };
+
+export const IA_TITLE_STYLE: CellStyle = {
+  font: { name: "Carlito", sz: 16, bold: true, color: { rgb: "FFFFFF" } },
+  fill: IA_TITLE_BAR_FILL,
+  alignment: { vertical: "center", horizontal: "left" },
+};
+
+export const IA_SECTION_TITLE_STYLE: CellStyle = {
+  font: { name: "Carlito", sz: 12, bold: true, color: { rgb: "FFFFFF" } },
+  fill: IA_TITLE_BAR_FILL,
+  alignment: { vertical: "center", horizontal: "left" },
+};
+
+export const IA_META_STYLE: CellStyle = {
+  font: { color: { rgb: "333333" } },
+  alignment: { vertical: "center", horizontal: "left" },
+};
+
+export const IA_GUIDE_STYLE: CellStyle = {
+  fill: { patternType: "solid", fgColor: { rgb: "F9F5F2" } },
+  font: { color: { rgb: "47535A" } },
+  alignment: { wrapText: true, vertical: "top", horizontal: "left" },
+};
+
+export const IA_HEADER_STYLE: CellStyle = {
+  font: { bold: true },
+  alignment: { horizontal: "center", vertical: "center", wrapText: true },
+};
+
+const IA_THIN_BORDER_SIDE = { style: "thin" as const, color: { rgb: "D9D9D9" } };
+
+/** Base style for every data cell: thin border + wrap/vertical-top alignment. */
+export const IA_DATA_STYLE: CellStyle = {
+  border: {
+    top: IA_THIN_BORDER_SIDE,
+    bottom: IA_THIN_BORDER_SIDE,
+    left: IA_THIN_BORDER_SIDE,
+    right: IA_THIN_BORDER_SIDE,
+  },
+  alignment: { wrapText: true, vertical: "top" },
+};
+
+/** Merge a rectangular, inclusive cell range onto the sheet's `!merges`. */
+export function mergeRange(ws: XLSX.WorkSheet, r1: number, c1: number, r2: number, c2: number): void {
+  const merges = (ws["!merges"] ??= []);
+  merges.push({ s: { r: r1, c: c1 }, e: { r: r2, c: c2 } });
+}
+
+/** Set column widths ("wch" character-width units), one entry per column, in order. */
+export function setColWidths(ws: XLSX.WorkSheet, widthsCh: number[]): void {
+  ws["!cols"] = widthsCh.map((wch) => ({ wch }));
+}
+
+/** Set row heights (points) by 0-based row index. Rows not listed keep Excel's default. */
+export function setRowHeights(ws: XLSX.WorkSheet, heightsPt: Record<number, number>): void {
+  const rows = (ws["!rows"] ??= []);
+  for (const [idx, hpt] of Object.entries(heightsPt)) {
+    rows[Number(idx)] = { ...(rows[Number(idx)] ?? {}), hpt };
+  }
+}
+
+/**
+ * Estimate a wrapped-text row height (points) tall enough that the longest
+ * cell in the row isn't visibly cut off. This is a heuristic (Excel's actual
+ * text metrics depend on the rendering font), so it deliberately errs
+ * generous rather than risking truncation — exactly matched pixel heights
+ * aren't required, only "not cut off".
+ */
+export function estimateRowHeight(
+  cells: { text: string | null | undefined; colWidthCh: number }[],
+  opts?: { min?: number; max?: number; lineHeight?: number },
+): number {
+  const lineHeight = opts?.lineHeight ?? 15;
+  const min = opts?.min ?? 20;
+  const max = opts?.max ?? 260;
+  let maxLines = 1;
+  for (const { text, colWidthCh } of cells) {
+    if (!text) continue;
+    // Arabic (and other RTL) glyphs run wider per character than Latin ones at
+    // the same column width, so fewer characters fit per wrapped line.
+    const isRtl = /[֐-ࣿ]/.test(text);
+    const charsPerLine = Math.max(6, Math.floor(colWidthCh * (isRtl ? 0.9 : 1.7)));
+    const lines = text
+      .split("\n")
+      .reduce((sum, part) => sum + Math.max(1, Math.ceil(part.length / charsPerLine)), 0);
+    if (lines > maxLines) maxLines = lines;
+  }
+  return Math.min(max, Math.max(min, maxLines * lineHeight));
+}
 
 /** Set a cell's style, creating the cell if necessary. */
 export function styleCell(
