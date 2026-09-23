@@ -43,6 +43,7 @@
  */
 
 import ExcelJS from "exceljs";
+import JSZip from "jszip";
 import {
   colorForLevel,
   PERFORMANCE_REPORT_BRAND,
@@ -191,6 +192,18 @@ function titleBar(
   ws.getRow(1).height = opts.height;
 }
 
+/**
+ * Column width (Excel character-width units) that fits the LONGEST of `labels`
+ * on one line, with a little padding. Computed from the cycle's actual
+ * configured performance/award levels every time — never a width picked to
+ * fit whatever labels happened to be in the sample data — so a column never
+ * clips even if a level is later renamed to something longer.
+ */
+function widthForLabels(labels: readonly string[], min = 12): number {
+  const longest = labels.reduce((m, l) => Math.max(m, l.length), 0);
+  return Math.max(min, longest + 4);
+}
+
 /** Fraction (0–1) of `values` equal to `target`, over defined entries. */
 function proportionAt(values: (string | undefined)[], target: string): number {
   const defined = values.filter((v) => v != null && v !== "");
@@ -282,7 +295,7 @@ function buildClassPerformanceSheet(wb: ExcelJS.Workbook, input: PerformanceRepo
     style(labelCell, {
       font: { size: 10, bold: true, color: { argb: argb(text) } },
       fill: argb(fill),
-      align: { horizontal: "left", vertical: "middle" },
+      align: { horizontal: "left", vertical: "middle", wrapText: true },
       border: true,
     });
     cols.forEach((c, ci) => {
@@ -324,13 +337,17 @@ function buildClassPerformanceSheet(wb: ExcelJS.Workbook, input: PerformanceRepo
       style(cell, {
         font: { size: 10, bold: ci !== 1, color: { argb: argb(text) } },
         fill: argb(fill),
+        align: ci === 0 ? { horizontal: "left", vertical: "middle", wrapText: true } : undefined,
         numFmt: ci === 2 ? "0%" : undefined,
         border: true,
       });
     });
   });
 
-  ws.getColumn(1).width = 22;
+  // Column 1 carries BOTH performance-level labels (tier rows) and award-level
+  // labels (the distribution table below) — size it to the longer of the two
+  // actual configured lists, not a guessed constant, so neither ever clips.
+  ws.getColumn(1).width = widthForLabels([...levels, ...input.awardLevels], 22);
   cols.forEach((c, i) => {
     ws.getColumn(2 + i).width = c.kind === "overall" ? 16 : 14;
   });
@@ -384,7 +401,7 @@ function buildStudentSummarySheet(wb: ExcelJS.Workbook, input: PerformanceReport
     style(cell, {
       font: { size: 11, color: { argb: DARK } },
       fill: argb(fill),
-      align: { horizontal: "center", vertical: "middle" },
+      align: { horizontal: "center", vertical: "middle", wrapText: true },
       border: true,
     });
   });
@@ -401,15 +418,16 @@ function buildStudentSummarySheet(wb: ExcelJS.Workbook, input: PerformanceReport
     style(cell, {
       font: { size: 11, color: { argb: DARK } },
       fill: argb(fill),
-      align: { horizontal: "center", vertical: "middle" },
+      align: { horizontal: "center", vertical: "middle", wrapText: true },
       border: true,
     });
   });
 
-  // Data rows.
+  // Data rows. No fixed row height: the Award Level / subject cells below wrap
+  // text, and only an auto-height row (no `customHeight`) lets Excel expand it
+  // for a level name that doesn't fit the column on one line.
   input.students.forEach((st, i) => {
     const row = summaryStudentRow(i);
-    ws.getRow(row).height = 19.95;
     const cardTarget = `A${profileCardStartRow(numSubjects, i)}`;
 
     const idCell = ws.getCell(row, 1);
@@ -432,7 +450,7 @@ function buildStudentSummarySheet(wb: ExcelJS.Workbook, input: PerformanceReport
     style(awardCell, {
       font: { size: 11, color: { argb: argb(awardStyle.text) } },
       fill: argb(awardStyle.fill),
-      align: { horizontal: "center", vertical: "middle" },
+      align: { horizontal: "center", vertical: "middle", wrapText: true },
       border: true,
     });
 
@@ -446,13 +464,13 @@ function buildStudentSummarySheet(wb: ExcelJS.Workbook, input: PerformanceReport
         style(cell, {
           font: { size: 11, color: { argb: argb(s.text) } },
           fill: argb(s.fill),
-          align: { horizontal: "center", vertical: "middle" },
+          align: { horizontal: "center", vertical: "middle", wrapText: true },
           border: true,
         });
       } else {
         style(cell, {
           font: { size: 11, color: { argb: DARK } },
-          align: { horizontal: "center", vertical: "middle" },
+          align: { horizontal: "center", vertical: "middle", wrapText: true },
           border: true,
         });
       }
@@ -464,13 +482,16 @@ function buildStudentSummarySheet(wb: ExcelJS.Workbook, input: PerformanceReport
     style(openCell, { border: true });
   });
 
+  const awardColWidth = widthForLabels(input.awardLevels, 20);
+  const subjectColWidth = widthForLabels(levels, 18);
   ws.getColumn(1).width = 16;
   ws.getColumn(2).width = 22;
-  ws.getColumn(3).width = 24;
-  for (let i = 0; i < numSubjects; i++) ws.getColumn(4 + i).width = 20;
+  ws.getColumn(3).width = awardColWidth;
+  for (let i = 0; i < numSubjects; i++) ws.getColumn(4 + i).width = subjectColWidth;
   ws.getColumn(openProfileCol).width = 14;
   ws.getColumn(openProfileCol + 1).width = 3;
-  ws.getColumn(legendCol).width = 32;
+  // The legend column carries both award- and performance-level labels.
+  ws.getColumn(legendCol).width = widthForLabels([...input.awardLevels, ...levels], 28);
 
   ws.views = [{ state: "frozen", xSplit: 0, ySplit: 3, topLeftCell: "A4", activeCell: "A4" }];
 }
@@ -484,8 +505,6 @@ function buildStudentProfilesSheet(wb: ExcelJS.Workbook, input: PerformanceRepor
   titleBar(ws, lastCol, "Student Profiles", { height: 46.5, align: "center" });
   addHeaderLogo(ws, logoImageId);
   ws.getRow(2).height = 6;
-
-  const elementCountByAssessment = new Map(input.subjects.map((s) => [s.assessmentId, s.majorElements.length]));
 
   input.students.forEach((st, i) => {
     const nameRow = profileCardStartRow(numSubjects, i);
@@ -529,7 +548,8 @@ function buildStudentProfilesSheet(wb: ExcelJS.Workbook, input: PerformanceRepor
       align: { horizontal: "center", vertical: "middle", wrapText: true },
       border: true,
     });
-    ws.getRow(awardRow).height = 22.2;
+    // No fixed height — wrapText above needs an auto-height row to actually
+    // expand for a long award label rather than clip it.
 
     // Column header row.
     ws.mergeCells(headerRow, 3, headerRow, lastCol);
@@ -581,13 +601,13 @@ function buildStudentProfilesSheet(wb: ExcelJS.Workbook, input: PerformanceRepor
         style(perfCell, {
           font: { size: 11, bold: true, color: { argb: argb(s.text) } },
           fill: argb(s.fill),
-          align: { horizontal: "center", vertical: "middle" },
+          align: { horizontal: "center", vertical: "middle", wrapText: true },
           border: true,
         });
       } else {
         style(perfCell, {
           font: { size: 11, bold: true, color: { argb: DARK } },
-          align: { horizontal: "center", vertical: "middle" },
+          align: { horizontal: "center", vertical: "middle", wrapText: true },
           border: true,
         });
       }
@@ -608,15 +628,18 @@ function buildStudentProfilesSheet(wb: ExcelJS.Workbook, input: PerformanceRepor
         border: true,
       });
 
-      const n = subj.assessmentId ? (elementCountByAssessment.get(subj.assessmentId) ?? majorElements.length) : majorElements.length;
-      ws.getRow(row).height = 14.25 * (Math.max(n, 1) + 1);
+      // No fixed row height: both this row's wrapped performance-level cell and
+      // its multi-line bullet cell need Excel's own auto-height (no
+      // `customHeight`) to expand for whatever text they actually hold —
+      // a hardcoded per-element-count formula clips as soon as a label or a
+      // bullet line runs longer than the sample data it was tuned against.
     });
 
     ws.getRow(spacerRow).height = 8;
   });
 
   ws.getColumn(1).width = 22;
-  ws.getColumn(2).width = 26;
+  ws.getColumn(2).width = widthForLabels([...levels, ...input.awardLevels], 24);
   ws.getColumn(3).width = 18;
   ws.getColumn(4).width = 9;
   ws.getColumn(5).width = 9;
@@ -670,6 +693,41 @@ function buildAuditTrailSheetXlsx(wb: ExcelJS.Workbook, input: PerformanceReport
   ws.columns = [{ width: 22 }, { width: 18 }, { width: 22 }, { width: 44 }, { width: 14 }, { width: 14 }];
 }
 
+/**
+ * ExcelJS's `cell.value = { hyperlink }` API (used by `hyperlinkCell` above)
+ * has no way to write a pure internal same-workbook link: it *always* also
+ * emits an external hyperlink relationship whose Target is the raw
+ * `'Sheet'!Cell` string with `TargetMode="External"` — real Excel then
+ * resolves that Target as a file path relative to wherever the workbook was
+ * saved (e.g. `C:\Users\...\Downloads\'Student Profiles'!A3`) and blocks it
+ * as an unsafe link. A real internal link (confirmed against the reference
+ * file's own XML) carries a bare `location` attribute and NO relationship at
+ * all. So after ExcelJS writes the buffer, strip every hyperlink's `r:id` and
+ * its matching external relationship, leaving only `location` — turning it
+ * into the internal, same-workbook jump it was always meant to be.
+ */
+async function stripExternalHyperlinkRelationships(buf: Buffer): Promise<Buffer> {
+  const zip = await JSZip.loadAsync(buf);
+  const sheetFiles = zip.file(/^xl\/worksheets\/sheet\d+\.xml$/);
+  for (const sheetFile of sheetFiles) {
+    const xml = await sheetFile.async("string");
+    const stripped = xml.replace(/<hyperlink ref="([^"]*)" r:id="rId\d+"/g, '<hyperlink ref="$1"');
+    if (stripped !== xml) zip.file(sheetFile.name, stripped);
+
+    const relsPath = sheetFile.name.replace(/^xl\/worksheets\//, "xl/worksheets/_rels/") + ".rels";
+    const relsFile = zip.file(relsPath);
+    if (!relsFile) continue;
+    const relsXml = await relsFile.async("string");
+    const relsStripped = relsXml.replace(
+      /<Relationship[^>]*Type="[^"]*\/relationships\/hyperlink"[^>]*\/>/g,
+      "",
+    );
+    if (relsStripped !== relsXml) zip.file(relsPath, relsStripped);
+  }
+  const out = await zip.generateAsync({ type: "nodebuffer" });
+  return out;
+}
+
 export async function buildPerformanceReportWorkbook(input: PerformanceReportInput): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
   const logoImageId = wb.addImage({ base64: ALSAMA_LOGO_PNG_BASE64, extension: "png" });
@@ -678,6 +736,6 @@ export async function buildPerformanceReportWorkbook(input: PerformanceReportInp
   buildStudentProfilesSheet(wb, input, logoImageId);
   buildAlterationsSheetXlsx(wb, input.alterations);
   buildAuditTrailSheetXlsx(wb, input);
-  const buf = await wb.xlsx.writeBuffer();
-  return Buffer.from(buf);
+  const buf = Buffer.from(await wb.xlsx.writeBuffer());
+  return stripExternalHyperlinkRelationships(buf);
 }

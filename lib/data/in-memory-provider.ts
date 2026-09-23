@@ -76,7 +76,7 @@ import { doNextForStage } from "./pipeline-route";
 import type { CleanResponse } from "@/lib/ingest/types";
 import type { ValidationReport } from "@/lib/ingest/types";
 import type { CanonicalModel } from "@/lib/ingest/qm";
-import { SUBJECT_CATALOG, isSurveyAssessment } from "./subject-catalog";
+import { SUBJECT_CATALOG, isSurveyAssessment, canonicalSubjectName } from "./subject-catalog";
 import { isTechnicalIncidentStatus } from "./result-status";
 import { isEssaySubject, reservedEssayMax, ESSAY_ITEM_MAX } from "./essays";
 import type {
@@ -2798,7 +2798,26 @@ export class InMemoryDataProvider implements DataProvider {
           if (!subOrder[it.major]!.includes(it.sub)) subOrder[it.major]!.push(it.sub);
         }
       }
-      subjects.push({ assessmentId: a.id, name: a.name, majorElements: majorOrder, subElements: subOrder });
+      // Essay subjects (English/Arabic) carry an offline-marked "Writing" major
+      // element with no MCQ items behind it, so it never appears in `a.items` —
+      // add it here (same detector + label resolver the raw-scores view uses)
+      // or it silently disappears from the report for exactly those subjects.
+      const essayMax = reservedEssayMax(a);
+      const essayWriting = isEssaySubject(a) && essayMax > 0 ? resolveEssayWritingLabel(this.elementLabels, a.name) : null;
+      if (essayWriting) {
+        majorOrder.push(essayWriting.label);
+        // No itemized sub-elements behind an offline essay mark — an explicit
+        // empty list (rather than no entry at all) keeps every major element
+        // uniformly keyed into `subElements`, itemized or not.
+        subOrder[essayWriting.label] ??= [];
+      }
+
+      // Canonical display name (raw→display mapped ONCE, here, right after
+      // reading the source data) so Class Performance and every downstream
+      // consumer of `subjects`/`summarySubjects` key and label this assessment
+      // identically — a raw-scripted name (e.g. the Arabic source name) and its
+      // canonical label never diverge into "two subjects" again.
+      subjects.push({ assessmentId: a.id, name: canonicalSubjectName(a.name), majorElements: majorOrder, subElements: subOrder });
 
       const excluded = this.excludedSet(cycleId, a.id);
       // accumulate raw/n per (participant, major) and per (participant, major, sub)
@@ -2836,6 +2855,17 @@ export class InMemoryDataProvider implements DataProvider {
         }
         pMap.set(pid, lvls);
       }
+      // Classify the essay "Writing" mark into the same performance-level scale
+      // (the subject's own boundary cuts), the same way every MCQ major element
+      // above was classified — so it shows a real level, not a blank cell.
+      if (essayWriting) {
+        for (const m of this.essayMarksFor(cycleId, a.id)) {
+          const pct = (m.mark / essayMax) * 100;
+          const lvls = pMap.get(m.participantId) ?? new Map<string, string>();
+          lvls.set(essayWriting.label, classify(pct, perfLevels, cuts));
+          pMap.set(m.participantId, lvls);
+        }
+      }
       elementLevelByP.set(a.id, pMap);
 
       const pSubMap = new Map<string, Map<string, Map<string, string>>>();
@@ -2872,16 +2902,15 @@ export class InMemoryDataProvider implements DataProvider {
       return { participantId: row.id, name: row.label, award: row.award, subjects: sub };
     });
 
-    // canonical Student-Summary columns mapped by subject alias (keyword)
+    // The five canonical Student-Summary columns, resolved through the SAME
+    // catalog matcher `subjects` above was canonicalised with (never a second,
+    // hand-rolled alias regex) — so a raw name that only that matcher
+    // recognises (e.g. an Arabic-script name) still finds its assessment here.
     const refs = grades.assessments;
-    const aliasFor = (re: RegExp) => refs.find((r) => re.test(r.id) || re.test(r.name))?.id ?? null;
-    const summarySubjects: PerfReportSummarySubject[] = [
-      { label: "Applicable Maths", assessmentId: aliasFor(/applicable math/i) },
-      { label: "Scientific Thinking", assessmentId: aliasFor(/scientific/i) },
-      { label: "Arabic 1st Language", assessmentId: aliasFor(/arabic/i) },
-      { label: "English 2nd Language", assessmentId: aliasFor(/english/i) },
-      { label: "Life Success Skills", assessmentId: aliasFor(/life/i) },
-    ];
+    const summarySubjects: PerfReportSummarySubject[] = SUBJECT_CATALOG.map((cat) => ({
+      label: cat.name,
+      assessmentId: refs.find((r) => cat.matchesRawName(r.name))?.id ?? null,
+    }));
 
     const n = grades.rows.length;
     const awardDistribution = grades.distribution.map((d) => ({
