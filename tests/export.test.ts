@@ -30,6 +30,8 @@ import {
 import type {
   ItemResponseFact,
   GradesInput,
+  ScoreAnalysisInput,
+  ScoredItemResponse,
 } from "@/lib/export";
 import { DEFAULT_SCORING_CONFIG, getEngine, responsesFromClean } from "@/lib/engine";
 import type { ItemMeta, ItemStat, ResponseRecord } from "@/lib/engine";
@@ -626,8 +628,133 @@ describe("score analysis workbook — canonical layout", () => {
   });
 
   it("round-trips through a buffer", () => {
-    const reread = XLSXR.read(workbookToBuffer(wb), { type: "buffer" });
+    const reread = XLSXR.read(workbookToBuffer(wb), { type: "buffer", cellStyles: true });
     expect(reread.SheetNames).toEqual([...SCORE_ANALYSIS_SHEETS]);
+    // Colour, merges, sizing and AutoFilter (§3 of the export styling fix) must
+    // actually survive serialisation — not just exist on the in-memory sheet.
+    const summary = reread.Sheets["Overall Scores Summary"]!;
+    expect(summary["!merges"]!.length).toBeGreaterThan(0);
+    expect(summary["!autofilter"]).toBeDefined();
+    expect(summary["!cols"]!.length).toBe(6); // ASSESSMENT_SUMMARY_HEADER's column count
+  });
+});
+
+describe("score analysis workbook — colour, merges, sizing and AutoFilter scale with data", () => {
+  const ASSESSMENT_SUMMARY_HEADER = [
+    "AssessmentName",
+    "AssessmentTotalScore",
+    "NumberOfParticipants",
+    "AverageOfParticipantScores",
+    "LowestParticipantScore",
+    "HighestParticipantScore",
+  ];
+
+  /** A minimal, fully synthetic ScoreAnalysisInput — no engine/fixture dependency, so sizes are exact and controllable. */
+  function makeInput(opts: {
+    assessmentCount: number;
+    participantsPerAssessment: number;
+    majors: string[];
+    demands: string[];
+  }) {
+    const assessments = Array.from({ length: opts.assessmentCount }, (_, i) => ({
+      id: `asm${i}`,
+      name: `Assessment ${i}`,
+    }));
+    const participants = Array.from({ length: opts.participantsPerAssessment }, (_, i) => ({
+      id: `p${i}`,
+      label: `Participant ${i}`,
+    }));
+    const scoredResponses: ScoredItemResponse[] = [];
+    assessments.forEach((a, ai) => {
+      participants.forEach((p, pi) => {
+        scoredResponses.push({
+          participantId: p.id,
+          assessmentId: a.id,
+          itemId: `${a.id}-item`,
+          majorElement: opts.majors[(ai + pi) % opts.majors.length] ?? null,
+          demandLevel: opts.demands[(ai + pi) % opts.demands.length] ?? null,
+          score: 1,
+          maxScore: 1,
+        });
+      });
+    });
+    return { assessments, participants, scoredResponses } satisfies ScoreAnalysisInput;
+  }
+
+  it("Summary sheet's Assessment Summary AutoFilter spans exactly the header + N assessment rows, for varying N", () => {
+    for (const assessmentCount of [1, 4, 9]) {
+      const input = makeInput({ assessmentCount, participantsPerAssessment: 2, majors: ["Number"], demands: ["Recall"] });
+      const ws = buildScoreAnalysisWorkbook(input).Sheets["Overall Scores Summary"]!;
+      const ref = ws["!autofilter"]!.ref;
+      const range = XLSXR.utils.decode_range(ref);
+      expect(range.s.r).toBe(9); // header always at row 10 (0-indexed 9), regardless of size
+      expect(range.e.r - range.s.r + 1).toBe(assessmentCount + 1); // header + N data rows
+      expect(range.e.c - range.s.c + 1).toBe(ASSESSMENT_SUMMARY_HEADER.length);
+    }
+  });
+
+  it("Summary sheet's section-banner merges shift downward as the assessment block grows, never a fixed address", () => {
+    const small = buildScoreAnalysisWorkbook(
+      makeInput({ assessmentCount: 1, participantsPerAssessment: 2, majors: ["Number", "Algebra"], demands: ["Recall"] }),
+    ).Sheets["Overall Scores Summary"]!;
+    const large = buildScoreAnalysisWorkbook(
+      makeInput({ assessmentCount: 6, participantsPerAssessment: 2, majors: ["Number", "Algebra"], demands: ["Recall"] }),
+    ).Sheets["Overall Scores Summary"]!;
+    const smallMajorBanner = small["!merges"]![3]!.s.r;
+    const largeMajorBanner = large["!merges"]![3]!.s.r;
+    expect(largeMajorBanner).toBeGreaterThan(smallMajorBanner);
+    expect(largeMajorBanner - smallMajorBanner).toBe(5); // exactly the 5 extra assessment rows
+    // every merge still spans the sheet's real column count, not a hardcoded width
+    for (const m of large["!merges"]!) expect(m.e.c - m.s.c + 1).toBe(ASSESSMENT_SUMMARY_HEADER.length);
+  });
+
+  it("breakdown sheet AutoFilter spans header + (assessments × participants) rows, for varying sizes", () => {
+    for (const [assessmentCount, participantsPerAssessment] of [
+      [1, 3],
+      [3, 5],
+    ] as const) {
+      const input = makeInput({ assessmentCount, participantsPerAssessment, majors: ["Number"], demands: ["Recall"] });
+      const ws = buildScoreAnalysisWorkbook(input).Sheets["Overall Scores by Assessment"]!;
+      const range = XLSXR.utils.decode_range(ws["!autofilter"]!.ref);
+      expect(range.s.r).toBe(5); // header always at row 6 (0-indexed 5)
+      expect(range.e.r - range.s.r).toBe(assessmentCount * participantsPerAssessment);
+    }
+  });
+
+  it("breakdown-sheet merge/column width matches that sheet's own header length (6 vs 7 columns)", () => {
+    const input = makeInput({ assessmentCount: 2, participantsPerAssessment: 2, majors: ["Number", "Algebra"], demands: ["Recall"] });
+    const wb = buildScoreAnalysisWorkbook(input);
+    const byAssessment = wb.Sheets["Overall Scores by Assessment"]!;
+    const byMajor = wb.Sheets["Overall Scores by Major Element"]!;
+    expect(byAssessment["!merges"]![0]!.e.c).toBe(5); // 6-column header (index 0-5)
+    expect(byMajor["!merges"]![0]!.e.c).toBe(6); // 7-column header (index 0-6)
+  });
+
+  it("column widths grow with actual content length rather than a fixed guess", () => {
+    const shortLabels = makeInput({ assessmentCount: 1, participantsPerAssessment: 1, majors: ["Number"], demands: ["Recall"] });
+    shortLabels.participants[0]!.label = "P1";
+    const longLabels = makeInput({ assessmentCount: 1, participantsPerAssessment: 1, majors: ["Number"], demands: ["Recall"] });
+    longLabels.participants[0]!.label = "A Very Long Participant Full Name Indeed";
+
+    const shortWs = buildScoreAnalysisWorkbook(shortLabels).Sheets["Overall Scores by Assessment"]!;
+    const longWs = buildScoreAnalysisWorkbook(longLabels).Sheets["Overall Scores by Assessment"]!;
+    const nameCol = 2; // "ParticipantFullName" in BY_ASSESSMENT_HEADER
+    expect(longWs["!cols"]![nameCol]!.wch!).toBeGreaterThan(shortWs["!cols"]![nameCol]!.wch!);
+  });
+
+  it("row-height overrides only touch title/banner rows, not header or data rows", () => {
+    const input = makeInput({ assessmentCount: 2, participantsPerAssessment: 2, majors: ["Number"], demands: ["Recall"] });
+    const ws = buildScoreAnalysisWorkbook(input).Sheets["Overall Scores Summary"]!;
+    const rows = ws["!rows"]!;
+    expect(rows[0]!.hpt).toBeDefined(); // title row
+    expect(rows[1]?.hpt).toBeUndefined(); // blank row keeps default height
+    expect(rows[9]?.hpt).toBeUndefined(); // header row keeps default height
+  });
+
+  it("embeds the reference file's real Alsama Brand theme so theme-colour fills resolve to the actual palette", () => {
+    const input = makeInput({ assessmentCount: 1, participantsPerAssessment: 1, majors: ["Number"], demands: ["Recall"] });
+    const wb = buildScoreAnalysisWorkbook(input) as unknown as { Themes?: { raw: string } };
+    expect(wb.Themes?.raw).toContain("Alsama Brand");
   });
 });
 
