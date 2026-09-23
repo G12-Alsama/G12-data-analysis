@@ -19,7 +19,7 @@ import { CycleShell } from "@/components/shell/CycleShell";
 import { AssessmentTabs } from "@/components/shell/AssessmentTabs";
 import { Button } from "@/components/ui/primitives";
 import { ExportButtons } from "@/components/ui/ExportButtons";
-import { downloadCsv, downloadWorkbookBytes, fileStem } from "@/lib/ui/export";
+import { downloadCsv, downloadXlsxBuffer, fileStem } from "@/lib/ui/export";
 import { Icon } from "@/components/ui/icons";
 import { useTableZoom, ZoomControl } from "@/lib/ui/tableZoom";
 import { ReliabilityPanel } from "@/components/ui/reliability";
@@ -70,9 +70,9 @@ export default function AssessmentHealthPage({ params }: { params: { cycleId: st
       speedednessWb.bytes(),
       timingWb.bytes(),
     ]);
-    downloadWorkbookBytes(`mcq_reliability_internal_consistency_${suffix}.xlsx`, reliabilityBytes);
-    downloadWorkbookBytes(`speededness_omission_rate_${suffix}.xlsx`, speedednessBytes);
-    downloadWorkbookBytes(`timing_performance_analysis_${suffix}.xlsx`, timingBytes);
+    downloadXlsxBuffer(`mcq_reliability_internal_consistency_${suffix}.xlsx`, reliabilityBytes);
+    downloadXlsxBuffer(`speededness_omission_rate_${suffix}.xlsx`, speedednessBytes);
+    downloadXlsxBuffer(`timing_performance_analysis_${suffix}.xlsx`, timingBytes);
     provider.recordExport(cycleId, "Assessment health: Reliability, Speededness & Timing (Excel, 3 files)");
   };
 
