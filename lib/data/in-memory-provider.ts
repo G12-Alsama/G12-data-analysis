@@ -3891,18 +3891,24 @@ export class InMemoryDataProvider implements DataProvider {
     const stats: ItemStat[] = [];
     const facts: ItemResponseFact[] = [];
     const reviews: Record<string, ItemReviewDecision> = {};
+    const items: ItemMeta[] = [];
     for (const a of this.seed.liveCycle.assessments) {
       // Pass item metadata through so ItemStat carries wording/majorElement/
       // subElement/demandLevel (the export reads these columns straight off the
       // stat — see lib/export/item-analysis.ts). Without `items` here the engine
       // has nothing to key metadata off and those columns render blank.
+      const aItemMetas = this.itemMetasFor(a);
       stats.push(
         ...engine.computeItemStats({
           responses: this.responsesOf(a),
-          items: this.itemMetasFor(a),
+          items: aItemMetas,
           scoringConfig: this.scoringConfig(),
         }),
       );
+      // Carried through so assembleItemAnalysis can exclude maxScore:0
+      // stimulus/instruction items (STIMULUS_ITEM) from every row and
+      // aggregate — see lib/clean/flags.ts `isScoredItem`.
+      items.push(...aItemMetas);
       const excluded = this.excludedSet(cycleId, a.id);
       // Per-item average response time, already computed at hydration time from
       // the real `responses.response_time` column (see supabase-hydrate.ts /
@@ -3931,6 +3937,7 @@ export class InMemoryDataProvider implements DataProvider {
       facts,
       reviews,
       qualityThresholds: this.scoringConfig().quality,
+      items,
     };
   }
 

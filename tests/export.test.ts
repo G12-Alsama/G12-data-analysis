@@ -405,6 +405,134 @@ describe("InMemoryDataProvider.getItemAnalysisData — real production data path
   });
 });
 
+describe("item analysis — maxScore:0 stimulus/instruction items are excluded", () => {
+  const { stats, facts } = buildFromFixture(); // 40 real items, Applicable Math fixture
+  const stimulusItemId = "stim-instructions";
+
+  // Graft one synthetic maxScore:0 stimulus item onto the real fixture: its own
+  // stat (the engine computes SOMETHING for it, however meaningless) and facts
+  // (every participant "responds" to it, same as a real instruction page).
+  const stimulusStat: ItemStat = {
+    ...stats[0]!,
+    itemId: stimulusItemId,
+    n: stats[0]!.n,
+  };
+  const participantIds = [...new Set(facts.map((f) => f.participantId))];
+  const stimulusFacts: ItemResponseFact[] = participantIds.map((pid) => ({
+    assessmentId: ASSESSMENT,
+    itemId: stimulusItemId,
+    participantId: pid,
+    answered: true,
+    responseTime: null,
+  }));
+  const itemMetas: ItemMeta[] = [
+    ...Array.from(new Set(stats.map((s) => s.itemId))).map((id) => ({
+      itemId: id,
+      assessmentId: ASSESSMENT,
+      maxScore: 1,
+    })),
+    { itemId: stimulusItemId, assessmentId: ASSESSMENT, maxScore: 0 },
+  ];
+
+  it("drops the stimulus item's row and shrinks every affected aggregate", () => {
+    const withStimulus = assembleItemAnalysis({
+      cycleName: "May 2026",
+      assessments: [{ id: ASSESSMENT, name: ASSESSMENT }],
+      stats: [...stats, stimulusStat],
+      facts: [...facts, ...stimulusFacts],
+      items: itemMetas,
+    });
+    const block = withStimulus.blocks[0]!;
+    // No row for the stimulus item.
+    expect(block.rows.some((r) => r.stat.itemId === stimulusItemId)).toBe(false);
+    expect(block.rows).toHaveLength(stats.length); // 40, not 41
+    // "Rows analysed" (the response-fact count) excludes the stimulus item's
+    // facts too — not just its own row.
+    expect(block.rowsAnalysed).toBe(facts.length);
+
+    const wb = buildItemAnalysisWorkbook(withStimulus);
+    const aoa = aoaOf(wb as unknown as XLSXR.WorkBook, "Applicable Math");
+    const dataRows = aoa.slice(6).filter((r) => r.length > 0);
+    expect(dataRows).toHaveLength(stats.length);
+    expect(dataRows.some((r) => String(r[0]) === stimulusItemId)).toBe(false);
+
+    const summaryAoa = aoaOf(wb as unknown as XLSXR.WorkBook, "README & Summary");
+    const summaryRow = summaryAoa[4]!; // first (only) assessment row
+    expect(summaryRow[0]).toBe("Applicable Math");
+    expect(summaryRow[2]).toBe(stats.length); // Items = 40, not 41
+    expect(summaryRow[3]).toBe(facts.length); // Rows = scored-only fact count
+    // Good + Review + Flag still sum to the SCORED item count only.
+    expect(Number(summaryRow[5]) + Number(summaryRow[6]) + Number(summaryRow[7])).toBe(stats.length);
+  });
+
+  it("matches the unfiltered baseline exactly when no item is maxScore:0 (no stimulus items present)", () => {
+    const allScoredMetas: ItemMeta[] = itemMetas.filter((m) => m.itemId !== stimulusItemId);
+    const withItemsButNoStimulus = assembleItemAnalysis({
+      cycleName: "May 2026",
+      assessments: [{ id: ASSESSMENT, name: ASSESSMENT }],
+      stats,
+      facts,
+      items: allScoredMetas,
+    });
+    const withoutItemsAtAll = assembleItemAnalysis({
+      cycleName: "May 2026",
+      assessments: [{ id: ASSESSMENT, name: ASSESSMENT }],
+      stats,
+      facts,
+    });
+    expect(withItemsButNoStimulus.blocks[0]!.rows).toHaveLength(stats.length);
+    expect(withItemsButNoStimulus.blocks[0]!.rows).toHaveLength(
+      withoutItemsAtAll.blocks[0]!.rows.length,
+    );
+    expect(withItemsButNoStimulus.blocks[0]!.rowsAnalysed).toBe(
+      withoutItemsAtAll.blocks[0]!.rowsAnalysed,
+    );
+  });
+
+  it("leaves manual item-review exclusions of a REAL (scored) item untouched", () => {
+    const excludedRealItemId = stats[0]!.itemId;
+    const withManualExclusion = assembleItemAnalysis({
+      cycleName: "May 2026",
+      assessments: [{ id: ASSESSMENT, name: ASSESSMENT }],
+      stats: [...stats, stimulusStat],
+      facts: [...facts, ...stimulusFacts],
+      items: itemMetas,
+      reviews: { [excludedRealItemId]: { exclude: true, reason: "SME call" } },
+    });
+    const block = withManualExclusion.blocks[0]!;
+    // The manually-excluded item STILL has a row (flagged, not removed) —
+    // this mechanism is unrelated to the maxScore:0 structural exclusion.
+    expect(block.rows).toHaveLength(stats.length);
+    const excludedRow = block.rows.find((r) => r.stat.itemId === excludedRealItemId)!;
+    expect(excludedRow.exclude).toBe(true);
+    expect(excludedRow.removeReason).toBe("SME call");
+    // The stimulus item is still gone regardless.
+    expect(block.rows.some((r) => r.stat.itemId === stimulusItemId)).toBe(false);
+  });
+
+  it("real production data (may-2026): Applicable Math shows 40 scored rows, not 41", () => {
+    const provider = new InMemoryDataProvider();
+    const data = provider.getItemAnalysisData("may-2026")!;
+    const zeroScoreCount = (data.items ?? []).filter((it) => (it.maxScore ?? 1) === 0).length;
+    expect(zeroScoreCount).toBeGreaterThan(0); // sanity: the seed really has stimulus items
+
+    const input = assembleItemAnalysis(data);
+    const applicableMath = input.blocks.find((b) => b.name === "Applicable Math")!;
+    expect(applicableMath.rows).toHaveLength(40);
+    expect(applicableMath.rows.every((r) => r.stat.itemId !== "100002785249")).toBe(true);
+
+    const wb = buildItemAnalysisWorkbook(input);
+    const aoa = aoaOf(wb as unknown as XLSXR.WorkBook, "Applicable Math");
+    const dataRows = aoa.slice(6).filter((r) => r.length > 0);
+    expect(dataRows).toHaveLength(40);
+
+    const summaryAoa = aoaOf(wb as unknown as XLSXR.WorkBook, "README & Summary");
+    const headerIdx = summaryAoa.findIndex((r) => r[0] === "AssessmentName");
+    const amRow = summaryAoa.slice(headerIdx + 1).find((r) => r[0] === "Applicable Math")!;
+    expect(amRow[2]).toBe(40); // Items
+  });
+});
+
 describe("score analysis workbook — canonical layout", () => {
   const { participants } = buildFromFixture();
   const a = fixtures[ASSESSMENT]!;
