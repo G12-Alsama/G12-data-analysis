@@ -37,6 +37,13 @@ export interface SeedItem {
   major: string | null;
   sub: string | null;
   demand: string | null;
+  /**
+   * Item-set / shared-stimulus name (a passage/prompt shared by several items), or
+   * null when ungrouped. Carried so Assessment Health diagnostics can be recomputed
+   * live from `SeedAssessment.items`/`responses` (see `getDiagnostics`) instead of
+   * only from the ingest-time snapshot.
+   */
+  itemSet?: string | null;
   maxScore: number;
   /**
    * The question's multiple-choice answer options, from the QM export
@@ -73,6 +80,26 @@ export interface SeedResponse {
    * display-only "% of D3 questions answered" per-student metric.
    */
   a?: boolean;
+  /**
+   * The raw `AnswerGivenChoiceNumber` (blank normalised to null upstream). The
+   * authoritative "was this presented item actually answered?" signal — unlike the
+   * raw `AnswerGiven` text (which carries QM's "<Not defined>" sentinel for an
+   * unanswered item), this is genuinely blank/null with no sentinel ambiguity.
+   */
+  answerGivenChoiceNumber?: string | null;
+  /**
+   * The raw `QuestionPresentedNumber` — QM's real per-sitting item order. VARIES
+   * per participant even for the same item (confirmed against the 700435
+   * fixture), so this must be carried per-response rather than on `SeedItem`.
+   * The authoritative "presentation order" for Assessment Health (Speededness
+   * Index, omission-by-position, timing correlations); undefined/null falls back
+   * to first-appearance order (see `build-live-cycle.ts`/`supabase-hydrate.ts`).
+   */
+  questionPresentedNumber?: number | null;
+  /** The QM `AnswerGiven` value (raw answer text/choice), for the cleaned export. */
+  answerGiven?: string | null;
+  /** The QM response time in seconds, for the cleaned export. */
+  responseTime?: number | null;
 }
 
 /** A participant whose sitting of this assessment finished with a technical-fault status. */

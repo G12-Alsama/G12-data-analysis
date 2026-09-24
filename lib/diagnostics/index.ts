@@ -31,6 +31,8 @@ export interface DiagResponse {
   demandLevel: string | null;
   /** Item-set / shared-stimulus name of the item, or null when ungrouped. */
   itemSet: string | null;
+  /** Major-element (curriculum content area) of the item, or null when untagged — the same tag lib/engine/reliability.ts groups by, e.g. "Numerical and quantitative reasoning". */
+  majorElement: string | null;
   /** Presentation order (lower = earlier). */
   order: number;
   /** Whether a (non-blank) answer was given. */
@@ -56,6 +58,10 @@ export interface SpeededResult {
   omissionStatus: DiagStatus;
   completionStatus: DiagStatus;
   speededStatus: DiagStatus;
+  /** Correct ÷ answered across ALL presentations (not just the early/late split). */
+  overallAccuracy: number;
+  /** Median response time (seconds) across every item presentation in the group; null when no presentation has a response time. */
+  medianResponseTime: number | null;
 }
 
 export interface TimingResult {
@@ -64,6 +70,20 @@ export interface TimingResult {
   spearman: number | null;
   pearsonStrength: string;
   spearmanStrength: string;
+  /** Median, across students, of each student's median per-item response time. */
+  medianResponseTimePerItem: number | null;
+  /** Mean, across students, of each student's median per-item response time. */
+  meanResponseTimePerItem: number | null;
+  /** Median, across students, of each student's total (summed) response time. */
+  medianTotalResponseTime: number | null;
+  /** Mean score across students, as a fraction (0–1, e.g. 0.5 = 50%) — matches `medianCompletionRate`'s scale for a "0.0%"-formatted cell. */
+  meanScorePct: number | null;
+  /** Median score across students, as a fraction (0–1). */
+  medianScorePct: number | null;
+  /** Median, across students, of (answered ÷ presented). */
+  medianCompletionRate: number | null;
+  /** Pearson correlation between each student's TOTAL response time and score % — a supporting indicator alongside the primary median-item-time correlation. */
+  totalTimePearson: number | null;
 }
 
 const rnd = (v: number, d = 4) => {
@@ -157,6 +177,8 @@ export function speededness(records: readonly DiagResponse[]): SpeededResult {
   const lateAccuracy = accuracyOf(isLate);
 
   const speedednessIndex = (Math.max(0, lateOmission - earlyOmission) + Math.max(0, earlyAccuracy - lateAccuracy)) / 2;
+  const overallAccuracy = accuracyOf(() => true);
+  const responseTimes = records.map((r) => r.responseTime).filter((t): t is number => t !== null && Number.isFinite(t));
 
   return {
     nItems: items.size,
@@ -171,6 +193,8 @@ export function speededness(records: readonly DiagResponse[]): SpeededResult {
     omissionStatus: band(omissionRate, (v) => v <= 0.05, (v) => v <= 0.1),
     completionStatus: band(1 - omissionRate, (v) => v >= 0.95, (v) => v >= 0.9),
     speededStatus: band(speedednessIndex, (v) => v <= 0.05, (v) => v <= 0.15),
+    overallAccuracy: rnd(overallAccuracy),
+    medianResponseTime: responseTimes.length ? median(responseTimes) : null,
   };
 }
 
@@ -180,6 +204,16 @@ function median(xs: number[]): number {
   const s = [...xs].sort((a, b) => a - b);
   const m = Math.floor(s.length / 2);
   return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
+}
+
+/** Mean of a numeric array; null when empty. */
+function mean(xs: readonly number[]): number | null {
+  return xs.length === 0 ? null : xs.reduce((a, b) => a + b, 0) / xs.length;
+}
+
+/** Median of a numeric array; null when empty (unlike `median`, which returns 0). */
+function medianOrNull(xs: readonly number[]): number | null {
+  return xs.length === 0 ? null : median([...xs]);
 }
 
 /**
@@ -208,32 +242,97 @@ export function cleanDiagResponses(
   return [...byCell.values()];
 }
 
+// TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER): a caller (currently
+// only in-memory-provider.ts's getDiagnostics()) sets this to a label right
+// before invoking buildAssessmentDiagnostics()/timingPerformance() for the one
+// assessment under investigation, so timingPerformance() below knows whether to
+// emit [TEMP-DEBUG] log lines. Purely a logging gate — never read by any
+// computation, so it cannot change a computed value. Set via
+// __setTempDebugTimingLabel() (a plain module-level `let` can't be assigned
+// from another module's live-binding import).
+let __TEMP_DEBUG_TIMING_LABEL: string | null = null;
+export function __setTempDebugTimingLabel(label: string | null): void {
+  __TEMP_DEBUG_TIMING_LABEL = label;
+}
+
 /** Timing–performance correlation over one group of responses. */
 export function timingPerformance(records: readonly DiagResponse[]): TimingResult {
+  // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER)
+  const __tempDebugLabel = __TEMP_DEBUG_TIMING_LABEL;
+  const __TEMP_DEBUG_ZERO_ITEM_ID = "29cebc7b-adea-4fa7-b99a-e163dceef141";
+  if (__tempDebugLabel) {
+    const zeroItemLeaked = records.some((r) => r.itemId === __TEMP_DEBUG_ZERO_ITEM_ID && r.responseTime !== null);
+    console.log(
+      `[TEMP-DEBUG] timingPerformance(${__tempDebugLabel}): records.length=${records.length}; ` +
+        `item ${__TEMP_DEBUG_ZERO_ITEM_ID} responseTime present in input=${zeroItemLeaked}`,
+    );
+  }
   // Aggregate to student level: score % (correct ÷ presented) and median item time.
-  const byStudent = new Map<string, { correct: number; presented: number; times: number[] }>();
+  // Every presented (scored) item contributes its responseTime to the median,
+  // answered or not — QM logs dwell time on a question even when the student
+  // leaves it blank, and that time is valid timing signal (ground-truth
+  // methodology: "Median Response Time per Item = median of each student's
+  // AnswerResponseTimeSeconds inside the analysis unit", no answered-only
+  // filter). Only a genuinely missing/non-finite responseTime is excluded below
+  // — that's real data absence, distinct from "left blank but still timed".
+  // (`answered` still drives omission/completion in speededness(), untouched.)
+  const byStudent = new Map<string, { correct: number; presented: number; answered: number; times: number[] }>();
   for (const r of records) {
     let s = byStudent.get(r.participantId);
-    if (!s) { s = { correct: 0, presented: 0, times: [] }; byStudent.set(r.participantId, s); }
+    if (!s) { s = { correct: 0, presented: 0, answered: 0, times: [] }; byStudent.set(r.participantId, s); }
     s.presented += 1;
     if (r.correct) s.correct += 1;
+    if (r.answered) s.answered += 1;
     if (r.responseTime !== null && Number.isFinite(r.responseTime)) s.times.push(r.responseTime);
+  }
+  if (__tempDebugLabel) {
+    console.log(`[TEMP-DEBUG] timingPerformance(${__tempDebugLabel}): total students discovered=${byStudent.size}`);
   }
   const scorePct: number[] = [];
   const medTime: number[] = [];
-  for (const s of byStudent.values()) {
+  const totalTime: number[] = [];
+  const completionRate: number[] = [];
+  for (const [participantId, s] of byStudent) {
     if (s.presented === 0 || s.times.length === 0) continue;
-    scorePct.push((s.correct / s.presented) * 100);
-    medTime.push(median(s.times));
+    const pct = (s.correct / s.presented) * 100;
+    const mt = median(s.times);
+    if (__tempDebugLabel) {
+      console.log(
+        `[TEMP-DEBUG] timingPerformance(${__tempDebugLabel}): participantId=${participantId} ` +
+          `timesCount=${s.times.length} medTime=${mt} scorePct=${pct}`,
+      );
+    }
+    scorePct.push(pct);
+    medTime.push(mt);
+    totalTime.push(s.times.reduce((a, b) => a + b, 0));
+    completionRate.push(s.answered / s.presented);
   }
   const p = pearson(medTime, scorePct);
   const sp = spearman(medTime, scorePct);
+  const totalP = pearson(totalTime, scorePct);
+  // scorePct is 0–100 (percentage points) for the correlation math above;
+  // meanScorePct/medianScorePct are exported as 0–1 fractions instead, to
+  // match medianCompletionRate's scale for a "0.0%"-formatted spreadsheet cell.
+  const meanScorePctFraction = mean(scorePct);
+  const medianScorePctFraction = medianOrNull(scorePct);
+  if (__tempDebugLabel) {
+    const pairs = medTime.map((mt, i) => [mt, scorePct[i]]);
+    console.log(`[TEMP-DEBUG] timingPerformance(${__tempDebugLabel}): (medTime, scorePct) pairs=${JSON.stringify(pairs)}`);
+    console.log(`[TEMP-DEBUG] timingPerformance(${__tempDebugLabel}): nStudents=${scorePct.length} pearson=${p} spearman=${sp}`);
+  }
   return {
     nStudents: scorePct.length,
     pearson: p === null ? null : rnd(p),
     spearman: sp === null ? null : rnd(sp),
     pearsonStrength: correlationStrength(p),
     spearmanStrength: correlationStrength(sp),
+    medianResponseTimePerItem: medianOrNull(medTime),
+    meanResponseTimePerItem: mean(medTime),
+    medianTotalResponseTime: medianOrNull(totalTime),
+    meanScorePct: meanScorePctFraction === null ? null : meanScorePctFraction / 100,
+    medianScorePct: medianScorePctFraction === null ? null : medianScorePctFraction / 100,
+    medianCompletionRate: medianOrNull(completionRate),
+    totalTimePearson: totalP === null ? null : rnd(totalP),
   };
 }
 
@@ -309,6 +408,44 @@ export function speededByItemSet(records: readonly DiagResponse[]): ItemSetSpeed
     .map((set) => ({ itemSet: set, speeded: speededness(groups.get(set)!) }));
 }
 
+/** Speededness/omission for one major element (curriculum content area). */
+export interface MajorElementSpeeded {
+  majorElement: string;
+  speeded: SpeededResult;
+}
+
+/**
+ * Speededness/omission/completion split by major element — the same
+ * curriculum-content-area tag lib/engine/reliability.ts already groups by for
+ * its By_Assessment_Major reliability view. Listed alphabetically; untagged
+ * (null) items are ignored. Reuses the identical `speededness()` formula per
+ * group, restricted to that major element's items.
+ */
+export function speededByMajorElement(records: readonly DiagResponse[]): MajorElementSpeeded[] {
+  const groups = groupBy(records, (r) => r.majorElement);
+  return [...groups.keys()]
+    .sort((a, b) => a.localeCompare(b))
+    .map((major) => ({ majorElement: major, speeded: speededness(groups.get(major)!) }));
+}
+
+/** Timing–performance for one major element (curriculum content area). */
+export interface MajorElementTiming {
+  majorElement: string;
+  timing: TimingResult;
+}
+
+/**
+ * Timing–performance split by major element, mirroring `timingByDemand`:
+ * the identical `timingPerformance()` formula applied per major-element
+ * group. Listed alphabetically; untagged (null) items are ignored.
+ */
+export function timingByMajorElement(records: readonly DiagResponse[]): MajorElementTiming[] {
+  const groups = groupBy(records, (r) => r.majorElement);
+  return [...groups.keys()]
+    .sort((a, b) => a.localeCompare(b))
+    .map((major) => ({ majorElement: major, timing: timingPerformance(groups.get(major)!) }));
+}
+
 /** Omission rate for the item at one presentation position. */
 export interface PositionOmission {
   /** 1-based item position by earliest presented order. */
@@ -376,6 +513,8 @@ export interface AssessmentDiagnostics {
   byItemSet: ItemSetSpeeded[];
   timingByDemand: DemandTiming[];
   omissionByPosition: PositionOmission[];
+  byMajorElement: MajorElementSpeeded[];
+  timingByMajorElement: MajorElementTiming[];
 }
 
 export function buildAssessmentDiagnostics(records: readonly DiagResponse[]): AssessmentDiagnostics {
@@ -385,5 +524,7 @@ export function buildAssessmentDiagnostics(records: readonly DiagResponse[]): As
     byItemSet: speededByItemSet(records),
     timingByDemand: timingByDemand(records),
     omissionByPosition: omissionByPosition(records),
+    byMajorElement: speededByMajorElement(records),
+    timingByMajorElement: timingByMajorElement(records),
   };
 }

@@ -19,7 +19,7 @@ import { CycleShell } from "@/components/shell/CycleShell";
 import { AssessmentTabs } from "@/components/shell/AssessmentTabs";
 import { Button } from "@/components/ui/primitives";
 import { ExportButtons } from "@/components/ui/ExportButtons";
-import { downloadCsv, downloadWorkbook, fileStem } from "@/lib/ui/export";
+import { downloadCsv, downloadXlsxBuffer, fileStem } from "@/lib/ui/export";
 import { Icon } from "@/components/ui/icons";
 import { useTableZoom, ZoomControl } from "@/lib/ui/tableZoom";
 import { ReliabilityPanel } from "@/components/ui/reliability";
@@ -48,7 +48,9 @@ export default function AssessmentHealthPage({ params }: { params: { cycleId: st
   const a = model.assessments[Math.min(active, model.assessments.length - 1)]!;
 
   // CSV = the reliability table (α with item k + participant n alongside);
-  // XLSX = Reliability + Speededness + Omission-by-position + Timing sheets.
+  // XLSX = three separate workbooks — Reliability, Speededness, Timing — each
+  // reconciled cell-by-cell against the team's original manual-analysis
+  // files, replacing the old single condensed "assessment health" export.
   const exportCsv = () => {
     if (!reliability) return;
     const headers = ["Level", "Group", "Subject", "Items (k)", "Participants (n)", "Cronbach's Alpha", "Low items?", "Small sample?", "Note"];
@@ -59,9 +61,19 @@ export default function AssessmentHealthPage({ params }: { params: { cycleId: st
   };
   const exportXlsx = async () => {
     const exp = await import("@/lib/export");
-    const wb = exp.buildDiagnosticsWorkbook({ cycleName, reliability, diagnostics: model });
-    await downloadWorkbook(`${fileStem("assessment-health", cycleName)}.xlsx`, wb);
-    provider.recordExport(cycleId, "Assessment health & reliability (Excel)");
+    const suffix = fileStem(cycleName);
+    const reliabilityWb = exp.buildReliabilityWorkbook({ cycleName, reliability });
+    const speedednessWb = exp.buildSpeedednessWorkbook({ cycleName, reliability, diagnostics: model });
+    const timingWb = exp.buildTimingWorkbook({ cycleName, reliability, diagnostics: model });
+    const [reliabilityBytes, speedednessBytes, timingBytes] = await Promise.all([
+      reliabilityWb.bytes(),
+      speedednessWb.bytes(),
+      timingWb.bytes(),
+    ]);
+    downloadXlsxBuffer(`mcq_reliability_internal_consistency_${suffix}.xlsx`, reliabilityBytes);
+    downloadXlsxBuffer(`speededness_omission_rate_${suffix}.xlsx`, speedednessBytes);
+    downloadXlsxBuffer(`timing_performance_analysis_${suffix}.xlsx`, timingBytes);
+    provider.recordExport(cycleId, "Assessment health: Reliability, Speededness & Timing (Excel, 3 files)");
   };
 
   const whole = a.whole.speeded;

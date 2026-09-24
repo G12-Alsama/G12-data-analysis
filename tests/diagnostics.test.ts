@@ -20,8 +20,8 @@ import {
 } from "@/lib/diagnostics";
 import { InMemoryDataProvider } from "@/lib/data/in-memory-provider";
 
-function r(participantId: string, itemId: string, order: number, answered: boolean, correct: boolean, responseTime: number | null, demandLevel: string | null = null, itemSet: string | null = null): DiagResponse {
-  return { participantId, itemId, demandLevel, itemSet, order, answered, correct, responseTime };
+function r(participantId: string, itemId: string, order: number, answered: boolean, correct: boolean, responseTime: number | null, demandLevel: string | null = null, itemSet: string | null = null, majorElement: string | null = null): DiagResponse {
+  return { participantId, itemId, demandLevel, itemSet, majorElement, order, answered, correct, responseTime };
 }
 
 describe("late-item selection", () => {
@@ -200,6 +200,57 @@ describe("buildAssessmentDiagnostics", () => {
     expect(diag.timingByDemand.map((d) => d.demand)).toEqual(["D1", "D3"]);
     expect(diag.byItemSet.map((s) => s.itemSet)).toEqual(["Passage A"]);
     expect(diag.omissionByPosition).toHaveLength(2);
+  });
+});
+
+describe("diagnostics recompute live over Clean-stage removals", () => {
+  it("a per-subject removal (setCleanRemoval) drops that participant's data from getDiagnostics", () => {
+    const p = new InMemoryDataProvider();
+    const cycleId = p.listCycles()[0]!.id;
+    const assessmentId = p.getCycle(cycleId)!.assessments[0]!.id;
+    const victim = p.getNaiveScores(cycleId, assessmentId)!.students[0]!.id;
+
+    const before = p.getDiagnostics(cycleId)!.assessments.find((a) => a.assessmentId === assessmentId)!;
+
+    p.setCleanRemoval(cycleId, assessmentId, { rows: [victim] }, true);
+    const after = p.getDiagnostics(cycleId)!.assessments.find((a) => a.assessmentId === assessmentId)!;
+
+    // Previously getDiagnostics() returned the static ingest-time snapshot, so a
+    // Clean removal never showed up here — it now must recompute over the reduced
+    // cohort, so presentations (and student counts feeding the timing corr.) drop.
+    expect(after.whole.speeded.nPresentations).toBeLessThan(before.whole.speeded.nPresentations);
+    expect(after.whole.timing.nStudents).toBeLessThanOrEqual(before.whole.timing.nStudents);
+    expect(after).not.toEqual(before);
+
+    // Reversible: restoring the row brings the figures back exactly.
+    p.setCleanRemoval(cycleId, assessmentId, { rows: [victim] }, false);
+    const restored = p.getDiagnostics(cycleId)!.assessments.find((a) => a.assessmentId === assessmentId)!;
+    expect(restored).toEqual(before);
+  });
+
+  it("a cohort-wide removal (excludeParticipantFromCohort) drops that participant's data from every affected subject", () => {
+    const p = new InMemoryDataProvider();
+    const cycleId = p.listCycles()[0]!.id;
+    const cyc = p.getCycle(cycleId)!;
+    // A participant present in every subject, so the cohort exclusion is visible
+    // in each subject's diagnostics, not just one.
+    const present = cyc.assessments.map((a) => new Set(p.getNaiveScores(cycleId, a.id)!.students.map((s) => s.id)));
+    const victim = [...present[0]!].find((id) => present.every((set) => set.has(id)))!;
+
+    const before = p.getDiagnostics(cycleId)!;
+
+    p.excludeParticipantFromCohort(cycleId, victim, true, "Staff / test account");
+    const after = p.getDiagnostics(cycleId)!;
+
+    for (const b of before.assessments) {
+      const a = after.assessments.find((x) => x.assessmentId === b.assessmentId)!;
+      expect(a.whole.speeded.nPresentations).toBeLessThan(b.whole.speeded.nPresentations);
+    }
+
+    // Reversible.
+    p.excludeParticipantFromCohort(cycleId, victim, false);
+    const restored = p.getDiagnostics(cycleId)!;
+    expect(restored).toEqual(before);
   });
 });
 
