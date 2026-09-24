@@ -41,6 +41,13 @@ export interface SheetCf {
   freeze?: { ySplit: number; topLeftCell: string };
   /** Sheet tab color (RGB, e.g. "FFB2375B") — also unsupported by xlsx-js-style. */
   tabColor?: string;
+  /** Workbook-level `sheetFormatPr defaultRowHeight` (points) — xlsx-js-style
+   * never writes `<sheetFormatPr>` at all, even when individual row heights
+   * are set via `!rows`, so every row without an explicit height silently
+   * falls back to Excel's own ~15pt default instead of the original's. */
+  defaultRowHeight?: number;
+  /** `<autoFilter ref="...">` range (e.g. "A4:J5") — also unsupported by xlsx-js-style. */
+  autoFilterRef?: string;
 }
 
 /** An A1 range spanning [c0,r0]..[c1,r1] (0-based columns via XLSX.utils.encode_col,
@@ -114,31 +121,6 @@ function injectDxfs(stylesXml: string, newDxfs: string[]): { xml: string; baseCo
 }
 
 /**
- * Insert `<conditionalFormatting>` blocks at the schema-correct position.
- *
- * CT_Worksheet's child order is fixed: ... sheetData, sheetCalcPr,
- * sheetProtection, protectedRanges, scenarios, autoFilter, sortState,
- * dataConsolidate, customSheetViews, mergeCells, phoneticPr,
- * conditionalFormatting, dataValidations, hyperlinks, printOptions,
- * pageMargins, pageSetup, headerFooter, rowBreaks, colBreaks,
- * customProperties, cellWatches, ignoredErrors, smartTags, drawing, ...
- *
- * `ignoredErrors` — which xlsx-js-style writes whenever a numeric-looking
- * value is stored as text (exactly what this module's own "n/a"/"Not
- * sourced" text cells produce) — sits near the very END of that sequence,
- * long after every element this used to search forward for
- * (dataValidations/pageMargins/pageSetup/extLst). Searching forward for a
- * "comes after" landmark and falling back to "just before </worksheet>"
- * when none matched put `<conditionalFormatting>` AFTER `<ignoredErrors>`
- * whenever one was present — a schema-order violation that made Excel
- * treat the whole part as corrupt and silently drop its `<sheetData>` on
- * repair (every sheet blank except the CF-free README). Anchoring
- * BACKWARD from `</mergeCells>` (or `</sheetData>` when a sheet has no
- * merges) instead is unconditionally correct: conditionalFormatting must
- * come right after mergeCells/sheetData and strictly before every other
- * optional element this module or xlsx-js-style ever writes.
- */
-/**
  * Insert a frozen-pane `<pane>`/`<selection>` into the sheet's `<sheetView>`.
  * xlsx-js-style always writes a self-closing `<sheetView .../>` with no
  * children, so this converts it to an open/close pair with `<pane>` as its
@@ -173,6 +155,31 @@ function injectTabColor(sheetXml: string, rgb: string): string {
   return sheetXml.slice(0, idx) + tag + sheetXml.slice(idx);
 }
 
+/**
+ * Insert `<conditionalFormatting>` blocks at the schema-correct position.
+ *
+ * CT_Worksheet's child order is fixed: ... sheetData, sheetCalcPr,
+ * sheetProtection, protectedRanges, scenarios, autoFilter, sortState,
+ * dataConsolidate, customSheetViews, mergeCells, phoneticPr,
+ * conditionalFormatting, dataValidations, hyperlinks, printOptions,
+ * pageMargins, pageSetup, headerFooter, rowBreaks, colBreaks,
+ * customProperties, cellWatches, ignoredErrors, smartTags, drawing, ...
+ *
+ * `ignoredErrors` — which xlsx-js-style writes whenever a numeric-looking
+ * value is stored as text (exactly what this module's own "n/a"/"Not
+ * sourced" text cells produce) — sits near the very END of that sequence,
+ * long after every element this used to search forward for
+ * (dataValidations/pageMargins/pageSetup/extLst). Searching forward for a
+ * "comes after" landmark and falling back to "just before </worksheet>"
+ * when none matched put `<conditionalFormatting>` AFTER `<ignoredErrors>`
+ * whenever one was present — a schema-order violation that made Excel
+ * treat the whole part as corrupt and silently drop its `<sheetData>` on
+ * repair (every sheet blank except the CF-free README). Anchoring
+ * BACKWARD from `</mergeCells>` (or `</sheetData>` when a sheet has no
+ * merges) instead is unconditionally correct: conditionalFormatting must
+ * come right after mergeCells/sheetData and strictly before every other
+ * optional element this module or xlsx-js-style ever writes.
+ */
 function injectSheetCf(sheetXml: string, cfXml: string): string {
   if (cfXml === "") return sheetXml;
   for (const closeTag of ["</mergeCells>", "</sheetData>"]) {
@@ -184,6 +191,40 @@ function injectSheetCf(sheetXml: string, cfXml: string): string {
   }
   // No sheetData at all (should not happen for a real sheet) — last resort.
   return sheetXml.replace("</worksheet>", `${cfXml}</worksheet>`);
+}
+
+/**
+ * Insert `<sheetFormatPr defaultRowHeight="...">` right after `</sheetViews>`
+ * and before `<cols>`/`<sheetData>` — CT_Worksheet's required position
+ * (dimension, sheetViews, sheetFormatPr, cols, sheetData, ...). xlsx-js-style
+ * never writes this element at all, so every row without an explicit height
+ * (set via `!rows`) silently falls back to Excel's generic ~15pt default
+ * instead of the original's.
+ */
+function injectSheetFormatPr(sheetXml: string, defaultRowHeight: number): string {
+  const tag = `<sheetFormatPr defaultRowHeight="${defaultRowHeight}"/>`;
+  const closeTag = "</sheetViews>";
+  const idx = sheetXml.indexOf(closeTag);
+  if (idx === -1) return sheetXml;
+  const insertAt = idx + closeTag.length;
+  return sheetXml.slice(0, insertAt) + tag + sheetXml.slice(insertAt);
+}
+
+/**
+ * Insert `<autoFilter ref="...">` right after `</sheetData>` and before
+ * `<mergeCells>` — CT_Worksheet's required position (sheetData, sheetCalcPr,
+ * sheetProtection, protectedRanges, scenarios, autoFilter, sortState,
+ * dataConsolidate, customSheetViews, mergeCells, ...). Unlike
+ * conditionalFormatting (which comes AFTER mergeCells), autoFilter comes
+ * BEFORE it.
+ */
+function injectAutoFilter(sheetXml: string, ref: string): string {
+  const tag = `<autoFilter ref="${ref}"/>`;
+  const closeTag = "</sheetData>";
+  const idx = sheetXml.indexOf(closeTag);
+  if (idx === -1) return sheetXml;
+  const insertAt = idx + closeTag.length;
+  return sheetXml.slice(0, insertAt) + tag + sheetXml.slice(insertAt);
 }
 
 /**
@@ -216,7 +257,8 @@ export async function applyConditionalFormatting(
   zip.file("xl/styles.xml", patchedStyles);
 
   for (const sheet of sheets) {
-    if (sheet.rules.length === 0 && !sheet.freeze && !sheet.tabColor) continue;
+    const hasWork = sheet.rules.length > 0 || sheet.freeze || sheet.tabColor || sheet.defaultRowHeight !== undefined || sheet.autoFilterRef;
+    if (!hasWork) continue;
     const path = `xl/worksheets/sheet${sheet.sheetIndex + 1}.xml`;
     const sheetFile = zip.file(path);
     if (!sheetFile) throw new Error(`applyConditionalFormatting: ${path} missing from workbook`);
@@ -234,8 +276,10 @@ export async function applyConditionalFormatting(
       }
       sheetXml = injectSheetCf(sheetXml, blocks.join(""));
     }
+    if (sheet.autoFilterRef) sheetXml = injectAutoFilter(sheetXml, sheet.autoFilterRef);
     if (sheet.freeze) sheetXml = injectFreeze(sheetXml, sheet.freeze);
     if (sheet.tabColor) sheetXml = injectTabColor(sheetXml, sheet.tabColor);
+    if (sheet.defaultRowHeight !== undefined) sheetXml = injectSheetFormatPr(sheetXml, sheet.defaultRowHeight);
     zip.file(path, sheetXml);
   }
 

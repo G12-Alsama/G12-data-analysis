@@ -15,7 +15,7 @@
  * see verify_fidelity.py in the PR for how these were checked.
  */
 import type { ReliabilityModel, ReliabilityRow } from "@/lib/data/types";
-import { XLSX, styleCell, setColumnWidths, type CellStyle } from "./sheet-utils";
+import { XLSX, styleCell, setColumnWidths, setRowHeightsFromExcelRows, type CellStyle } from "./sheet-utils";
 import { applyConditionalFormatting, rangeRef, type SheetCf } from "./ooxml-cf";
 
 export const RELIABILITY_SHEETS = [
@@ -35,6 +35,16 @@ export interface ReliabilityReportInput {
 const DEMAND_ORDER = ["D1", "D2", "D3"] as const;
 const FREEZE_A5 = { ySplit: 4, topLeftCell: "A5" } as const;
 const TAB_COLOR = "FFB2375B";
+const DEFAULT_ROW_HEIGHT = 14.4;
+
+/** Fixed header rows 1-4 share the same heights on every metrics sheet
+ * (title/subtitle/blank/header); only the per-sheet title/subtitle height
+ * and the repeated data-row height (applied per actual row count) differ. */
+function metricsRowHeights(titleHeight: number, dataRowCount: number, dataRowHeight: number): Record<number, number> {
+  const heights: Record<number, number> = { 1: titleHeight, 2: 34.05, 4: 36.0 };
+  for (let r = 0; r < dataRowCount; r++) heights[5 + r] = dataRowHeight;
+  return heights;
+}
 
 // --- styling (matches the original workbook's palette/fonts) ---------------
 
@@ -177,6 +187,10 @@ function readmeSheet(): XLSX.WorkSheet {
   ws["!merges"] = merges;
   for (const s of styled) styleRange(ws, s.r0, s.c0, s.r1, s.c1, s.style);
   setColumnWidths(ws, { A: 44.109375, B: 101.88671875, C: 30.0, D: 36.0, E: 12.0 }, 9);
+  setRowHeightsFromExcelRows(ws, {
+    1: 39.6, 2: 18.0, 5: 16.8, 6: 48, 7: 48, 8: 48, 9: 48, 10: 48,
+    13: 16.8, 14: 16.8, 15: 31.2, 16: 15.6, 17: 15.6, 18: 15.6, 19: 31.2,
+  });
   return ws;
 }
 
@@ -191,9 +205,10 @@ function metricsSheet(opts: {
   participants: "single" | "dual";
   includeAvgInterItem: boolean;
   titleMergeEndCol: number;
+  titleRowHeight: number;
   columnWidths: Record<string, number>;
   rows: { labels: unknown[]; row: ReliabilityRow }[];
-}): { ws: XLSX.WorkSheet; alphaCol: number; sbRelCol: number; statusCol: number } {
+}): { ws: XLSX.WorkSheet; alphaCol: number; sbRelCol: number; statusCol: number; autoFilterRef: string } {
   const headers = [...opts.labelHeaders, ...metricHeaders(opts.participants, opts.includeAvgInterItem)];
   const lastCol = headers.length - 1;
   const aoa: unknown[][] = [[opts.title], [opts.subtitle], [], headers];
@@ -226,7 +241,9 @@ function metricsSheet(opts: {
     if (avgCol >= 0) setNumberFormat(ws, r, avgCol, FMT_ALPHA);
   }
   setColumnWidths(ws, opts.columnWidths, headers.length);
-  return { ws, alphaCol, sbRelCol, statusCol };
+  setRowHeightsFromExcelRows(ws, metricsRowHeights(opts.titleRowHeight, opts.rows.length, 42.0));
+  const autoFilterRef = rangeRef("A", 4, XLSX.utils.encode_col(lastCol), lastRow + 1);
+  return { ws, alphaCol, sbRelCol, statusCol, autoFilterRef };
 }
 
 /** The 3-tier CF rules shared by every metrics sheet: green/amber/red on the
@@ -273,7 +290,7 @@ export interface ReliabilityBuildResult {
 
 export function buildReliabilityWorkbook(input: ReliabilityReportInput): ReliabilityBuildResult {
   const wb = XLSX.utils.book_new();
-  const cfSheets: SheetCf[] = [{ sheetIndex: 0, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR }];
+  const cfSheets: SheetCf[] = [{ sheetIndex: 0, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR, defaultRowHeight: DEFAULT_ROW_HEIGHT }];
   const r = input.reliability;
 
   XLSX.utils.book_append_sheet(wb, readmeSheet(), "README");
@@ -287,15 +304,18 @@ export function buildReliabilityWorkbook(input: ReliabilityReportInput): Reliabi
     participants: "single",
     includeAvgInterItem: false,
     titleMergeEndCol: 6,
+    titleRowHeight: 50.4,
     columnWidths: { A: 32.0, B: 25.0, C: 18.0, D: 29.109375, E: 21.0, F: 45.0, G: 42.0, I: 15.0, J: 55.0 },
     rows: overallRows.map((row) => ({ labels: ["All Assessments Together"], row })),
   });
   XLSX.utils.book_append_sheet(wb, overall.ws, "Overall");
-  if (overallRows.length > 0) {
-    cfSheets.push(reliabilityCf(1, 5, 4 + overallRows.length, overall.alphaCol, overall.sbRelCol, overall.statusCol));
-  } else {
-    cfSheets.push({ sheetIndex: 1, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR });
-  }
+  cfSheets.push({
+    ...(overallRows.length > 0
+      ? reliabilityCf(1, 5, 4 + overallRows.length, overall.alphaCol, overall.sbRelCol, overall.statusCol)
+      : { sheetIndex: 1, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR }),
+    defaultRowHeight: DEFAULT_ROW_HEIGHT,
+    autoFilterRef: overall.autoFilterRef,
+  });
 
   // By_Assessment (no Average Inter-Item Correlation column).
   const subjectRows = r ? r.rows.filter((row) => row.level === "subject") : [];
@@ -306,15 +326,18 @@ export function buildReliabilityWorkbook(input: ReliabilityReportInput): Reliabi
     participants: "dual",
     includeAvgInterItem: false,
     titleMergeEndCol: 5,
+    titleRowHeight: 47.4,
     columnWidths: { A: 34.0, B: 25.0, C: 34.0, D: 18.0, E: 27.0, F: 25.0, G: 45.0, H: 42.0, I: 41.33203125, J: 15.0, K: 104.5546875 },
     rows: subjectRows.map((row) => ({ labels: [row.assessmentName ?? row.label], row })),
   });
   XLSX.utils.book_append_sheet(wb, bySubject.ws, "By_Assessment");
-  if (subjectRows.length > 0) {
-    cfSheets.push(reliabilityCf(2, 5, 4 + subjectRows.length, bySubject.alphaCol, bySubject.sbRelCol, bySubject.statusCol));
-  } else {
-    cfSheets.push({ sheetIndex: 2, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR });
-  }
+  cfSheets.push({
+    ...(subjectRows.length > 0
+      ? reliabilityCf(2, 5, 4 + subjectRows.length, bySubject.alphaCol, bySubject.sbRelCol, bySubject.statusCol)
+      : { sheetIndex: 2, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR }),
+    defaultRowHeight: DEFAULT_ROW_HEIGHT,
+    autoFilterRef: bySubject.autoFilterRef,
+  });
 
   // By_Assessment_Major — grouped by assessment (appearance order), major element alphabetical within.
   const majorRows = r ? r.rows.filter((row) => row.level === "majorElement") : [];
@@ -330,15 +353,18 @@ export function buildReliabilityWorkbook(input: ReliabilityReportInput): Reliabi
     participants: "dual",
     includeAvgInterItem: true,
     titleMergeEndCol: 5,
+    titleRowHeight: 44.4,
     columnWidths: { A: 34.0, B: 31.0, C: 25.0, D: 34.0, E: 18.0, F: 27.0, G: 24.0, H: 45.0, I: 42.0, K: 33.0, L: 15.0, M: 104.5546875 },
     rows: majorOrdered.map((row) => ({ labels: [row.assessmentName ?? "", row.label], row })),
   });
   XLSX.utils.book_append_sheet(wb, byMajor.ws, "By_Assessment_Major");
-  if (majorOrdered.length > 0) {
-    cfSheets.push(reliabilityCf(3, 5, 4 + majorOrdered.length, byMajor.alphaCol, byMajor.sbRelCol, byMajor.statusCol));
-  } else {
-    cfSheets.push({ sheetIndex: 3, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR });
-  }
+  cfSheets.push({
+    ...(majorOrdered.length > 0
+      ? reliabilityCf(3, 5, 4 + majorOrdered.length, byMajor.alphaCol, byMajor.sbRelCol, byMajor.statusCol)
+      : { sheetIndex: 3, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR }),
+    defaultRowHeight: DEFAULT_ROW_HEIGHT,
+    autoFilterRef: byMajor.autoFilterRef,
+  });
 
   // By_Demand_Level — cross-assessment (assessmentId null), fixed D1→D3 order.
   const demandAllRows = r ? r.rows.filter((row) => row.level === "demandLevel" && row.assessmentId === null) : [];
@@ -350,15 +376,18 @@ export function buildReliabilityWorkbook(input: ReliabilityReportInput): Reliabi
     participants: "dual",
     includeAvgInterItem: true,
     titleMergeEndCol: 4,
+    titleRowHeight: 47.4,
     columnWidths: { A: 14.0, B: 25.0, C: 34.0, D: 18.0, E: 27.0, F: 22.0, G: 45.0, H: 42.0, J: 33.0, K: 15.0, L: 54.5546875 },
     rows: demandAllOrdered.map(({ demand, row }) => ({ labels: [demand], row })),
   });
   XLSX.utils.book_append_sheet(wb, byDemand.ws, "By_Demand_Level");
-  if (demandAllOrdered.length > 0) {
-    cfSheets.push(reliabilityCf(4, 5, 4 + demandAllOrdered.length, byDemand.alphaCol, byDemand.sbRelCol, byDemand.statusCol));
-  } else {
-    cfSheets.push({ sheetIndex: 4, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR });
-  }
+  cfSheets.push({
+    ...(demandAllOrdered.length > 0
+      ? reliabilityCf(4, 5, 4 + demandAllOrdered.length, byDemand.alphaCol, byDemand.sbRelCol, byDemand.statusCol)
+      : { sheetIndex: 4, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR }),
+    defaultRowHeight: DEFAULT_ROW_HEIGHT,
+    autoFilterRef: byDemand.autoFilterRef,
+  });
 
   // By_Assessment_Demand — grouped by assessment (appearance order), D1→D3 within.
   const assessmentDemandRows = r ? r.rows.filter((row) => row.level === "demandLevel" && row.assessmentId !== null) : [];
@@ -374,17 +403,18 @@ export function buildReliabilityWorkbook(input: ReliabilityReportInput): Reliabi
     participants: "dual",
     includeAvgInterItem: true,
     titleMergeEndCol: 8,
+    titleRowHeight: 42.0,
     columnWidths: { A: 34.0, B: 14.0, C: 25.0, D: 34.0, E: 18.0, F: 27.0, G: 23.0, H: 45.0, I: 42.0, K: 33.0, L: 13.0, M: 54.77734375 },
     rows: assessmentDemandOrdered.map((row) => ({ labels: [row.assessmentName ?? "", row.label], row })),
   });
   XLSX.utils.book_append_sheet(wb, byAssessmentDemand.ws, "By_Assessment_Demand");
-  if (assessmentDemandOrdered.length > 0) {
-    cfSheets.push(
-      reliabilityCf(5, 5, 4 + assessmentDemandOrdered.length, byAssessmentDemand.alphaCol, byAssessmentDemand.sbRelCol, byAssessmentDemand.statusCol),
-    );
-  } else {
-    cfSheets.push({ sheetIndex: 5, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR });
-  }
+  cfSheets.push({
+    ...(assessmentDemandOrdered.length > 0
+      ? reliabilityCf(5, 5, 4 + assessmentDemandOrdered.length, byAssessmentDemand.alphaCol, byAssessmentDemand.sbRelCol, byAssessmentDemand.statusCol)
+      : { sheetIndex: 5, rules: [], freeze: FREEZE_A5, tabColor: TAB_COLOR }),
+    defaultRowHeight: DEFAULT_ROW_HEIGHT,
+    autoFilterRef: byAssessmentDemand.autoFilterRef,
+  });
 
   return {
     workbook: wb,

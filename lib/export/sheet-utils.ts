@@ -116,6 +116,18 @@ export const WCH_WIDTH_PADDING = 0.83203125;
 /** Set `!cols` from a per-column-letter width map (already-correct original
  * widths, e.g. `{ A: 34.0, C: 25.0 }`) — columns not in the map keep Excel's
  * default width. Compensates for `WCH_WIDTH_PADDING` automatically. */
+/** Set `!rows` from a 1-based-Excel-row→height(points) map (e.g. `{ 1: 39.6,
+ * 4: 36.0 }`), matching how openpyxl/verify-fidelity report row heights.
+ * `!rows[i].hpt` round-trips exactly — no padding quirk like `!cols[i].wch`
+ * has (confirmed empirically). Rows not in the map keep Excel's default,
+ * which xlsx-js-style never actually writes at all — pair this with a
+ * `defaultRowHeight` on the `SheetCf` entry (lib/export/ooxml-cf.ts) so
+ * every unlisted row still gets the original's real default instead of
+ * silently falling back to Excel's own generic ~15pt one. */
+export function setRowHeightsFromExcelRows(ws: XLSX.WorkSheet, heightsByExcelRow: Record<number, number>): void {
+  setRowHeights(ws, Object.fromEntries(Object.entries(heightsByExcelRow).map(([row, hpt]) => [Number(row) - 1, hpt])));
+}
+
 export function setColumnWidths(ws: XLSX.WorkSheet, widths: Record<string, number>, colCount: number): void {
   const cols: { wch?: number }[] = [];
   for (let i = 0; i < colCount; i++) {

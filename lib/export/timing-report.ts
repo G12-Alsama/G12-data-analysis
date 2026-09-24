@@ -20,7 +20,7 @@
  */
 import type { DiagnosticsModel, ReliabilityModel } from "@/lib/data/types";
 import type { TimingResult } from "@/lib/diagnostics";
-import { XLSX, styleCell, setColumnWidths, type CellStyle } from "./sheet-utils";
+import { XLSX, styleCell, setColumnWidths, setRowHeightsFromExcelRows, type CellStyle } from "./sheet-utils";
 import { applyConditionalFormatting, rangeRef, type SheetCf } from "./ooxml-cf";
 
 export const TIMING_SHEETS = ["README", "Assessment Level", "Major Element Level"] as const;
@@ -33,6 +33,11 @@ export interface TimingReportInput {
 
 const FREEZE_A7 = { ySplit: 6, topLeftCell: "A7" } as const;
 const TAB_COLOR = "FFB2375B";
+// xlsx-js-style never writes <sheetFormatPr>, so unset rows fall back to
+// Excel's ~15pt default instead of the original's. README differs from the
+// two data sheets in this workbook.
+const README_DEFAULT_ROW_HEIGHT = 14.4;
+const DATA_DEFAULT_ROW_HEIGHT = 15.6;
 
 const TITLE_STYLE: CellStyle = {
   font: { name: "Barlow Semi Condensed", sz: 18, bold: true, color: { rgb: "FF25232E" } },
@@ -177,6 +182,10 @@ function readmeSheet(cycleName: string): XLSX.WorkSheet {
   ws["!merges"] = merges;
   for (const s of styled) styleRange(ws, s.r0, s.c0, s.r1, s.c1, s.style);
   setColumnWidths(ws, { A: 3.6640625, B: 28.6640625, C: 18.6640625, I: 25.6640625 }, 9);
+  setRowHeightsFromExcelRows(ws, {
+    1: 16.05, 2: 36.0, 3: 14.4, 4: 14.4, 7: 18.0, 8: 15.6, 9: 15.6, 10: 15.6,
+    12: 18.0, 13: 15.6, 14: 15.6, 15: 15.6, 16: 15.6, 17: 15.6, 19: 18.0,
+  });
   return ws;
 }
 
@@ -205,7 +214,7 @@ function timingCf(sheetIndex: number, firstRow: number, lastRow: number, meanSco
   };
 }
 
-function dataSheet(opts: { title: string; subtitle: string; labelHeaders: readonly string[]; columnWidths: Record<string, number>; rows: unknown[][] }): {
+function dataSheet(opts: { title: string; subtitle: string; labelHeaders: readonly string[]; columnWidths: Record<string, number>; rowHeights: Record<number, number>; rows: unknown[][] }): {
   ws: XLSX.WorkSheet;
   meanScoreCol: number;
   medianScoreCol: number;
@@ -233,6 +242,7 @@ function dataSheet(opts: { title: string; subtitle: string; labelHeaders: readon
     for (const c of [pearsonCol, spearmanCol, totalTimeCorrCol]) setNumberFormat(ws, r, c, "0.000");
   }
   setColumnWidths(ws, opts.columnWidths, headers.length);
+  setRowHeightsFromExcelRows(ws, opts.rowHeights);
   return { ws, meanScoreCol, medianScoreCol, pearsonCol, spearmanCol };
 }
 
@@ -243,7 +253,7 @@ export interface TimingBuildResult {
 
 export function buildTimingWorkbook(input: TimingReportInput): TimingBuildResult {
   const wb = XLSX.utils.book_new();
-  const cfSheets: SheetCf[] = [{ sheetIndex: 0, rules: [], tabColor: TAB_COLOR }];
+  const cfSheets: SheetCf[] = [{ sheetIndex: 0, rules: [], tabColor: TAB_COLOR, defaultRowHeight: README_DEFAULT_ROW_HEIGHT }];
 
   XLSX.utils.book_append_sheet(wb, readmeSheet(input.cycleName), "README");
 
@@ -265,14 +275,16 @@ export function buildTimingWorkbook(input: TimingReportInput): TimingBuildResult
       A: 22.5546875, B: 22.44140625, C: 16.109375, D: 25.6640625, E: 35.33203125, F: 33.6640625, G: 32.33203125,
       H: 15.109375, I: 16.77734375, J: 23.109375, K: 39.0, L: 40.77734375, M: 44.21875, N: 19.77734375, O: 43.88671875, P: 47.109375,
     },
+    rowHeights: { 1: 43.2, 6: 34.05, 7: 22.05, 8: 22.05, 9: 22.05, 10: 22.05, 11: 22.05 },
     rows: assessmentRows,
   });
   XLSX.utils.book_append_sheet(wb, assessmentLevel.ws, "Assessment Level");
-  if (assessmentRows.length > 0) {
-    cfSheets.push(
-      timingCf(1, 7, 6 + assessmentRows.length, assessmentLevel.meanScoreCol, assessmentLevel.medianScoreCol, assessmentLevel.pearsonCol, assessmentLevel.spearmanCol),
-    );
-  }
+  cfSheets.push({
+    ...(assessmentRows.length > 0
+      ? timingCf(1, 7, 6 + assessmentRows.length, assessmentLevel.meanScoreCol, assessmentLevel.medianScoreCol, assessmentLevel.pearsonCol, assessmentLevel.spearmanCol)
+      : { sheetIndex: 1, rules: [], freeze: FREEZE_A7, tabColor: TAB_COLOR }),
+    defaultRowHeight: DATA_DEFAULT_ROW_HEIGHT,
+  });
 
   // Major Element Level — real data from timingByMajorElement(), grouped by
   // assessment (appearance order) with major elements alphabetical within,
@@ -296,14 +308,19 @@ export function buildTimingWorkbook(input: TimingReportInput): TimingBuildResult
       A: 22.5546875, B: 39.77734375, C: 26.88671875, D: 20.5546875, E: 30.109375, F: 39.77734375, G: 38.109375,
       H: 36.77734375, I: 21.6640625, J: 21.21875, K: 27.5546875, L: 43.44140625, M: 45.21875, N: 48.6640625, O: 24.21875, P: 43.88671875, Q: 47.109375,
     },
+    rowHeights: {
+      1: 45.0, 6: 34.05, 7: 22.05, 8: 22.05, 9: 22.05, 10: 22.05, 11: 22.05, 12: 22.05, 13: 22.05,
+      14: 22.05, 15: 22.05, 16: 22.05, 17: 22.05, 18: 22.05, 19: 22.05, 20: 22.05, 21: 22.05, 22: 22.05,
+    },
     rows: majorRows,
   });
   XLSX.utils.book_append_sheet(wb, majorElementLevel.ws, "Major Element Level");
-  if (majorRows.length > 0) {
-    cfSheets.push(
-      timingCf(2, 7, 6 + majorRows.length, majorElementLevel.meanScoreCol, majorElementLevel.medianScoreCol, majorElementLevel.pearsonCol, majorElementLevel.spearmanCol),
-    );
-  }
+  cfSheets.push({
+    ...(majorRows.length > 0
+      ? timingCf(2, 7, 6 + majorRows.length, majorElementLevel.meanScoreCol, majorElementLevel.medianScoreCol, majorElementLevel.pearsonCol, majorElementLevel.spearmanCol)
+      : { sheetIndex: 2, rules: [], freeze: FREEZE_A7, tabColor: TAB_COLOR }),
+    defaultRowHeight: DATA_DEFAULT_ROW_HEIGHT,
+  });
 
   return {
     workbook: wb,

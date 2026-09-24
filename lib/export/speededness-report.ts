@@ -14,10 +14,15 @@
  */
 import type { DiagnosticsModel, ReliabilityModel } from "@/lib/data/types";
 import type { SpeededResult, DiagStatus } from "@/lib/diagnostics";
-import { XLSX, styleCell, setColumnWidths, type CellStyle } from "./sheet-utils";
+import { XLSX, styleCell, setColumnWidths, setRowHeightsFromExcelRows, type CellStyle } from "./sheet-utils";
 import { applyConditionalFormatting, rangeRef, type SheetCf } from "./ooxml-cf";
 
 export const SPEEDEDNESS_SHEETS = ["README & Methodology", "Assessment Level", "Major Element Level"] as const;
+
+/** xlsx-js-style never writes `<sheetFormatPr>`, so every row without an
+ * explicit height falls back to Excel's ~15pt default instead of the
+ * original's. Same value on all three sheets in this workbook. */
+const DEFAULT_ROW_HEIGHT = 13.8;
 
 export interface SpeededednessReportInput {
   cycleName: string;
@@ -170,6 +175,7 @@ function readmeSheet(summary: { totalResponses: number; assessmentGroups: number
   ws["!merges"] = merges;
   for (const s of styled) styleRange(ws, s.r0, s.c0, s.r1, s.c1, s.style);
   setColumnWidths(ws, { A: 32.796875, B: 58.0, C: 34.0, D: 91.8984375, F: 42.0, G: 18.0 }, 12);
+  setRowHeightsFromExcelRows(ws, { 1: 40.05, 4: 27.0, 5: 27.6, 6: 27.6, 7: 27.6, 8: 27.6, 9: 55.2, 10: 27.6 });
   return ws;
 }
 
@@ -205,6 +211,7 @@ function dataSheet(opts: {
   subtitle: string;
   labelHeaders: readonly string[];
   columnWidths: Record<string, number>;
+  rowHeights: Record<number, number>;
   rows: unknown[][];
 }): { ws: XLSX.WorkSheet; speedCol: number; omitCol: number; compCol: number } {
   const headers = [...opts.labelHeaders, ...ROW_HEADERS];
@@ -227,6 +234,7 @@ function dataSheet(opts: {
     for (const c of pctCols) setNumberFormat(ws, r, c, "0.0%");
   }
   setColumnWidths(ws, opts.columnWidths, headers.length);
+  setRowHeightsFromExcelRows(ws, opts.rowHeights);
   return { ws, speedCol, omitCol, compCol };
 }
 
@@ -265,7 +273,7 @@ export function buildSpeedednessWorkbook(input: SpeededednessReportInput): Speed
   );
 
   const wb = XLSX.utils.book_new();
-  const cfSheets: SheetCf[] = [];
+  const cfSheets: SheetCf[] = [{ sheetIndex: 0, rules: [], defaultRowHeight: DEFAULT_ROW_HEIGHT }];
 
   XLSX.utils.book_append_sheet(
     wb,
@@ -284,12 +292,16 @@ export function buildSpeedednessWorkbook(input: SpeededednessReportInput): Speed
     subtitle: "Interpret Speededness together with Omission Rate and Completion Rate. Small units can fluctuate because one or two students/items may change percentages substantially.",
     labelHeaders: ["AssessmentName"],
     columnWidths: { A: 28.0, B: 15.0, E: 28.796875, F: 15.0, J: 24.0, L: 15.0, Q: 48.0 },
+    rowHeights: { 1: 40.05, 4: 31.65, 5: 31.65, 6: 21.15, 7: 31.65, 8: 31.65, 9: 21.15 },
     rows: assessmentRows,
   });
   XLSX.utils.book_append_sheet(wb, assessmentLevel.ws, "Assessment Level");
-  if (assessmentRows.length > 0) {
-    cfSheets.push(speedednessCf(1, 5, 4 + assessmentRows.length, assessmentLevel.speedCol, assessmentLevel.omitCol, assessmentLevel.compCol));
-  }
+  cfSheets.push({
+    ...(assessmentRows.length > 0
+      ? speedednessCf(1, 5, 4 + assessmentRows.length, assessmentLevel.speedCol, assessmentLevel.omitCol, assessmentLevel.compCol)
+      : { sheetIndex: 1, rules: [] }),
+    defaultRowHeight: DEFAULT_ROW_HEIGHT,
+  });
 
   // Major Element Level — real data from speededByMajorElement(), grouped by
   // assessment (appearance order) with major elements alphabetical within,
@@ -299,12 +311,19 @@ export function buildSpeedednessWorkbook(input: SpeededednessReportInput): Speed
     subtitle: "Interpret Speededness together with Omission Rate and Completion Rate. Small units can fluctuate because one or two students/items may change percentages substantially.",
     labelHeaders: ["AssessmentName", "QuestionMajorElement"],
     columnWidths: { A: 23.0, B: 39.09765625, C: 15.0, F: 32.796875, G: 15.0, H: 24.19921875, I: 15.0, K: 24.0, M: 15.0, R: 72.19921875 },
+    rowHeights: {
+      1: 40.05, 4: 31.65, 5: 21.15, 6: 21.15, 7: 21.15, 8: 31.65, 9: 31.65, 10: 31.65,
+      11: 21.15, 12: 21.15, 13: 21.15, 14: 21.15, 15: 31.65, 16: 21.15, 17: 31.65, 18: 31.65, 19: 21.15, 20: 31.65,
+    },
     rows: majorRows,
   });
   XLSX.utils.book_append_sheet(wb, majorElementLevel.ws, "Major Element Level");
-  if (majorRows.length > 0) {
-    cfSheets.push(speedednessCf(2, 5, 4 + majorRows.length, majorElementLevel.speedCol, majorElementLevel.omitCol, majorElementLevel.compCol));
-  }
+  cfSheets.push({
+    ...(majorRows.length > 0
+      ? speedednessCf(2, 5, 4 + majorRows.length, majorElementLevel.speedCol, majorElementLevel.omitCol, majorElementLevel.compCol)
+      : { sheetIndex: 2, rules: [] }),
+    defaultRowHeight: DEFAULT_ROW_HEIGHT,
+  });
 
   return {
     workbook: wb,
