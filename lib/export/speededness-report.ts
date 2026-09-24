@@ -291,7 +291,10 @@ export function buildSpeedednessWorkbook(input: SpeededednessReportInput): Speed
     title: "Assessment-Level Speededness, Omission, and Completion Analysis",
     subtitle: "Interpret Speededness together with Omission Rate and Completion Rate. Small units can fluctuate because one or two students/items may change percentages substantially.",
     labelHeaders: ["AssessmentName"],
-    columnWidths: { A: 28.0, B: 15.0, E: 28.796875, F: 15.0, J: 24.0, L: 15.0, Q: 48.0 },
+    columnWidths: {
+      A: 28.0, B: 15.0, C: 15.0, D: 15.0, E: 28.796875, F: 15.0, G: 15.0, H: 15.0, I: 15.0,
+      J: 24.0, K: 24.0, L: 15.0, M: 15.0, N: 15.0, O: 15.0, P: 15.0, Q: 48.0,
+    },
     rowHeights: { 1: 40.05, 4: 31.65, 5: 31.65, 6: 21.15, 7: 31.65, 8: 31.65, 9: 21.15 },
     rows: assessmentRows,
   });
@@ -310,7 +313,10 @@ export function buildSpeedednessWorkbook(input: SpeededednessReportInput): Speed
     title: "Major Element-Level Speededness, Omission, and Completion Analysis",
     subtitle: "Interpret Speededness together with Omission Rate and Completion Rate. Small units can fluctuate because one or two students/items may change percentages substantially.",
     labelHeaders: ["AssessmentName", "QuestionMajorElement"],
-    columnWidths: { A: 23.0, B: 39.09765625, C: 15.0, F: 32.796875, G: 15.0, H: 24.19921875, I: 15.0, K: 24.0, M: 15.0, R: 72.19921875 },
+    columnWidths: {
+      A: 23.0, B: 39.09765625, C: 15.0, D: 15.0, E: 15.0, F: 32.796875, G: 15.0, H: 24.19921875,
+      I: 15.0, J: 15.0, K: 24.0, L: 24.0, M: 15.0, N: 15.0, O: 15.0, P: 15.0, Q: 15.0, R: 72.19921875,
+    },
     rowHeights: {
       1: 40.05, 4: 31.65, 5: 21.15, 6: 21.15, 7: 21.15, 8: 31.65, 9: 31.65, 10: 31.65,
       11: 21.15, 12: 21.15, 13: 21.15, 14: 21.15, 15: 31.65, 16: 21.15, 17: 31.65, 18: 31.65, 19: 21.15, 20: 31.65,

@@ -186,7 +186,7 @@ function readmeSheet(): XLSX.WorkSheet {
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws["!merges"] = merges;
   for (const s of styled) styleRange(ws, s.r0, s.c0, s.r1, s.c1, s.style);
-  setColumnWidths(ws, { A: 44.109375, B: 101.88671875, C: 30.0, D: 36.0, E: 12.0 }, 9);
+  setColumnWidths(ws, { A: 44.109375, B: 101.88671875, C: 30.0, D: 36.0, E: 12.0, F: 12.0, G: 12.0, H: 12.0, I: 12.0 }, 9);
   setRowHeightsFromExcelRows(ws, {
     1: 39.6, 2: 18.0, 5: 16.8, 6: 48, 7: 48, 8: 48, 9: 48, 10: 48,
     13: 16.8, 14: 16.8, 15: 31.2, 16: 15.6, 17: 15.6, 18: 15.6, 19: 31.2,
@@ -305,7 +305,7 @@ export function buildReliabilityWorkbook(input: ReliabilityReportInput): Reliabi
     includeAvgInterItem: false,
     titleMergeEndCol: 6,
     titleRowHeight: 50.4,
-    columnWidths: { A: 32.0, B: 25.0, C: 18.0, D: 29.109375, E: 21.0, F: 45.0, G: 42.0, I: 15.0, J: 55.0 },
+    columnWidths: { A: 32.0, B: 25.0, C: 18.0, D: 29.109375, E: 21.0, F: 45.0, G: 42.0, H: 42.0, I: 15.0, J: 55.0 },
     rows: overallRows.map((row) => ({ labels: ["All Assessments Together"], row })),
   });
   XLSX.utils.book_append_sheet(wb, overall.ws, "Overall");
@@ -354,7 +354,7 @@ export function buildReliabilityWorkbook(input: ReliabilityReportInput): Reliabi
     includeAvgInterItem: true,
     titleMergeEndCol: 5,
     titleRowHeight: 44.4,
-    columnWidths: { A: 34.0, B: 31.0, C: 25.0, D: 34.0, E: 18.0, F: 27.0, G: 24.0, H: 45.0, I: 42.0, K: 33.0, L: 15.0, M: 104.5546875 },
+    columnWidths: { A: 34.0, B: 31.0, C: 25.0, D: 34.0, E: 18.0, F: 27.0, G: 24.0, H: 45.0, I: 42.0, J: 42.0, K: 33.0, L: 15.0, M: 104.5546875 },
     rows: majorOrdered.map((row) => ({ labels: [row.assessmentName ?? "", row.label], row })),
   });
   XLSX.utils.book_append_sheet(wb, byMajor.ws, "By_Assessment_Major");
@@ -377,7 +377,7 @@ export function buildReliabilityWorkbook(input: ReliabilityReportInput): Reliabi
     includeAvgInterItem: true,
     titleMergeEndCol: 4,
     titleRowHeight: 47.4,
-    columnWidths: { A: 14.0, B: 25.0, C: 34.0, D: 18.0, E: 27.0, F: 22.0, G: 45.0, H: 42.0, J: 33.0, K: 15.0, L: 54.5546875 },
+    columnWidths: { A: 14.0, B: 25.0, C: 34.0, D: 18.0, E: 27.0, F: 22.0, G: 45.0, H: 42.0, I: 42.0, J: 33.0, K: 15.0, L: 54.5546875 },
     rows: demandAllOrdered.map(({ demand, row }) => ({ labels: [demand], row })),
   });
   XLSX.utils.book_append_sheet(wb, byDemand.ws, "By_Demand_Level");
@@ -404,7 +404,7 @@ export function buildReliabilityWorkbook(input: ReliabilityReportInput): Reliabi
     includeAvgInterItem: true,
     titleMergeEndCol: 8,
     titleRowHeight: 42.0,
-    columnWidths: { A: 34.0, B: 14.0, C: 25.0, D: 34.0, E: 18.0, F: 27.0, G: 23.0, H: 45.0, I: 42.0, K: 33.0, L: 13.0, M: 54.77734375 },
+    columnWidths: { A: 34.0, B: 14.0, C: 25.0, D: 34.0, E: 18.0, F: 27.0, G: 23.0, H: 45.0, I: 42.0, J: 42.0, K: 33.0, L: 13.0, M: 54.77734375 },
     rows: assessmentDemandOrdered.map((row) => ({ labels: [row.assessmentName ?? "", row.label], row })),
   });
   XLSX.utils.book_append_sheet(wb, byAssessmentDemand.ws, "By_Assessment_Demand");

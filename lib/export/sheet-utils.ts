@@ -113,9 +113,6 @@ export const IA_GUIDE_STYLE: CellStyle = {
  */
 export const WCH_WIDTH_PADDING = 0.83203125;
 
-/** Set `!cols` from a per-column-letter width map (already-correct original
- * widths, e.g. `{ A: 34.0, C: 25.0 }`) — columns not in the map keep Excel's
- * default width. Compensates for `WCH_WIDTH_PADDING` automatically. */
 /** Set `!rows` from a 1-based-Excel-row→height(points) map (e.g. `{ 1: 39.6,
  * 4: 36.0 }`), matching how openpyxl/verify-fidelity report row heights.
  * `!rows[i].hpt` round-trips exactly — no padding quirk like `!cols[i].wch`
@@ -128,11 +125,25 @@ export function setRowHeightsFromExcelRows(ws: XLSX.WorkSheet, heightsByExcelRow
   setRowHeights(ws, Object.fromEntries(Object.entries(heightsByExcelRow).map(([row, hpt]) => [Number(row) - 1, hpt])));
 }
 
+/** Set `!cols` from a per-column-letter width map (already-correct original
+ * widths, e.g. `{ A: 34.0, C: 25.0 }`) — the map must carry every column the
+ * original actually assigns a width to (including every column covered by a
+ * ranged `<col min="2" max="4" .../>` in the original, not just the range's
+ * first letter), never a partial/heuristic subset.
+ *
+ * A column with NO entry in `widths` is left as a genuine hole in the sparse
+ * `!cols` array (never `{}`) so xlsx-js-style's writer skips it entirely —
+ * confirmed empirically that assigning `cols[i] = {}` instead writes a
+ * width-less `<col min="i" max="i"/>` STUB tag, which some spreadsheet
+ * clients (e.g. Google Sheets) render as a zero-width/hidden column even
+ * with no `hidden="1"` attribute anywhere. That stub-column rendering bug is
+ * exactly what a partial widths map (e.g. only the first letter of a ranged
+ * original `<col>`) silently produces. */
 export function setColumnWidths(ws: XLSX.WorkSheet, widths: Record<string, number>, colCount: number): void {
-  const cols: { wch?: number }[] = [];
+  const cols: XLSX.ColInfo[] = [];
   for (let i = 0; i < colCount; i++) {
     const letter = XLSX.utils.encode_col(i);
-    cols[i] = widths[letter] ? { wch: widths[letter] - WCH_WIDTH_PADDING } : {};
+    if (widths[letter] !== undefined) cols[i] = { wch: widths[letter] - WCH_WIDTH_PADDING };
   }
   ws["!cols"] = cols;
 }

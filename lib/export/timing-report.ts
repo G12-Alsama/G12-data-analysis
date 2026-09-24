@@ -181,7 +181,10 @@ function readmeSheet(cycleName: string): XLSX.WorkSheet {
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws["!merges"] = merges;
   for (const s of styled) styleRange(ws, s.r0, s.c0, s.r1, s.c1, s.style);
-  setColumnWidths(ws, { A: 3.6640625, B: 28.6640625, C: 18.6640625, I: 25.6640625 }, 9);
+  setColumnWidths(ws, {
+    A: 3.6640625, B: 28.6640625, C: 18.6640625, D: 18.6640625, E: 18.6640625,
+    F: 18.6640625, G: 18.6640625, H: 18.6640625, I: 25.6640625,
+  }, 9);
   setRowHeightsFromExcelRows(ws, {
     1: 16.05, 2: 36.0, 3: 14.4, 4: 14.4, 7: 18.0, 8: 15.6, 9: 15.6, 10: 15.6,
     12: 18.0, 13: 15.6, 14: 15.6, 15: 15.6, 16: 15.6, 17: 15.6, 19: 18.0,
