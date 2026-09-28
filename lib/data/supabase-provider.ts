@@ -562,6 +562,12 @@ export class SupabaseDataProvider implements DataProvider {
     });
     const gz = await gzipText(payload);
     const filePath = rawIngestPath(cycleId);
+    // `contentType` here is INERT for this call — @supabase/storage-js uploads a
+    // Blob body via FormData and labels that part from the Blob's OWN `.type`
+    // (which gzipText sets), never from this option; the option only applies to a
+    // raw (non-Blob, non-FormData) body. Kept anyway as documented intent and a
+    // safety net if this ever stops passing a Blob — do not delete it as
+    // "redundant" with the Blob's type; today it's the Blob's type doing the work.
     const { error: uploadError } = await this.supabase.storage
       .from(RAW_INGEST_BUCKET)
       .upload(filePath, gz, { contentType: "application/gzip", upsert: false });

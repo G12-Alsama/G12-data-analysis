@@ -20,7 +20,14 @@
 /** Compress a UTF-8 string to a gzip `Blob` (client side). */
 export async function gzipText(text: string): Promise<Blob> {
   const stream = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));
-  return await new Response(stream).blob();
+  const blob = await new Response(stream).blob();
+  // `Response.blob()` carries no type unless the Response had a Content-Type
+  // header (it didn't), so this would otherwise be "" — and @supabase/storage-js
+  // uploads a Blob body via FormData, which reads ITS type (not the `contentType`
+  // upload option) to label the part. An empty type there gets defaulted to
+  // application/octet-stream, which the raw-ingest bucket's allowed_mime_types
+  // (migration 0046) then rejects. Re-wrapping is the only way to set a Blob's type.
+  return new Blob([blob], { type: "application/gzip" });
 }
 
 /** Compress a `Blob`/`File` to a gzip `Blob` (client side). */
