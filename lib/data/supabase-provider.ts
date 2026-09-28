@@ -34,7 +34,8 @@ import type {
   ExamIncidentReconciliation,
 } from "@/lib/incidents/exam-incident-match";
 import { InMemoryDataProvider } from "./in-memory-provider";
-import { gzipText, GZIP_MARKER_HEADER, GZIP_MARKER_VALUE } from "@/lib/transport/gzip";
+import { gzipText } from "@/lib/transport/gzip";
+import { RAW_INGEST_BUCKET, rawIngestPath } from "@/lib/transport/raw-ingest-storage";
 import {
   hydrate,
   fetchSeedTestCentres,
@@ -544,12 +545,13 @@ export class SupabaseDataProvider implements DataProvider {
     report: ValidationReport,
     extra?: { canonical?: CanonicalModel; files?: { items?: string; assessments?: string; topics?: string } },
   ): Promise<void> {
-    // Gzip the JSON body so the request stays well under Vercel's hard 4.5 MB
-    // request-body ceiling regardless of cohort size. The body compresses ~10×,
-    // so this removes payload size as a class of failure (was: 413 on large
-    // sittings). Mark it with a custom header — never `Content-Encoding`, which
-    // a proxy may auto-decompress and desync — so the server decompresses it
-    // itself; an older client that skips the marker is still read raw server-side.
+    // Upload the payload straight to Supabase Storage instead of sending it in the
+    // POST body — Vercel caps request bodies at a hard 4.5 MB platform-wide
+    // regardless of compression, so a large-enough cohort still 413s even gzipped
+    // (the prior fix only pushed that ceiling further out). Storage has no such
+    // ceiling for payloads this size, so this removes payload size as a class of
+    // failure at any cohort size. The RLS policy on this bucket (migration 0046)
+    // scopes the upload to a lead_admin of exactly this cycle.
     const payload = JSON.stringify({
       clean,
       report,
@@ -558,10 +560,19 @@ export class SupabaseDataProvider implements DataProvider {
       canonical: extra?.canonical,
       files: extra?.files,
     });
+    const gz = await gzipText(payload);
+    const filePath = rawIngestPath(cycleId);
+    const { error: uploadError } = await this.supabase.storage
+      .from(RAW_INGEST_BUCKET)
+      .upload(filePath, gz, { contentType: "application/gzip", upsert: false });
+    if (uploadError) throw new Error(`Ingest failed (upload): ${uploadError.message}`);
+
+    // The server is POSTed only the small { filePath } reference — it downloads
+    // and decompresses the actual payload itself (see the route).
     const res = await fetch(`/api/cycles/${cycleId}/ingest`, {
       method: "POST",
-      headers: { "content-type": "application/json", [GZIP_MARKER_HEADER]: GZIP_MARKER_VALUE },
-      body: await gzipText(payload),
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ filePath }),
     });
     if (!res.ok) {
       let message = `Ingest failed (${res.status}).`;
