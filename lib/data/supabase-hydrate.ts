@@ -70,6 +70,7 @@ import {
   type QualityRating,
 } from "@/lib/engine";
 import { subjectKeyOf, type OACell, type OASitting, type OASittingStudent } from "./overall-analytics";
+import { isSyntheticCentre } from "./synthetic";
 import { buildAssessmentDiagnostics, cleanDiagResponses, type DiagResponse } from "@/lib/diagnostics";
 import type { EssayUploadRow, IncidentInput, IncidentDecisionInput } from "./provider";
 import type { ExamIncidentRecord, ExamIncidentMatchStatus } from "@/lib/incidents/exam-incident-match";
@@ -277,22 +278,30 @@ export async function fetchSeedTestCentres(supabase: DB): Promise<TestCentreSumm
   const rows = await sel<TestCentreRow>(
     supabase.from("test_centres").select("*").order("created_at", { ascending: true }),
   );
-  return rows.map((t) => ({ id: t.id, name: t.name, code: t.code, slug: t.slug, active: t.active }));
+  return rows
+    .filter((t) => !isSyntheticCentre(t))
+    .map((t) => ({ id: t.id, name: t.name, code: t.code, slug: t.slug, active: t.active }));
 }
 
-export async function hydrate(supabase: DB): Promise<Hydrated | null> {
-  const cycles = await sel<ExamCycleRow>(
+export interface HydrateOptions {
+  /**
+   * Hydrate THIS cycle instead of the newest real one. Used to load the other
+   * sitting of a year for the Overall (the main hydrate holds one live cycle).
+   */
+  cycleId?: string;
+}
+
+export async function hydrate(supabase: DB, opts: HydrateOptions = {}): Promise<Hydrated | null> {
+  const allCycles = await sel<ExamCycleRow>(
     supabase.from("exam_cycles").select("*").order("created_at", { ascending: false }),
   );
-  if (cycles.length === 0) return null;
-  const live = cycles[0]!;
-  const cycleId = live.id;
+  if (allCycles.length === 0) return null;
 
   // 0010 — test centres + the year→centre map, so each sitting resolves to its
   // centre (exam_cycles.year_id → exam_years.test_centre_id). Defensive against a
   // pre-0010 database (no rows / column): the provider falls back to a default
   // centre when the list is empty.
-  const [testCentreRows, yearRows] = await Promise.all([
+  const [allTestCentreRows, yearRows] = await Promise.all([
     sel<TestCentreRow>(supabase.from("test_centres").select("*").order("created_at", { ascending: true })),
     sel<ExamYearRow>(supabase.from("exam_years").select("*")),
   ]);
@@ -300,6 +309,21 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
   for (const y of yearRows) if (y.test_centre_id) yearToCentre.set(y.id, y.test_centre_id);
   const centreOfCycle = (c: ExamCycleRow): string | undefined =>
     c.year_id ? yearToCentre.get(c.year_id) : undefined;
+
+  // 0046 / O9 — synthetic (0043 "△ Sample") centres and every cycle under them are
+  // never part of the real workspace: they can't be picked as the live cycle (the
+  // seed's past created_at could otherwise out-sort a real cycle), never list as a
+  // sitting, and never feed a year's Overall. Nothing is deleted.
+  const syntheticCentreIds = new Set(allTestCentreRows.filter((t) => isSyntheticCentre(t)).map((t) => t.id));
+  const testCentreRows = allTestCentreRows.filter((t) => !syntheticCentreIds.has(t.id));
+  const cycles = allCycles.filter((c) => {
+    const centre = centreOfCycle(c);
+    return !(centre && syntheticCentreIds.has(centre));
+  });
+  const live = opts.cycleId ? cycles.find((c) => c.id === opts.cycleId) : cycles[0];
+  if (!live) return null;
+  const cycleId = live.id;
+
   const seedTestCentres = testCentreRows.map((t) => ({
     id: t.id,
     name: t.name,
@@ -625,11 +649,12 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
   };
   const ingestDuplicates = ingestReport?.checks.find((c) => c.id === "duplicates")?.count ?? 0;
 
-  const priorCycles: SeedPriorCycle[] = cycles.slice(1).map((c) => ({
+  const priorCycles: SeedPriorCycle[] = cycles.filter((c) => c.id !== cycleId).map((c) => ({
     id: c.id,
     name: c.name,
     testCentreId: centreOfCycle(c),
     yearId: c.year_id ?? undefined,
+    sitting: c.sitting ?? undefined,
     stageIndex: 6,
     stepsDone: 7,
     participants: 0,
@@ -649,6 +674,7 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
       region: live.region,
       testCentreId: centreOfCycle(live),
       yearId: live.year_id ?? undefined,
+      sitting: live.sitting ?? undefined,
       startedAt: new Date(live.created_at).toLocaleDateString(),
       lastActivity: new Date(live.updated_at).toLocaleString(),
       stageIndex: stageIndexFromStatus(live.status),
@@ -774,7 +800,10 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
     cleanRemovals,
     cohortExclusions,
     schemes: schemes.map((s) => ({ scope: s.scope, method: s.method, bands: s.bands })),
-    locked: grades.some((g) => g.locked),
+    // lock_grades sets exam_cycles.status = 'locked'. Real cycles carry no
+    // `grades` rows (only the legacy seed does), so the status is the signal of
+    // record; without it a locked sitting re-hydrated as unlocked after a reload.
+    locked: live.status === "locked" || grades.some((g) => g.locked),
     essays,
     incidents,
     incidentDecisions,
@@ -839,11 +868,15 @@ export interface OverallAnalyticsProjection {
  * `rollupOverall` / `deriveAward`). Seeding at this persisted-output grain is
  * sufficient — no raw responses or engine re-run required.
  *
- * Defensive: a pre-migration / empty database yields an empty projection, and the
- * provider then falls back to the in-memory demo. Never throws — a missing table
- * resolves to `[]` via `sel`.
+ * Defensive: a pre-migration / empty database yields an empty projection (the
+ * live provider then shows an honest empty state — never the in-memory demo).
+ * Never throws — a missing table resolves to `[]` via `sel`. Synthetic (0043)
+ * centres are excluded unless `includeSynthetic` is set.
  */
-export async function fetchOverallAnalytics(supabase: DB): Promise<OverallAnalyticsProjection> {
+export async function fetchOverallAnalytics(
+  supabase: DB,
+  opts: { includeSynthetic?: boolean } = {},
+): Promise<OverallAnalyticsProjection> {
   const empty: OverallAnalyticsProjection = { cells: [], subjects: [], years: [] };
   try {
     const [cycles, years, centres, assessments, participants, grades, scoreRuns, scores] =
@@ -861,6 +894,9 @@ export async function fetchOverallAnalytics(supabase: DB): Promise<OverallAnalyt
 
     const yearById = new Map(years.map((y) => [y.id, y] as const));
     const centreNameById = new Map(centres.map((c) => [c.id, c.name] as const));
+    // 0046 / O9 — the 0043 sample centres are excluded unless explicitly opted in,
+    // and are tagged `synthetic` when they are included.
+    const syntheticCentreIds = new Set(centres.filter((c) => isSyntheticCentre(c)).map((c) => c.id));
     const assessmentById = new Map(assessments.map((a) => [a.id, a] as const));
     const studentIdByParticipant = new Map(
       participants.map((p) => [p.id, p.qm_participant_id || p.pseudonym_id || p.id] as const),
@@ -964,12 +1000,14 @@ export async function fetchOverallAnalytics(supabase: DB): Promise<OverallAnalyt
       if (!y) continue;
       const yearNum = Number(y.name.match(/(19|20)\d{2}/)?.[0] ?? y.name);
       if (!Number.isFinite(yearNum)) continue;
+      const synthetic = syntheticCentreIds.has(y.test_centre_id);
+      if (synthetic && !opts.includeSynthetic) continue;
       const centre = centreNameById.get(y.test_centre_id) ?? "Unassigned";
       const sitting = c.sitting === "february" ? "february" : "may";
       const sit = buildSitting(c.id);
       if (!sit) continue;
       const key = `${centre}|${yearNum}`;
-      const cell = cellByKey.get(key) ?? { centre, year: yearNum, february: null, may: null };
+      const cell: OACell = cellByKey.get(key) ?? { centre, year: yearNum, february: null, may: null, ...(synthetic ? { synthetic: true } : {}) };
       // First non-empty sitting wins per slot (a re-run cycle shouldn't double it).
       if (sitting === "february") cell.february ??= sit;
       else cell.may ??= sit;

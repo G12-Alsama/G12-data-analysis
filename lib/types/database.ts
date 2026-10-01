@@ -51,6 +51,8 @@ export interface TestCentreRow {
   slug: string;
   region: string;
   active: boolean;
+  /** 0046 — TRUE for synthetic/sample centres (the 0043 seed). Absent before 0046. */
+  is_synthetic?: boolean;
   created_by: string | null;
   created_at: string;
   updated_at: string;

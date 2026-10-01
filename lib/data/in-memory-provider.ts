@@ -48,6 +48,7 @@ import {
   type Role as RoleModel,
 } from "@/lib/auth/actions";
 import { rollupOverall, overallAwardsReconcile } from "./overall";
+import { canonicalSubjects, rekeyGrades } from "./overall-sittings";
 import {
   computeOverallAnalytics,
   overallAwardBands,
@@ -130,6 +131,7 @@ import {
   type CgjSubjectCompare,
   type ManualMarkAdjustment,
   type OverallGradesModel,
+  type OverallGradeRow,
   type GradingDefaultsModel,
   type IngestModel,
   type ItemDetailModel,
@@ -375,6 +377,15 @@ export class InMemoryDataProvider implements DataProvider {
   private participantExclusions = new Map<string, Map<string, string>>(); // cycle -> pid -> reason
   private boundaries = new Map<string, BoundaryState>(); // cycle:scope -> state
   private locked = new Set<string>();
+  /**
+   * Real signed-off grades for sittings OTHER than the live cycle (the provider
+   * holds one live cycle). Attached by the SupabaseDataProvider after it hydrates
+   * the year's other sitting through the same replay path, so the Overall reads
+   * two REAL sittings. `null` grades = still loading; `error` = load failed.
+   */
+  private sittingGrades = new Map<string, { grades: GradesModel | null; error?: string }>();
+  /** Live data: asks the SupabaseDataProvider to load a non-live sitting's grades. */
+  private sittingLoader: ((cycleId: string) => void) | null = null;
   private grading: GradingConfig = defaultGradingConfig();
   // Item-quality Good/Review/Flag thresholds — the configurable half of the
   // engine's ScoringConfig (the level/award vocabulary is `this.grading`). The
@@ -922,7 +933,7 @@ export class InMemoryDataProvider implements DataProvider {
         lastActivity: p.lastActivity,
         locked: p.locked,
         live: false,
-        mock: true,
+        mock: p.mock,
         testCentreId: centre.id,
         testCentreName: centre.name,
         examYearId: p.yearId,
@@ -964,10 +975,19 @@ export class InMemoryDataProvider implements DataProvider {
         assessmentCount: prior.assessments,
         startedAt: prior.lastActivity,
         stageIndex: prior.stageIndex,
-        locked: true,
-        mock: true,
+        locked: prior.locked,
+        mock: prior.mock,
         testCentreName: this.centreFor(this.effectiveCentreId(prior.id, prior.testCentreId)).name,
-        doNext: { title: "Locked cycle", body: "This is a mock prior cycle with no detailed data in this build.", href: "/", cta: "Back to cycles" },
+        doNext: prior.mock
+          ? { title: "Locked cycle", body: "This is a mock prior cycle with no detailed data in this build.", href: "/", cta: "Back to cycles" }
+          : {
+              title: prior.locked ? "Locked sitting" : "Earlier sitting",
+              body: prior.locked
+                ? "This sitting is locked. Its signed-off grades feed the year's Overall."
+                : "Only the most recent sitting is open for editing in this session.",
+              href: "/",
+              cta: "Back to years",
+            },
         assessments: [],
       };
     }
@@ -994,6 +1014,19 @@ export class InMemoryDataProvider implements DataProvider {
   /** Map a cycle name to its sitting: Jan–Apr → February, otherwise May. */
   private sittingOf(name: string): SittingKey {
     return /\b(jan|feb|mar|apr)/i.test(name) ? "february" : "may";
+  }
+
+  /**
+   * A cycle's sitting. Live data carries the STORED `exam_cycles.sitting`, which
+   * migration 0046 derives from the ingested result dates (Jan–Apr → February,
+   * else May) — that wins. The name is only the fallback (demo seed / pre-0046).
+   */
+  private sittingOfCycle(c: CycleSummary): SittingKey {
+    const stored =
+      c.id === this.seed.liveCycle.id
+        ? this.seed.liveCycle.sitting
+        : this.seed.priorCycles.find((p) => p.id === c.id)?.sitting;
+    return stored ?? this.sittingOf(c.name);
   }
 
   private sittingRefFrom(c: CycleSummary, sitting: SittingKey): SittingRef {
@@ -1059,7 +1092,7 @@ export class InMemoryDataProvider implements DataProvider {
     const primaryId = this.primaryTestCentre().id;
     for (const c of this.listCycles()) {
       const year = this.yearOf(c.name);
-      const sitting = this.sittingOf(c.name);
+      const sitting = this.sittingOfCycle(c);
       const centre = this.centreFor(c.testCentreId);
       // GROUPING KEY — always id-anchored for live data so a route param is never a
       // name label:
@@ -1160,7 +1193,7 @@ export class InMemoryDataProvider implements DataProvider {
         ready,
         note: ready
           ? "Both sittings are locked — the Overall best-of-two rollup runs here."
-          : "Overall becomes available once both the February and May sittings are locked.",
+          : "Overall appears once both the February and May sittings are locked.",
       },
     };
   }
@@ -2391,57 +2424,129 @@ export class InMemoryDataProvider implements DataProvider {
 
   // ── Overall (best-of-two across the year's two sittings) ──────────────────
   /**
-   * The year's Overall view: per student, per subject, the HIGHER award of the
-   * two sittings (by level rank), plus the derived overall award. Pure
-   * aggregation over each sitting's signed-off `GradesModel` (see
-   * `lib/data/overall.ts`) — no scoring, cut-score, or safeguard work runs here.
+   * Attach a non-live sitting's REAL signed-off grades (or its load state) so the
+   * year's Overall can compare two real sittings. Called by the
+   * SupabaseDataProvider after hydrating that sitting through the same
+   * hydrate → replay → getGrades path the live cycle uses.
+   */
+  attachSittingGrades(cycleId: string, grades: GradesModel | null, error?: string): void {
+    this.sittingGrades.set(cycleId, error ? { grades: null, error } : { grades });
+    this.bump();
+  }
+
+  /** Register the loader for non-live sittings (live data only). */
+  setSittingLoader(loader: (cycleId: string) => void): void {
+    this.sittingLoader = loader;
+  }
+
+  /** A sitting's signed-off grades: the live cycle computes them; others are attached. */
+  private sittingGradesFor(cycleId: string | null): { grades: GradesModel | null; state: "ok" | "loading" | "error" | "none"; error?: string } {
+    if (!cycleId) return { grades: null, state: "none" };
+    if (cycleId === this.seed.liveCycle.id) {
+      const g = this.getGrades(cycleId);
+      return { grades: g, state: g ? "ok" : "none" };
+    }
+    const att = this.sittingGrades.get(cycleId);
+    if (!att) {
+      if (!this.sittingLoader) return { grades: null, state: "none" };
+      // First request: mark loading and ask for it OUTSIDE this read (the loader
+      // notifies subscribers, which must not happen mid-render).
+      this.sittingGrades.set(cycleId, { grades: null });
+      const load = this.sittingLoader;
+      queueMicrotask(() => load(cycleId));
+      return { grades: null, state: "loading" };
+    }
+    if (att.error) return { grades: null, state: "error", error: att.error };
+    return att.grades ? { grades: att.grades, state: "ok" } : { grades: null, state: "loading" };
+  }
+
+  /**
+   * The year's Overall view: per student, per subject, the HIGHER performance
+   * level of the two sittings (by level rank), plus the derived overall award.
+   * Pure aggregation over each sitting's signed-off `GradesModel` via the
+   * unchanged `rollupOverall` (`lib/data/overall.ts`) — no scoring, cut-score, or
+   * safeguard work runs here.
    *
-   * In this build only the live (May) sitting carries real grades, and live
-   * Supabase is unreachable, so the February baseline is synthesized from the May
-   * cohort (clearly flagged `demo: true`) to give the rollup two sittings to
-   * compare. With real two-sitting data, both sittings' `getGrades` feed the same
-   * `rollupOverall` unchanged.
+   * GATE: rows appear only once BOTH sittings are locked and both sittings' real
+   * grades are available; otherwise `rows` is empty and `blocked` says why.
+   *
+   * Assessment ids are per-cycle (each sitting's subjects are distinct rows), so
+   * each sitting's cells are re-keyed onto a canonical subject key before the
+   * rollup — otherwise February's cells would never line up with May's.
+   *
+   * Real (hydrated) data NEVER synthesises a sitting. Only the fixtures-only demo
+   * build (no database) synthesises a labelled February (`demo: true`).
    */
   getOverallGrades(yearId: string): OverallGradesModel | null {
-    const year = this.buildYears().find((y) => y.id === yearId);
+    const year = this.buildYears().find((y) => y.id === yearId || y.examYearId === yearId);
     if (!year) return null;
-
-    const mayGrades = year.may.cycleId ? this.getGrades(year.may.cycleId) : null;
-    const realFeb = year.february.cycleId ? this.getGrades(year.february.cycleId) : null;
-    // Demo February baseline (only when there's a real May sitting but no real
-    // February grades to compare against).
-    const febGrades = realFeb ?? (mayGrades ? this.demoFebruaryGrades(mayGrades) : null);
-    const demo = realFeb === null && febGrades !== null;
-
-    if (!mayGrades && !febGrades) return null;
 
     const perfLevels = this.grading.performanceLevels;
     const awardLevels = this.grading.awardLevels;
     const starMap = this.grading.starMap;
-    const assessments = (mayGrades ?? febGrades)!.assessments;
+    const ready = year.february.started && year.february.locked && year.may.started && year.may.locked;
 
-    const rows = rollupOverall({
-      february: febGrades,
-      may: mayGrades,
-      assessments,
-      performanceLevels: perfLevels,
-      awardLevels,
-      starMap,
-    });
+    const statusOf = (s: SittingRef): string =>
+      !s.started ? `${s.label}: not started` : s.locked ? `${s.label}: locked` : `${s.label}: ${s.stageLabel} (not locked)`;
+
+    let blocked: string | null = null;
+    let demo = false;
+    let febGrades: GradesModel | null = null;
+    let mayGrades: GradesModel | null = null;
+
+    if (!ready) {
+      blocked = `Overall appears once both sittings are locked. ${statusOf(year.february)} · ${statusOf(year.may)}.`;
+    } else {
+      const feb = this.sittingGradesFor(year.february.cycleId);
+      const may = this.sittingGradesFor(year.may.cycleId);
+      febGrades = feb.grades;
+      mayGrades = may.grades;
+      if (!this.hydrated && !febGrades && mayGrades) {
+        // Fixtures-only demo build: no database, so the February sitting is a
+        // labelled synthetic baseline. Never reached on real (hydrated) data.
+        febGrades = this.demoFebruaryGrades(mayGrades);
+        demo = true;
+      }
+      const missing = (label: string, r: { grades: GradesModel | null; state: string; error?: string }): string | null =>
+        r.grades
+          ? null
+          : r.state === "error"
+            ? `${label} grades could not be loaded (${r.error})`
+            : r.state === "loading"
+              ? `${label} grades are still loading`
+              : `${label} grades are not available`;
+      const gaps = [demo ? null : missing("February", feb), missing("May", may)].filter((g): g is string => g !== null);
+      if (gaps.length) blocked = `${gaps.join("; ")}.`;
+    }
+
+    const subjects = canonicalSubjects([mayGrades, febGrades]);
+    if (!blocked && subjects.collision) {
+      blocked = `Two subjects in one sitting map to the same subject (${subjects.collision}); fix the subject names before issuing.`;
+    }
+
+    const rows: OverallGradeRow[] = blocked
+      ? []
+      : rollupOverall({
+          february: febGrades ? rekeyGrades(febGrades, subjects.keyOf) : null,
+          may: mayGrades ? rekeyGrades(mayGrades, subjects.keyOf) : null,
+          assessments: subjects.refs,
+          performanceLevels: perfLevels,
+          awardLevels,
+          starMap,
+        });
 
     const distCounts = new Map<string, number>();
     for (const r of rows) distCounts.set(r.award, (distCounts.get(r.award) ?? 0) + 1);
     const distribution = awardLevels.map((level) => ({ level, count: distCounts.get(level) ?? 0 }));
 
-    const ready = year.february.started && year.february.locked && year.may.started && year.may.locked;
-    const note = ready
-      ? "Both sittings are signed off — this Overall is final and certificates issue from it."
-      : "Overall is provisional until both the February and May sittings are locked; figures shown are the current best-of-two.";
+    const note = blocked
+      ? blocked
+      : "Both sittings are signed off — this Overall is final and certificates issue from it.";
 
     return {
       yearId: year.id,
       yearName: year.name,
-      assessments,
+      assessments: subjects.refs,
       rows,
       distribution,
       awardLevels,
@@ -2452,6 +2557,7 @@ export class InMemoryDataProvider implements DataProvider {
       ready,
       locked: ready,
       demo,
+      blocked,
       note,
     };
   }
@@ -2576,10 +2682,10 @@ export class InMemoryDataProvider implements DataProvider {
       {
         id: "locked" as const,
         label: "All sittings locked",
-        met: overall.ready,
-        detail: overall.ready
+        met: overall.ready && overall.blocked === null,
+        detail: overall.ready && overall.blocked === null
           ? "Both contributing sittings are locked / signed off."
-          : "A contributing sitting is still provisional — lock both sittings' grades first.",
+          : overall.blocked ?? "A contributing sitting is still provisional — lock both sittings' grades first.",
       },
       {
         id: "signoff" as const,
@@ -2594,7 +2700,7 @@ export class InMemoryDataProvider implements DataProvider {
         label: "Real (non-synthetic) data",
         met: !overall.demo,
         detail: overall.demo
-          ? "The February baseline is generated from the May cohort because live Supabase is unreachable — draft/preview only until real two-sitting data is available."
+          ? "The February baseline is generated from the May cohort (fixtures-only demo build, no database) — draft/preview only."
           : "Built from real signed-off sittings.",
       },
     ];
@@ -5504,6 +5610,9 @@ export class InMemoryDataProvider implements DataProvider {
     const live = this.liveAggregates();
     const awardLevels = this.grading.awardLevels;
     const assessmentIds = this.seed.liveCycle.assessments.map((a) => a.id);
+    // O9 — the illustrative mock priors are demo-only; real (hydrated) data shows
+    // only the real live cycle.
+    if (this.hydrated) return this.realOnlyTrends(live, awardLevels);
     const priors = mockPriors(awardLevels, assessmentIds);
 
     const series = (pick: (p: { participants: number; cohortMean: number; itemsExcluded: number; meanQuality: number }) => number, liveVal: number) =>
@@ -5557,6 +5666,31 @@ export class InMemoryDataProvider implements DataProvider {
     };
   }
 
+  /** Trends with no mock priors: the single real live cycle. */
+  private realOnlyTrends(live: ReturnType<InMemoryDataProvider["liveAggregates"]>, awardLevels: string[]): AnalyticsTrends {
+    const name = this.seed.liveCycle.name;
+    return {
+      cycleLabels: [name],
+      cycleNames: [name],
+      currentIndex: 0,
+      kpis: [
+        { label: "Participants", value: live.participants.toLocaleString(), delta: "", points: [live.participants], format: "intComma" },
+        { label: "Cohort mean", value: `${live.cohortMean}%`, delta: "", points: [live.cohortMean], format: "pct" },
+        { label: "Items excluded", value: String(live.itemsExcluded), delta: "", points: [live.itemsExcluded], format: "int" },
+        { label: "Mean item quality", value: String(live.meanQuality), delta: "", points: [live.meanQuality], format: "int" },
+      ],
+      byAssessment: this.seed.liveCycle.assessments.map((a) => ({
+        name: a.shortName,
+        points: [live.byAssessment[a.id] ?? 0],
+        now: `${live.byAssessment[a.id] ?? 0}%`,
+        delta: "",
+      })),
+      awardOverTime: [{ label: name, dist: live.awardDist }],
+      awardLevels,
+      priorsAreMock: false,
+    };
+  }
+
   // ── Overall analytics (bird's-eye, over time × centres) ───────────────────
   // Modelling many REAL cycles is out of scope for the in-memory seed (it holds a
   // single live cycle), so — like getAnalyticsTrends — this returns REAL data for
@@ -5582,6 +5716,21 @@ export class InMemoryDataProvider implements DataProvider {
     const liveYear = /^\d{4}$/.test(liveYearRaw) ? Number(liveYearRaw) : 2026;
 
     const cells: OACell[] = [];
+
+    // O9 — real (hydrated) data never shows a synthesised February or synthetic
+    // centres here; the live provider builds analytics from persisted outputs.
+    if (this.hydrated) {
+      return computeOverallAnalytics({
+        cells,
+        subjects,
+        awards: overallAwardBands(awardLevels),
+        plevels: overallPLevels(perfLevels),
+        performanceLevels: perfLevels,
+        awardLevels,
+        starMap: this.grading.starMap,
+        realYears: [],
+      });
+    }
 
     // The live cell: REAL May grades + demo February baseline (best-of-two rollup).
     const mayGrades = this.getGrades(liveId);

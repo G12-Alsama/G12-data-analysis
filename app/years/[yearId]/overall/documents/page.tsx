@@ -90,7 +90,8 @@ export default function OverallDocumentsPage({ params }: { params: { yearId: str
   // Awards gate (migration 0040): generating Overall Award documents — draft proofs
   // included — now requires `awards.generate`, which the default seed grants to Admin.
   const canGenerate = can(provider.getCurrentUser().role, "awards.generate");
-  const canExport = canGenerate && (draft || (officialAllowed && officialConfirmed));
+  // Nothing to export until the Overall is available (both sittings locked + loaded).
+  const canExport = canGenerate && model.students.length > 0 && (draft || (officialAllowed && officialConfirmed));
 
   const doGenerate = async () => {
     if (!canExport) return;

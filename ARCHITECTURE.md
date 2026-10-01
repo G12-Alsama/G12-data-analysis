@@ -705,15 +705,37 @@ gated until both sittings are locked. Tests: `tests/overall.rollup.test.ts`,
 `tests/overall.provider.test.ts`, `tests/overall-page.render.test.ts`. Parity is
 unaffected — **183/183** (aggregation over already-computed awards).
 
-**Data-shape note (flagged assumption).** The retake model treats a
-student × subject *present in May* as a retake and *absent* as "February stands".
-The current build's seed inverts this: it carries **real grades only for the live
-May sitting**, and live Supabase is unreachable, so there is no real February
-sitting to compare. `getOverallGrades` therefore **synthesizes a clearly-labelled
-demo February baseline** from the May cohort (`demo: true`, shown with a banner)
-so the rollup has two sittings to exercise in the UI. The rollup logic itself is
-general and fully unit-tested against two-sitting fixtures; wiring two *real*
-sittings only needs multi-cycle hydration to feed both `getGrades` calls.
+**Two real sittings (O9, migration 0046).** On live data the Overall reads two
+REAL locked sittings — never a synthesised one:
+
+- **Lazy multi-cycle hydration.** The `SupabaseDataProvider` still hydrates one
+  live cycle. When an Overall needs the year's other sitting, the inner provider
+  asks for it (`setSittingLoader`), and the provider runs the same
+  hydrate → replay → `getGrades` path on that sitting's own cycle and attaches the
+  result (`attachSittingGrades`). A load failure shows in the Overall's `blocked`
+  reason; it is never papered over.
+- **Gate.** `getOverallGrades` returns rows only once BOTH sittings are locked
+  and both sittings' grades are loaded; otherwise `rows` is empty and `blocked`
+  says what is outstanding. A locked sitting re-hydrates as locked from
+  `exam_cycles.status` (real cycles have no `grades` rows).
+- **Subject alignment.** Assessment ids are per cycle, so both sittings' cells are
+  re-keyed onto the canonical subject key (`lib/data/overall-sittings.ts`) before
+  the unchanged `rollupOverall`.
+- **Sitting designation.** `exam_cycles.sitting` is derived from the result dates
+  (Jan–Apr → February, else May): from the picked date at create time and, via a
+  trigger on `sittings`, from the ingested `ResultGroupName` period. 0046
+  backfills mis-designated existing cycles; the app prefers the stored sitting
+  over the cycle name.
+- **Synthetic data.** The 0043 sample (`seed-ov-` centres, `test_centres.is_synthetic`;
+  `lib/data/synthetic.ts`) never becomes the live cycle, never lists, and never
+  feeds an Overall. It is hidden from analytics unless
+  `NEXT_PUBLIC_SHOW_SYNTHETIC_ANALYTICS=1`. The demo-only February synthesis and
+  `mockPriors` run only in the fixtures-only in-memory build (no database).
+
+Tests: `tests/overall.two-real-sittings.test.ts` (real QM fixture → live provider,
+two locked sittings, single-sitting fallback, synthetic exclusion, gate),
+`tests/overall.sittings-alignment.test.ts`, `tests/migration.real-two-sitting-overall.test.ts`.
+Runbook: `docs/overall-two-sittings-runbook.md`.
 
 ### Element / sub-element results & the unofficial report
 
