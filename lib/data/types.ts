@@ -1207,6 +1207,13 @@ export interface OverallGradesModel {
    * exercise the best-of-two rollup. With real two-sitting data this is false.
    */
   demo: boolean;
+  /**
+   * Why the Overall table is withheld, or null when rows are shown. Overall
+   * appears ONLY once both sittings are locked AND both sittings' real signed-off
+   * grades are loaded; until then `rows` is empty and this explains what is
+   * outstanding (never a synthesised stand-in on real data).
+   */
+  blocked: string | null;
   note: string;
 }
 

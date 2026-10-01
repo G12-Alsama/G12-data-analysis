@@ -16,9 +16,16 @@ function fresh() {
   return new InMemoryDataProvider();
 }
 
+/** The demo year with both sittings locked (February is a locked mock prior). */
+function signedOff() {
+  const p = fresh();
+  p.lockCycle(MAY);
+  return p;
+}
+
 describe("getOverallGrades — year best-of-two", () => {
   it("rolls up the year's sittings into a per-student best-of-two table", () => {
-    const p = fresh();
+    const p = signedOff();
     const overall = p.getOverallGrades(YEAR)!;
     expect(overall).toBeTruthy();
     expect(overall.yearName).toBe("2026");
@@ -29,12 +36,12 @@ describe("getOverallGrades — year best-of-two", () => {
     expect(distTotal).toBe(overall.rows.length);
   });
 
-  it("flags the synthesized February baseline (live February unavailable in this build)", () => {
-    expect(fresh().getOverallGrades(YEAR)!.demo).toBe(true);
+  it("flags the synthesized February baseline (fixtures-only demo build, no database)", () => {
+    expect(signedOff().getOverallGrades(YEAR)!.demo).toBe(true);
   });
 
   it("every cell carries Feb/May provenance and is the higher of the two sittings' levels", () => {
-    const p = fresh();
+    const p = signedOff();
     const overall = p.getOverallGrades(YEAR)!;
     const levels = overall.performanceLevels; // best → lowest
     const rank = (l: string | null) => (l ? (levels.indexOf(l) < 0 ? Infinity : levels.indexOf(l)) : Infinity);
@@ -58,11 +65,18 @@ describe("getOverallGrades — year best-of-two", () => {
     expect(may).toBeGreaterThan(0);
   });
 
-  it("is provisional until both sittings are locked, then ready", () => {
+  it("withholds every row until both sittings are locked, then shows them", () => {
     const p = fresh();
-    expect(p.getOverallGrades(YEAR)!.ready).toBe(false); // May not locked yet
+    const before = p.getOverallGrades(YEAR)!;
+    expect(before.ready).toBe(false); // May not locked yet
+    expect(before.rows).toHaveLength(0);
+    expect(before.blocked).toMatch(/both sittings are locked/i);
+    expect(before.blocked).toMatch(/May: .*not locked/);
     p.lockCycle(MAY);
-    expect(p.getOverallGrades(YEAR)!.ready).toBe(true); // February (mock) is locked; May now locked
+    const after = p.getOverallGrades(YEAR)!;
+    expect(after.ready).toBe(true); // February (mock) is locked; May now locked
+    expect(after.blocked).toBeNull();
+    expect(after.rows.length).toBeGreaterThan(0);
   });
 
   it("returns null for an unknown year", () => {
@@ -71,13 +85,13 @@ describe("getOverallGrades — year best-of-two", () => {
 });
 
 describe("getOverallDocuments — certificates issue from Overall", () => {
-  it("populates students for draft/preview even while provisional (P5) — locked flag still reflects sittings", () => {
+  it("has no students (nothing to proof or issue) until both sittings are locked", () => {
     const p = fresh();
-    const overall = p.getOverallGrades(YEAR)!;
     const docs = p.getOverallDocuments(YEAR)!;
-    // Provisional: not locked, but students ARE available so draft/preview works.
     expect(docs.locked).toBe(false);
-    expect(docs.students.length).toBe(overall.rows.length);
+    expect(docs.students).toHaveLength(0);
+    expect(docs.readiness!.gates.find((g) => g.id === "locked")!.met).toBe(false);
+    expect(docs.readiness!.officialAllowed).toBe(false);
   });
 
   it("reads the Overall best-of-two awards once signed off — not a single sitting", () => {

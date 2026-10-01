@@ -45,6 +45,7 @@ import {
 } from "./supabase-hydrate";
 import { computeOverallAnalytics, overallAwardBands, overallPLevels } from "./overall-analytics";
 import { catalogNamesFor } from "./subject-catalog";
+import { showSyntheticAnalytics } from "./synthetic";
 import type { Seed } from "./seed-types";
 import type { GradingConfig } from "./grading";
 import type { ElementLabelsConfig } from "./element-labels";
@@ -115,6 +116,13 @@ import type {
 import type { ResolvedIncidentRow, RosterParticipant } from "@/lib/incidents/import";
 
 type DB = SupabaseBrowserClient;
+
+/** Jan–Apr → february, else may: from an ISO date, else a month word in the name. */
+export function sittingForCreate(name: string, sittingDate?: string | null): "february" | "may" {
+  const m = /^\d{4}-(\d{2})-\d{2}$/.exec(sittingDate ?? "");
+  if (m) return Number(m[1]) <= 4 ? "february" : "may";
+  return /\b(jan|feb|mar|apr)/i.test(name) ? "february" : "may";
+}
 
 export type AccessStatus = "loading" | "ok" | "no-session" | "not-member" | "no-cycle" | "error";
 
@@ -236,11 +244,17 @@ export class SupabaseDataProvider implements DataProvider {
     }
     const next = new InMemoryDataProvider(h.seed, this.user, true);
     this.replay(next, h.seed.liveCycle.id, h.decisions);
+    // The year's Overall needs the OTHER sitting's real signed-off grades too; the
+    // inner provider asks for them lazily (only when an Overall is opened).
+    next.setSittingLoader((cycleId) => void this.loadSittingGrades(next, cycleId));
     this.inner = next;
     // Additive: the Overall read-model spans every centre × year × sitting, which
     // the single-live-cycle inner provider can't hold. Load its multi-cell
     // projection from the persisted outputs; never blocks the main hydrate.
-    this.overall = await fetchOverallAnalytics(this.supabase).catch(() => ({ cells: [], subjects: [], years: [] }));
+    // Synthetic (0043) centres are excluded unless explicitly opted in.
+    this.overall = await fetchOverallAnalytics(this.supabase, { includeSynthetic: showSyntheticAnalytics() }).catch(
+      () => ({ cells: [], subjects: [], years: [] }),
+    );
     await this.fetchMembers();
     this.cycleId = h.seed.liveCycle.id;
     this.qmToUuid = h.lookups.qmToUuid;
@@ -248,6 +262,34 @@ export class SupabaseDataProvider implements DataProvider {
     this.subjectToAssessment = h.lookups.subjectCodeToAssessmentId;
     this.incIdMap = new Map(h.lookups.incidentDbIds.map((id, i) => [`inc-${i + 1}`, id]));
     this.status = "ok";
+    this.bump();
+  }
+
+  /**
+   * Load a non-live sitting's REAL signed-off grades for the year's Overall: the
+   * same hydrate → replay → getGrades path the live cycle uses, on that sitting's
+   * own cycle, so its grades equal what that sitting showed when it was locked.
+   * Fails LOUD into the Overall's `blocked` state — never a synthesised stand-in.
+   */
+  private async loadSittingGrades(target: InMemoryDataProvider, cycleId: string): Promise<void> {
+    let grades: GradesModel | null = null;
+    let error: string | undefined;
+    try {
+      const h = await hydrate(this.supabase, { cycleId });
+      if (!h) throw new Error("sitting not found");
+      const side = new InMemoryDataProvider(h.seed, this.user, true);
+      this.replay(side, cycleId, h.decisions);
+      grades = side.getGrades(cycleId);
+      if (!grades) throw new Error("no grades computed");
+      if (!grades.locked) throw new Error("sitting is not locked in the database");
+    } catch (e) {
+      grades = null;
+      error = e instanceof Error ? e.message : String(e);
+      // eslint-disable-next-line no-console
+      console.error(`Overall: loading sitting ${cycleId} failed:`, error);
+    }
+    if (this.inner !== target) return; // re-hydrated meanwhile; the new inner reloads on demand
+    target.attachSittingGrades(cycleId, grades, error);
     this.bump();
   }
 
@@ -409,8 +451,8 @@ export class SupabaseDataProvider implements DataProvider {
    * The Overall analytics read-model, computed from the LIVE multi-cycle
    * projection (persisted grades + scores across every centre × year × sitting)
    * via `computeOverallAnalytics`. When no persisted multi-cell data exists yet
-   * (fresh/pre-seed DB), it falls back to the inner in-memory demo so the page
-   * still renders — mirroring getAnalyticsTrends' clearly-labelled priors.
+   * it returns the inner provider's analytics, which for hydrated (real) data is
+   * an honest EMPTY read-model — never the synthetic demo (O9).
    */
   getOverallAnalytics(filter?: OverallAnalyticsFilter): OverallAnalytics {
     if (this.overall.cells.length === 0) return this.inner.getOverallAnalytics(filter);
@@ -1119,6 +1161,10 @@ export class SupabaseDataProvider implements DataProvider {
       p_assessments,
       // 0010 — create the sitting (and find-or-create its year) under the centre.
       p_test_centre_id: input.testCentreId || null,
+      // 0046 — designate the sitting (Jan–Apr → february, else may) from the picked
+      // date, else the name. The DB re-derives it from the date and, at ingest,
+      // from the result dates; this only replaces the old blanket 'may' default.
+      p_sitting: sittingForCreate(input.name, input.sittingDate),
       // 0031 — the chosen exam date. The picker emits an ISO `yyyy-mm-dd`; pass a
       // non-ISO/empty value as null so the `date` column never rejects the insert.
       p_sitting_date: /^\d{4}-\d{2}-\d{2}$/.test(input.sittingDate ?? "") ? input.sittingDate : null,

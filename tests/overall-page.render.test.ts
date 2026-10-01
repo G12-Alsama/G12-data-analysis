@@ -11,6 +11,8 @@ import { InMemoryDataProvider } from "@/lib/data/in-memory-provider";
 import type { DataProvider } from "@/lib/data/provider";
 
 const live = new InMemoryDataProvider();
+live.lockCycle("may-2026"); // Overall renders only once both sittings are locked
+const provisional = new InMemoryDataProvider(); // May still open
 
 let activeProvider: DataProvider = live;
 vi.mock("next/navigation", () => ({
@@ -38,6 +40,10 @@ describe("Overall view — best-of-two with Feb/May provenance", () => {
     for (const h of ["Applicable Math", "English", "Scientific", "Arabic", "Life"]) {
       expect(html).toContain(`>${h}<`);
     }
+    // Each subject carries a February, a May and a Combined column.
+    expect(html.match(/>Combined</g)?.length).toBe(5);
+    expect(html.match(/>Feb<\/th>/g)?.length).toBe(5);
+    expect(html.match(/>May<\/th>/g)?.length).toBe(5);
     // First few students reach the markup.
     for (const r of overall.rows.slice(0, 4)) {
       expect(html).toContain(r.label);
@@ -55,5 +61,14 @@ describe("Overall view — best-of-two with Feb/May provenance", () => {
     activeProvider = live;
     const html = await renderOverall("year-2026");
     expect(html).toContain("Demo February sitting");
+  });
+
+  it("shows no table — only the outstanding sittings — until both are locked", async () => {
+    activeProvider = provisional;
+    const html = await renderOverall("year-2026");
+    expect(html).toContain("Overall is not available yet");
+    expect(html).not.toContain("<table");
+    expect(html).not.toContain("Generate certificates");
+    expect(html).toMatch(/May<\/strong>: .*not locked/);
   });
 });

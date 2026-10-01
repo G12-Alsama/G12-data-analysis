@@ -142,6 +142,9 @@ export interface SeedLiveCycle {
    *  Absent in the demo seed (no database year rows); carried so the Years list
    *  can target the year-reassignment RPC. */
   yearId?: string;
+  /** 0005/0046 — the stored sitting (`exam_cycles.sitting`, derived from the
+   *  result dates by 0046). Live data only; absent → derived from the name. */
+  sitting?: "february" | "may";
   startedAt: string;
   lastActivity: string;
   stageIndex: number;
@@ -190,13 +193,15 @@ export interface SeedPriorCycle {
   testCentreId?: string;
   /** 0013 — the real exam_years.id this sitting groups under (live data only). */
   yearId?: string;
+  /** 0005/0046 — the stored sitting (live data only); absent → from the name. */
+  sitting?: "february" | "may";
   stageIndex: number;
   stepsDone: number;
   participants: number;
   assessments: number;
   lastActivity: string;
   locked: boolean;
-  /** Always true — prior cycles have no real data source yet. */
+  /** True only for the demo seed's illustrative priors; false for real DB cycles. */
   mock: boolean;
 }
 

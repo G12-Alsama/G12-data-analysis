@@ -4,10 +4,12 @@
  * Overall (best-of-two) view.
  *
  * Per the year model, Overall takes — for every student and every subject — the
- * HIGHER award level across the February and May sittings (best-of-two by level
- * RANK, not raw score). Each cell is tagged with the sitting it came from
- * (Feb / May) for provenance, and the overall award is DERIVED from the rolled-up
- * per-subject levels using the existing award-derivation rule. It is a derived
+ * HIGHER performance level across the February and May sittings (best-of-two by
+ * level RANK, not raw score). Each subject shows the February level, the May
+ * level and the combined (best) level tagged with the sitting it came from; the
+ * overall award is DERIVED from the combined per-subject levels using the
+ * existing award-derivation rule. The table appears only once BOTH sittings are
+ * locked and both sittings' real grades are loaded. It is a derived
  * aggregation, not a pipeline run — no scoring/engine/safeguard work runs here;
  * each sitting's award is already its own signed-off, safeguard-checked result.
  *
@@ -59,6 +61,25 @@ function SourceTag({ source }: { source: OverallGradeCell["source"] }) {
   );
 }
 
+/** Compact performance-level label for the per-sitting columns. */
+function shortLevel(level: string | null | undefined): string {
+  if (!level) return "—";
+  if (/^doesn|not yet/i.test(level)) return "Not yet";
+  return level.split(" ")[0] ?? level;
+}
+
+/** One sitting's level for a subject (February or May column). */
+function SittingLevel({ level }: { level: string | null | undefined }) {
+  return (
+    <span
+      title={level ?? "No result in this sitting"}
+      style={{ fontSize: 11, color: level ? H.ink2 : H.ink3, whiteSpace: "nowrap" }}
+    >
+      {shortLevel(level)}
+    </span>
+  );
+}
+
 /** Per-subject Overall cell: stars + the Feb/May provenance tag (best-of-two). */
 function OverallCell({ cell, starMap }: { cell?: OverallGradeCell; starMap: Record<string, string> }) {
   if (!cell) {
@@ -89,6 +110,7 @@ function OverallCell({ cell, starMap }: { cell?: OverallGradeCell; starMap: Reco
       >
         {starMap[cell.level] || "·"}
       </span>
+      <span style={{ fontSize: 10.5, fontWeight: 600, color: H.ink, whiteSpace: "nowrap" }}>{shortLevel(cell.level)}</span>
       <SourceTag source={cell.source} />
     </span>
   );
@@ -122,6 +144,8 @@ function AwardBadge({ award }: { award: string }) {
 export default function YearOverallPage({ params }: { params: { yearId: string } }) {
   const year = useProviderData((p) => p.getYear(params.yearId), [params.yearId]);
   const model = useProviderData((p) => p.getOverallGrades(params.yearId), [params.yearId]);
+  // Overall is shown only once both sittings are locked and both real sittings' grades are in.
+  const showTable = !!model && model.ready && model.blocked === null;
 
   if (!year) {
     return (
@@ -152,17 +176,17 @@ export default function YearOverallPage({ params }: { params: { yearId: string }
       <div style={{ display: "flex", flexDirection: "column", padding: "20px 32px 18px", gap: 14, flex: 1, minHeight: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
           <div className="hf-h1" style={{ fontSize: 19 }}>{year.name} · Overall</div>
-          <Badge tone={year.overall.ready ? "good" : "neutral"}>
-            {year.overall.ready ? "Ready" : "Provisional"}
+          <Badge tone={showTable ? "good" : "neutral"}>
+            {showTable ? "Ready" : "Waiting for both sittings"}
           </Badge>
-          {model && (
+          {showTable && model && (
             <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span className="hf-lbl">Awards</span>
               <MiniGradeBars data={model.distribution.map((d) => ({ label: AWARD_SHORT[d.level] ?? d.level, count: d.count }))} />
             </span>
           )}
           <div style={{ flex: 1, minWidth: 12 }} />
-          {model && (
+          {showTable && (
             <Link href={`/years/${year.id}/overall/documents`}>
               <Button variant="pri">
                 <Icon name="award" color="#fff" />
@@ -174,7 +198,7 @@ export default function YearOverallPage({ params }: { params: { yearId: string }
 
         <div className="hf-sub" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <span>
-            Best of two by <strong>award level</strong> (not raw score), per student per subject. The <span style={{ color: H.pink, fontWeight: 700 }}>Feb</span>/<span style={{ color: H.pink, fontWeight: 700 }}>May</span> tag shows which sitting each result came from; the overall award is derived from the best-of-two levels.
+            Each subject shows the February and May performance levels and the <strong>combined</strong> level — the higher of the two by <strong>performance level</strong> (not raw score). The <span style={{ color: H.pink, fontWeight: 700 }}>Feb</span>/<span style={{ color: H.pink, fontWeight: 700 }}>May</span> tag shows which sitting it came from; the overall award is derived from the combined levels.
           </span>
           {model?.demo && (
             <Badge tone="warn">Demo February sitting</Badge>
@@ -184,26 +208,40 @@ export default function YearOverallPage({ params }: { params: { yearId: string }
           <Card style={{ padding: "10px 14px", background: H.warnSoft, display: "flex", gap: 10, alignItems: "flex-start" }}>
             <Mark kind="warn" size={15} />
             <span className="hf-sub" style={{ fontSize: 11.5 }}>
-              Live Supabase is unreachable in this environment and the seed carries real grades only for the {model.may?.cycleName ?? "May"} sitting, so the February baseline shown here is <strong>generated from the May cohort</strong> to demonstrate the best-of-two rollup. With real two-sitting data the same view reads both sittings’ signed-off grades.
+              This is the fixtures-only demo build (no database), so the February baseline shown here is <strong>generated from the May cohort</strong> to demonstrate the best-of-two rollup. On live data this view reads both sittings’ real signed-off grades and never synthesises a sitting.
             </span>
           </Card>
         )}
 
-        {!model ? (
+        {!showTable || !model ? (
           <Card style={{ padding: 24, maxWidth: 640 }}>
-            <div style={{ fontWeight: 700, fontSize: 15 }}>No results to roll up yet</div>
-            <div className="hf-sub" style={{ marginTop: 8 }}>{year.overall.note}</div>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>Overall is not available yet</div>
+            <div className="hf-sub" style={{ marginTop: 8 }}>{model?.blocked ?? year.overall.note}</div>
+            <div className="hf-sub" style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 4 }}>
+              {[year.february, year.may].map((s) => (
+                <span key={s.sitting}>
+                  <strong>{s.label}</strong>: {!s.started ? "not started" : s.locked ? "locked" : `${s.stageLabel} — not locked`}
+                </span>
+              ))}
+            </div>
           </Card>
         ) : (
           <div className="hf-card" style={{ overflow: "auto", flex: 1, minWidth: 0 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
-                  <th className="hf-th">Participant</th>
+                  <th className="hf-th" rowSpan={2}>Participant</th>
                   {model.assessments.map((a) => (
-                    <th key={a.id} className="hf-th" style={{ textAlign: "center" }}>{subjectHeader(a.shortName)}</th>
+                    <th key={a.id} className="hf-th" colSpan={3} style={{ textAlign: "center" }}>{subjectHeader(a.shortName)}</th>
                   ))}
-                  <th className="hf-th" style={{ textAlign: "center" }}>Overall award</th>
+                  <th className="hf-th" rowSpan={2} style={{ textAlign: "center" }}>Overall award</th>
+                </tr>
+                <tr>
+                  {model.assessments.map((a) => [
+                    <th key={`${a.id}-feb`} className="hf-th" style={{ textAlign: "center", fontSize: 10 }}>Feb</th>,
+                    <th key={`${a.id}-may`} className="hf-th" style={{ textAlign: "center", fontSize: 10 }}>May</th>,
+                    <th key={`${a.id}-best`} className="hf-th" style={{ textAlign: "center", fontSize: 10 }}>Combined</th>,
+                  ])}
                 </tr>
               </thead>
               <tbody>
@@ -219,11 +257,20 @@ export default function YearOverallPage({ params }: { params: { yearId: string }
                         </div>
                       </div>
                     </td>
-                    {model.assessments.map((a) => (
-                      <td key={a.id} className="hf-td" style={{ textAlign: "center" }}>
-                        <OverallCell cell={r.grades[a.id]} starMap={model.starMap} />
-                      </td>
-                    ))}
+                    {model.assessments.map((a) => {
+                      const cell = r.grades[a.id];
+                      return [
+                        <td key={`${a.id}-feb`} className="hf-td" style={{ textAlign: "center" }}>
+                          <SittingLevel level={cell?.februaryLevel} />
+                        </td>,
+                        <td key={`${a.id}-may`} className="hf-td" style={{ textAlign: "center" }}>
+                          <SittingLevel level={cell?.mayLevel} />
+                        </td>,
+                        <td key={`${a.id}-best`} className="hf-td" style={{ textAlign: "center" }}>
+                          <OverallCell cell={cell} starMap={model.starMap} />
+                        </td>,
+                      ];
+                    })}
                     <td className="hf-td" style={{ textAlign: "center" }}>
                       <AwardBadge award={r.award} />
                     </td>
