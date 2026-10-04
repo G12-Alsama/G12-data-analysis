@@ -505,6 +505,7 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
       return {
         id: it.id,
         wording: it.wording,
+        description: it.description ?? null,
         major: it.major_element,
         sub: it.sub_element,
         demand: it.demand_level,

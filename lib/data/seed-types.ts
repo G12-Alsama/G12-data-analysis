@@ -29,8 +29,9 @@ export interface SeedItem {
   /**
    * The item's `QuestionDescription` (an internal code/label) and its
    * `QuestionParentQuestionWording` (the stimulus/parent passage shown above the
-   * question). Optional — only the generated demo seed carries these; live/DB-
-   * hydrated items leave them absent (same precedent as `options`).
+   * question). Optional. `description` is now also carried by live ingest and
+   * DB hydrate (migration 0048); `parentWording` is still demo-seed-only, like
+   * `options`. Existing cycles have no description until re-ingested.
    */
   description?: string | null;
   parentWording?: string | null;

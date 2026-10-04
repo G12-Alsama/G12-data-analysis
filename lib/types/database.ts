@@ -117,6 +117,9 @@ export interface ItemRow {
   assessment_id: string;
   qm_question_id: string;
   wording: string | null;
+  /** 0048 — QM `QuestionDescription` (an internal code/label), or null. Optional
+   *  on the TS side so rows typed before 0048 stay valid; NULL until re-ingest. */
+  description?: string | null;
   major_element: string | null;
   sub_element: string | null;
   demand_level: DemandLevel | null;

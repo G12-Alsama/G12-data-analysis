@@ -189,6 +189,8 @@ export async function ingestCleanResponses(
       assessment_id: assessmentId.get(r.assessmentName),
       qm_question_id: r.qmQuestionId,
       wording: r.wording,
+      // 0048: QuestionDescription (per-question constant), null when blank.
+      description: r.description,
       major_element: r.majorElement,
       sub_element: r.subElement,
       demand_level: r.demandLevel,
