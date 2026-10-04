@@ -203,6 +203,7 @@ export function buildLiveCycleData(
       const a = agg.get(m.itemId);
       return {
         id: m.itemId,
+        qmQuestionId: m.itemId,
         wording: m.wording ?? null,
         description: descriptionMap.get(m.itemId) ?? null,
         major: m.majorElement ?? null,
