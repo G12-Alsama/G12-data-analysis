@@ -66,6 +66,11 @@ export {
 } from "./timing-report";
 export type { TimingReportInput, TimingBuildResult } from "./timing-report";
 export {
+  buildPerItemWorkbook,
+  PER_ITEM_README_SHEET,
+} from "./per-item-report";
+export type { PerItemReportInput, PerItemBuildResult } from "./per-item-report";
+export {
   buildBoundariesWorkbook,
   BOUNDARIES_SHEETS,
   CUTSCORE_HEADERS,

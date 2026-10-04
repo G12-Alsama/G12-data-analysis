@@ -61,6 +61,7 @@ import type {
   SittingRoster,
 } from "./provider";
 import type { CleanResponse, ValidationReport } from "@/lib/ingest/types";
+import type { PerItemSource } from "@/lib/data/per-item-source";
 import type { CanonicalModel } from "@/lib/ingest/qm";
 import type {
   AnalyticsTrends,
@@ -441,6 +442,7 @@ export class SupabaseDataProvider implements DataProvider {
   getComposition(cycleId: string): CompositionModel | null { return this.inner.getComposition(cycleId); }
   getDiagnostics(cycleId: string): DiagnosticsModel | null { return this.inner.getDiagnostics(cycleId); }
   getReliability(cycleId: string): ReliabilityModel | null { return this.inner.getReliability(cycleId); }
+  getPerItemSource(cycleId: string): PerItemSource | null { return this.inner.getPerItemSource(cycleId); }
 
   // ── writes (optimistic local + SECURITY DEFINER RPC) ────────────────────
   setItemExcluded(cycleId: string, assessmentId: string, itemId: string, excluded: boolean, reason?: string | null): void {

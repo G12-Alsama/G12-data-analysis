@@ -74,6 +74,7 @@ function __tempDebugIsTargetAssessment(a: { id: string; name: string }): boolean
 }
 import { doNextForStage } from "./pipeline-route";
 import type { CleanResponse } from "@/lib/ingest/types";
+import type { PerItemSource } from "@/lib/data/per-item-source";
 import type { ValidationReport } from "@/lib/ingest/types";
 import type { CanonicalModel } from "@/lib/ingest/qm";
 import { SUBJECT_CATALOG, isSurveyAssessment, canonicalSubjectName } from "./subject-catalog";
@@ -3985,6 +3986,51 @@ export class InMemoryDataProvider implements DataProvider {
           omissionByPosition: d.omissionByPosition,
           byMajorElement: d.byMajorElement,
           timingByMajorElement: d.timingByMajorElement,
+        };
+      }),
+    };
+  }
+
+  /**
+   * Raw per-item source for the Per-Item Speededness / Omission / Completion
+   * export: each assessment's CURRENT items + responses (read live, like
+   * `getDiagnostics`) plus the participant drop-set — Clean-stage removals for that
+   * subject ∪ cohort-wide exclusions, the SAME set `getDiagnostics` hands to
+   * `cleanDiagResponses`. Deliberately unfiltered and uncomputed: the drop-set,
+   * Max Score >= 1 filter, de-duplication and every metric are applied by
+   * lib/export/per-item-analysis.ts, so nothing in the diagnostics path changes.
+   */
+  getPerItemSource(cycleId: string): PerItemSource | null {
+    if (cycleId !== this.seed.liveCycle.id) return null;
+    const cohortExcluded = this.cohortExcludedSet();
+    return {
+      cycleId,
+      sourceFileName: this.seed.liveCycle.fileName ? this.seed.liveCycle.fileName : null,
+      assessments: this.seed.liveCycle.assessments.map((a) => {
+        const removed = this.cleanRowSet(a.id);
+        const excluded = removed && removed.size ? new Set([...removed, ...cohortExcluded]) : cohortExcluded;
+        return {
+          assessmentId: a.id,
+          assessmentName: a.name,
+          items: a.items.map((it) => ({
+            id: it.id,
+            qmQuestionId: it.qmQuestionId ?? null,
+            description: it.description ?? null,
+            wording: it.wording,
+            major: it.major ?? null,
+            sub: it.sub ?? null,
+            demand: it.demand ?? null,
+            maxScore: it.maxScore ?? 1,
+          })),
+          responses: a.responses.map((r) => ({
+            participantId: r.p,
+            itemId: r.i,
+            score: r.s,
+            answered: r.a !== false,
+            presentedNumber: r.questionPresentedNumber ?? null,
+            responseTime: r.responseTime ?? null,
+          })),
+          excludedParticipantIds: [...excluded],
         };
       }),
     };
