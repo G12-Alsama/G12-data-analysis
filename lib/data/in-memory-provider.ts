@@ -7,7 +7,6 @@
 
 import {
   getEngine,
-  defaultScoringConfig,
   deriveAward,
   qualifiesForDistinctionByLevels,
   d3MajorityThreshold,
@@ -37,8 +36,6 @@ import {
   can,
   ACTIONS,
   ACTION_KEYS,
-  defaultRoles,
-  defaultRoleActions,
   resolveRoleActions,
   MANAGE_ROLES_ACTION,
   MANAGE_USERS_ACTION,
@@ -88,6 +85,7 @@ import type {
 } from "@/lib/export/types";
 import type { Seed, SeedAssessment, SeedItem } from "./seed-types";
 import { sittingLabel } from "./create-cycle";
+import { WorkspaceState } from "./workspace-state";
 import type {
   DataProvider,
   SetBoundaryInput,
@@ -211,7 +209,6 @@ import {
   type IncidentReviewStudent,
 } from "./types";
 import {
-  defaultIncidentConfig,
   validateIncidentCode,
   validatePerStudentCap,
   normalizeIncidentCode,
@@ -239,7 +236,6 @@ import {
   type CleanedDataColumn,
 } from "./cleaned-schema";
 import {
-  DEFAULT_ELEMENT_LABELS,
   validateElementLabels,
   labelMapForSubject,
   resolveEssayWritingLabel,
@@ -248,20 +244,16 @@ import {
 } from "./element-labels";
 import {
   classify,
-  defaultGradingConfig,
   starsFor,
   type GradingConfig,
   DEFAULT_PERFORMANCE_TARGETS,
   DEFAULT_AWARD_TARGETS,
-  DEFAULT_BORDERLINE_BAND_PCT,
   clampBorderlineBand,
 } from "./grading";
 import {
   ANALYTICS_CYCLE_LABELS,
   ANALYTICS_CYCLE_NAMES,
-  defaultMembers,
   mockPriors,
-  seedAuditEntries,
 } from "./mock-admin";
 
 /** Default seed (the bundled demo cycle). A different seed can be injected via
@@ -391,22 +383,47 @@ export class InMemoryDataProvider implements DataProvider {
   private participantExclusions = new Map<string, Map<string, string>>(); // cycle -> pid -> reason
   private boundaries = new Map<string, BoundaryState>(); // cycle:scope -> state
   private locked = new Set<string>();
-  private grading: GradingConfig = defaultGradingConfig();
-  // Item-quality Good/Review/Flag thresholds — the configurable half of the
-  // engine's ScoringConfig (the level/award vocabulary is `this.grading`). The
-  // Settings editor that mutates these arrives in the next prompt; for now the
-  // default reproduces the engine's published ratings exactly.
-  private quality: QualityThresholds = defaultScoringConfig().quality;
   private docSettingsByCycle = new Map<string, DocSettings>();
 
-  // Dynamic roles × granular actions (migration 0040): the add/deletable role rows
-  // + each role's granted actions, seeded from the defaults. The
-  // SupabaseDataProvider overwrites both from the DB on hydrate. `resolvedActions`
-  // is the derived (role_id → granted action set) view every gate reads via
-  // `can()`; it is recomputed whenever `roles`/`roleActions` change.
-  private roles: RoleModel[] = defaultRoles();
-  private roleActions: Record<string, ActionKey[]> = defaultRoleActions();
-  private resolvedActions: ResolvedRoleActions = resolveRoleActions(this.roles, this.roleActions);
+  // ── WORKSPACE-LEVEL state (grading, quality, roles + action grid, safeguard,
+  // borderline, incident config, element labels, members, audit, test centres, the
+  // signed-in user) lives on a WorkspaceState that every provider instance in a
+  // tree shares BY REFERENCE (see workspace-state.ts / docs/multi-sitting-provider.md).
+  // These accessors keep every `this.grading` / `this.roles` / … read and write in
+  // this class working unchanged while routing to the shared object, so an edit made
+  // through one instance is immediately seen by all of them. Cycle-keyed decision
+  // state stays on the instance (below).
+  private readonly ws: WorkspaceState;
+  private get grading(): GradingConfig { return this.ws.grading; }
+  private set grading(v: GradingConfig) { this.ws.grading = v; }
+  private get quality(): QualityThresholds { return this.ws.quality; }
+  private set quality(v: QualityThresholds) { this.ws.quality = v; }
+  private get roles(): RoleModel[] { return this.ws.roles; }
+  private set roles(v: RoleModel[]) { this.ws.roles = v; }
+  private get roleActions(): Record<string, ActionKey[]> { return this.ws.roleActions; }
+  private set roleActions(v: Record<string, ActionKey[]>) { this.ws.roleActions = v; }
+  private get resolvedActions(): ResolvedRoleActions { return this.ws.resolvedActions; }
+  private set resolvedActions(v: ResolvedRoleActions) { this.ws.resolvedActions = v; }
+  private get safeguard(): { topDifficultyDemand: string } { return this.ws.safeguard; }
+  private set safeguard(v: { topDifficultyDemand: string }) { this.ws.safeguard = v; }
+  private get borderline(): BorderlineConfig { return this.ws.borderline; }
+  private set borderline(v: BorderlineConfig) { this.ws.borderline = v; }
+  private get incidentConfig(): IncidentAdjustmentConfig { return this.ws.incidentConfig; }
+  private set incidentConfig(v: IncidentAdjustmentConfig) { this.ws.incidentConfig = v; }
+  private get elementLabels(): ElementLabelsConfig { return this.ws.elementLabels; }
+  private set elementLabels(v: ElementLabelsConfig) { this.ws.elementLabels = v; }
+  private get members(): Member[] { return this.ws.members; }
+  private set members(v: Member[]) { this.ws.members = v; }
+  private get auditEntries(): AuditEntry[] { return this.ws.auditEntries; }
+  private set auditEntries(v: AuditEntry[]) { this.ws.auditEntries = v; }
+  private get auditSeq(): number { return this.ws.auditSeq; }
+  private set auditSeq(v: number) { this.ws.auditSeq = v; }
+  private get testCentres(): TestCentreSummary[] { return this.ws.testCentres; }
+  private set testCentres(v: TestCentreSummary[]) { this.ws.testCentres = v; }
+  private get seq(): number { return this.ws.seq; }
+  private set seq(v: number) { this.ws.seq = v; }
+  private get user(): CurrentUser { return this.ws.user; }
+  private set user(v: CurrentUser) { this.ws.user = v; }
 
   // incident log (Adjustments) + distinction safeguard
   private technicalErrors = new Map<string, { uploaded: boolean; sample: boolean; fileName: string | null; incidents: TechnicalIncident[] }>();
@@ -462,18 +479,6 @@ export class InMemoryDataProvider implements DataProvider {
   >();
   private distinctionOverrides = new Map<string, Map<string, { reason: string; by: string }>>();
   private distinctionConfirmed = new Set<string>();
-  // safeguard config; empty topDifficultyDemand → resolve to the highest demand present.
-  private safeguard: { topDifficultyDemand: string } = {
-    topDifficultyDemand: "",
-  };
-  // Borderline (marginal) flagging band, in percentage points. Grade-bearing
-  // input the grade recompute reads (see marginalInfo); editable via Settings.
-  // Default is the ±2% placeholder pending G12's policy value.
-  private borderline: BorderlineConfig = { bandPct: DEFAULT_BORDERLINE_BAND_PCT };
-
-  // Incident Adjustments configuration registry (codes/formulae/caps + import
-  // column mapping). Admin-owned; lower roles read-only. Mirrors migration 0016.
-  private incidentConfig: IncidentAdjustmentConfig = defaultIncidentConfig();
 
   // Incident Adjustments — apply/review state (02b). Parsed+resolved incident
   // rows per cycle (mirrors `incident_rows`), and the admin commit flag per cycle
@@ -484,37 +489,15 @@ export class InMemoryDataProvider implements DataProvider {
   private incidentSource = new Map<string, { fileName: string; sample: boolean }>();
   private incidentApplied = new Map<string, { by: string; at: string }>();
 
-  // Per-subject A–E element labels (configurable in Settings). Seeded from the
-  // confirmed G12++ defaults; the Supabase provider replays the persisted set.
-  private elementLabels: ElementLabelsConfig = JSON.parse(JSON.stringify(DEFAULT_ELEMENT_LABELS));
-
-  // admin / audit / config state (all MOCK — see lib/data/mock-admin.ts)
-  private members: Member[] = defaultMembers();
-  private auditEntries: AuditEntry[] = seedAuditEntries("may-2026");
-  private auditSeq = 0;
-
-  // 0010 — test centres (top-level scoping dimension). The demo seeds a single
-  // active centre that every derived year belongs to (the live Supabase provider
-  // hydrates the real list from the test_centres table via the seed). Populated
-  // in the constructor (after `seed` is bound) and managed by the CRUD methods
-  // below, which mirror the SECURITY DEFINER RPCs in migration 0010.
-  private testCentres: TestCentreSummary[] = [];
-  private seq = 0;
+  // 0010 — test centres live on the shared WorkspaceState (accessor above). The demo
+  // seeds a single active centre that every derived year belongs to (the live
+  // Supabase provider hydrates the real list from the test_centres table). Managed by
+  // the CRUD methods below, which mirror the SECURITY DEFINER RPCs in migration 0010.
   // 0013 — year reassignments: cycleId → overridden centre id. Held as mutable
   // decision state (like exclusions/locks) rather than written back onto `seed`,
   // so the SHARED demo seed module is never mutated (keeps test isolation) and a
   // reassignment is pure labelling — no result/grade/seed data is rewritten.
   private cycleCentreOverride = new Map<string, string>();
-
-  private user: CurrentUser = {
-    id: "demo-admin",
-    // Neutral demo user (an admin) for the in-memory demo so role-gated controls
-    // (Lock, admin) are exercised. The SupabaseDataProvider injects the real
-    // session-derived user via the constructor — this is never the live identity.
-    name: "Workspace Admin",
-    initials: "WA",
-    role: "lead_admin",
-  };
 
   // Who set the current effective state of each grade-bearing decision, so an
   // override can name the prior actor AND gate on the strictly-higher `canOverride`
@@ -537,8 +520,23 @@ export class InMemoryDataProvider implements DataProvider {
   // keeps its stable `year-<year>` fixture key.
   private readonly hydrated: boolean;
 
-  constructor(seed?: Seed, user?: CurrentUser, hydrated = false) {
+  /**
+   * @param workspace Optional SHARED workspace state. The SupabaseDataProvider passes
+   *   one WorkspaceState to the directory and to every per-sitting instance so they
+   *   see the same grading config, roles, labels, centres, members, audit and user.
+   *   Omitted (demo, tests, scripts) → this instance owns a fresh one.
+   */
+  constructor(seed?: Seed, user?: CurrentUser, hydrated = false, workspace?: WorkspaceState) {
     if (seed) this.seed = seed;
+    this.ws =
+      workspace ??
+      new WorkspaceState({
+        // Neutral demo user (an admin) for the in-memory demo so role-gated controls
+        // (Lock, admin) are exercised. The SupabaseDataProvider injects the real
+        // session-derived user — this is never the live identity.
+        user: { id: "demo-admin", name: "Workspace Admin", initials: "WA", role: "lead_admin" },
+        testCentres: [],
+      });
     if (user) this.user = user;
     this.hydrated = hydrated;
     // 0010 — bind the test-centre list now that `seed` is final. Live runs carry
@@ -549,10 +547,17 @@ export class InMemoryDataProvider implements DataProvider {
     // workspace correctly shows "create a centre first" rather than a mock. Only the
     // demo seed (field absent → undefined) falls back to a single labelling centre so
     // the home/year screens always have a centre to display.
-    this.testCentres =
-      this.seed.testCentres !== undefined
-        ? this.seed.testCentres.map((c) => ({ ...c }))
-        : [{ id: "tc-shatila-1", name: "Shatila 1", code: "SHA1", slug: "shatila-1", active: true }];
+    if (!workspace) {
+      this.testCentres =
+        this.seed.testCentres !== undefined
+          ? this.seed.testCentres.map((c) => ({ ...c }))
+          : [{ id: "tc-shatila-1", name: "Shatila 1", code: "SHA1", slug: "shatila-1", active: true }];
+    }
+  }
+
+  /** The shared workspace state — handed to child providers so they share it. */
+  getWorkspaceState(): WorkspaceState {
+    return this.ws;
   }
 
   /** The centre new work defaults to: the first ACTIVE centre, else the first. */
