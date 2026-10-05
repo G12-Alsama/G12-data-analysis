@@ -8,14 +8,15 @@
  * is a free-text label, and guessing a period from it silently stored every UI-created
  * sitting as 'may' (the RPC default) whatever it was called.
  */
-import type { CreateCycleInput, SittingKey, YearSummary } from "./types";
+import type { CreateCycleInput, YearSummary } from "./types";
+import { periodLabel, type SittingKey } from "./periods";
 
 /** The exam_years region every sitting is created in (unchanged from before). */
 export const SITTING_REGION = "eu-west";
 
 /** Display label for a period. */
 export function sittingLabel(sitting: SittingKey): string {
-  return sitting === "february" ? "February" : "May";
+  return periodLabel(sitting);
 }
 
 /** A year name must carry a real 4-digit year — the app parses it everywhere. */

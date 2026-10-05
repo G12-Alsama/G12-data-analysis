@@ -233,13 +233,16 @@ export interface SeedPriorCycle {
   sitting?: SittingKey;
   /** The stored exam_years.name for `yearId` (live data only). */
   yearName?: string;
+  /** ISO date the sitting was held (exam_cycles.sitting_date); display only. */
+  sittingDate?: string;
   stageIndex: number;
   stepsDone: number;
   participants: number;
   assessments: number;
   lastActivity: string;
   locked: boolean;
-  /** Always true — prior cycles have no real data source yet. */
+  /** True only for the demo's illustrative priors (no real data source). Live
+   *  summaries (the cycle list from the database) are always `false`. */
   mock: boolean;
 }
 

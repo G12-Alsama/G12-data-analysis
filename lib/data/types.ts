@@ -106,10 +106,13 @@ export interface CycleSummary {
   sitting?: SittingKey;
   /** The stored exam_years.name this sitting belongs to (live data only). */
   yearName?: string;
+  /** ISO date the sitting was held (exam_cycles.sitting_date); display only. */
+  sittingDate?: string;
 }
 
-/** Which sitting of a year. "overall" is the derived best-of-two view. */
-export type SittingKey = "february" | "may";
+/** Which sitting of a year. Defined once, in ./periods (the only place that lists them). */
+import type { SittingKey } from "./periods";
+export type { SittingKey };
 
 /**
  * One sitting tile inside a year. A sitting is a full pipeline run (an

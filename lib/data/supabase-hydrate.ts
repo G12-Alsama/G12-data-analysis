@@ -9,6 +9,14 @@
  * faithful local state. Reads then delegate to that inner provider; writes go to
  * the SECURITY DEFINER RPCs (see supabase-provider.ts).
  *
+ * Hydration is in two parts so no sitting is privileged:
+ *   - `loadWorkspace`  — a LIGHT load: workspace config plus the list of ALL cycles
+ *                        (id, name, year, period, date, status, lock, summary counts).
+ *                        Reads no per-cycle fact table.
+ *   - `hydrateCycle`   — the FULL load of ONE cycle, called lazily when it is opened.
+ * (`hydrate` is the legacy "newest cycle in full" wrapper over the two, kept for scripts
+ * and tests.) See docs/multi-sitting-provider.md.
+ *
  * Nothing here writes to the database — it is read + assemble only.
  *
  * Note on typing: the installed postgrest-js resolves `select("*")` rows to
@@ -47,7 +55,8 @@ import type {
   ImportBatchRow,
   MemberRole,
 } from "@/lib/types/database";
-import type { CurrentUser, Role, TestCentreSummary } from "./types";
+import { PIPELINE, type CurrentUser, type Role, type TestCentreSummary } from "./types";
+import type { SittingKey } from "./periods";
 import type { ElementLabelsConfig } from "./element-labels";
 import type {
   Seed,
@@ -203,8 +212,9 @@ export async function fetchSessionUser(supabase: DB): Promise<SessionUser> {
   return { status: "ok", user: { id: u.id, name, initials: initialsOf(name), role, roleId, roleName } };
 }
 
-// ── decision state replayed into the inner provider ─────────────────────────
-export interface DecisionState {
+// ── decision state replayed into a provider ─────────────────────────────────
+/** CYCLE-level decisions — replayed into that cycle's own provider instance. */
+export interface CycleDecisionState {
   exclusions: { assessmentId: string; itemId: string; reason: string | null }[];
   /** Clean-stage non-destructive removals, grouped per subject. */
   cleanRemovals: { assessmentId: string; rows: string[]; cols: string[] }[];
@@ -220,6 +230,14 @@ export interface DecisionState {
   distinctionConfirmed: boolean;
   distinctionOverrides: { studentId: string; reason: string }[];
   docSettings: Record<string, unknown> | null;
+  /** Staged technical-incident export records (0044). Loaded verbatim and replayed
+   *  WITHOUT re-matching — the stored `match_status` is authoritative. Empty on a
+   *  pre-migration DB (the `sel` reader swallows the missing-table error). */
+  examIncidents: ExamIncidentRecord[];
+}
+
+/** WORKSPACE-level decisions — applied once to the shared WorkspaceState. */
+export interface WorkspaceDecisionState {
   workspace: Record<string, unknown>;
   /** Per-subject A–E element labels (0014); absent when the table is empty. */
   elementLabels?: ElementLabelsConfig;
@@ -227,11 +245,10 @@ export interface DecisionState {
    *  fresh DB — the provider then keeps the seeded defaults in place. */
   roles: { id: string; name: string; is_system: boolean; sort: number | null }[];
   roleActions: { role_id: string; action: string }[];
-  /** Staged technical-incident export records (0044). Loaded verbatim and replayed
-   *  WITHOUT re-matching — the stored `match_status` is authoritative. Empty on a
-   *  pre-migration DB (the `sel` reader swallows the missing-table error). */
-  examIncidents: ExamIncidentRecord[];
 }
+
+/** Both halves — what the legacy single-cycle `hydrate()` returns. */
+export type DecisionState = CycleDecisionState & WorkspaceDecisionState;
 
 /** Group element-label rows (already sort_order-ordered) into the config shape. */
 function groupElementLabels(rows: ElementLabelRow[]): ElementLabelsConfig {
@@ -241,6 +258,14 @@ function groupElementLabels(rows: ElementLabelRow[]): ElementLabelsConfig {
   }
   return out;
 }
+/** One cycle's full data, as `hydrateCycle` returns it. */
+export interface HydratedCycle {
+  seed: Seed;
+  decisions: CycleDecisionState;
+  lookups: Hydrated["lookups"];
+}
+
+/** Legacy single-cycle shape (the newest cycle + the workspace decisions). */
 export interface Hydrated {
   seed: Seed;
   decisions: DecisionState;
@@ -280,22 +305,182 @@ export async function fetchSeedTestCentres(supabase: DB): Promise<TestCentreSumm
   return rows.map((t) => ({ id: t.id, name: t.name, code: t.code, slug: t.slug, active: t.active }));
 }
 
-export async function hydrate(supabase: DB): Promise<Hydrated | null> {
-  const cycles = await sel<ExamCycleRow>(
-    supabase.from("exam_cycles").select("*").order("created_at", { ascending: false }),
-  );
-  if (cycles.length === 0) return null;
-  const live = cycles[0]!;
-  const cycleId = live.id;
+// ── LIGHT workspace load ────────────────────────────────────────────────────
+/**
+ * One sitting as the cycle LIST needs it — enough for the Years page, the sitting
+ * tiles, the lock badge and Overall's "which sittings exist and are locked", with NO
+ * fact-table payload (no responses, items, scores, grades). Counts come from
+ * column-limited selects of three small tables.
+ */
+export interface LightCycle {
+  id: string;
+  name: string;
+  status: ExamCycleRow["status"];
+  /** exam_years.id (NULL only for legacy un-migrated rows). */
+  yearId: string | null;
+  /** The STORED exam_years.name for `yearId`. */
+  yearName?: string;
+  /** The STORED period (exam_cycles.sitting). */
+  sitting: SittingKey | null;
+  /** ISO date the sitting was held (exam_cycles.sitting_date), display only. */
+  sittingDate: string | null;
+  testCentreId?: string;
+  createdAt: string;
+  updatedAt: string;
+  /** exam_cycles.status = 'locked' — the SINGLE source of truth for lock state. */
+  locked: boolean;
+  /** Participants minus resolvable cohort-wide exclusions (staff/test accounts). */
+  participants: number;
+  assessments: number;
+}
 
-  // 0010 — test centres + the year→centre map, so each sitting resolves to its
+/** Everything that is NOT one cycle's detailed data. */
+export interface WorkspaceLoad {
+  /** EVERY cycle, newest first. */
+  cycles: LightCycle[];
+  testCentres: TestCentreSummary[];
+  /** Raw year rows (kept so `hydrateCycle` can resolve centre / year name without re-reading). */
+  years: ExamYearRow[];
+  decisions: WorkspaceDecisionState;
+}
+
+/** What `hydrateCycle` needs from the workspace load (optional — it reads them itself if absent). */
+export interface CycleHydrationContext {
+  years: ExamYearRow[];
+  testCentres: TestCentreSummary[];
+}
+
+/**
+ * Light load of workspace state plus the list of ALL cycles. Reads no per-cycle fact
+ * table — `responses`, `items`, `item_stats`, `sittings`, grades and scores are only
+ * ever read by `hydrateCycle`, for one cycle, when it is opened.
+ *
+ * Defensive against a pre-migration database: `sel` turns a missing table into `[]`.
+ */
+export async function loadWorkspace(supabase: DB): Promise<WorkspaceLoad> {
+  const [cycleRows, testCentreRows, yearRows, workspace, elementLabelRows, roleRows, roleActionRows] =
+    await Promise.all([
+      sel<ExamCycleRow>(supabase.from("exam_cycles").select("*").order("created_at", { ascending: false })),
+      sel<TestCentreRow>(supabase.from("test_centres").select("*").order("created_at", { ascending: true })),
+      sel<ExamYearRow>(supabase.from("exam_years").select("*")),
+      sel<WorkspaceSettingRow>(supabase.from("workspace_settings").select("*")),
+      // 0014 — per-subject A–E element labels (workspace-wide config table).
+      sel<ElementLabelRow>(supabase.from("element_labels").select("*").order("sort_order", { ascending: true })),
+      // 0040 — dynamic roles + the role_id → action grid (workspace-wide).
+      sel<RoleRow>(supabase.from("roles").select("*")),
+      sel<RoleActionRow>(supabase.from("role_actions").select("*").eq("granted", true)),
+    ]);
+
+  // Per-cycle counts — column-limited and paged (a bare select is capped at max-rows).
+  // Only when there is something to count.
+  const [participantRows, assessmentRows, cohortExclusionRows] = cycleRows.length
+    ? await Promise.all([
+        selAllRows<{ cycle_id: string; id: string; qm_participant_id: string | null }>(
+          supabase, "participants", ["cycle_id", "id"], "cycle_id, id, qm_participant_id"),
+        selAllRows<{ cycle_id: string; id: string }>(supabase, "assessments", ["cycle_id", "id"], "cycle_id, id"),
+        selAllRows<{ cycle_id: string; id: string; participant_key: string }>(
+          supabase, "cohort_exclusions", ["cycle_id", "id"], "cycle_id, id, participant_key"),
+      ])
+    : [[], [], []];
+
+  const keysByCycle = new Map<string, Set<string>>();
+  for (const p of participantRows) {
+    (keysByCycle.get(p.cycle_id) ?? keysByCycle.set(p.cycle_id, new Set()).get(p.cycle_id)!).add(p.qm_participant_id ?? p.id);
+  }
+  const excludedByCycle = new Map<string, Set<string>>();
+  for (const e of cohortExclusionRows) {
+    // Only exclusions that still resolve to a participant row (a dangling stable key
+    // — e.g. an account dropped by a later import — must not shrink the count).
+    if (!keysByCycle.get(e.cycle_id)?.has(e.participant_key)) continue;
+    (excludedByCycle.get(e.cycle_id) ?? excludedByCycle.set(e.cycle_id, new Set()).get(e.cycle_id)!).add(e.participant_key);
+  }
+  const assessmentsByCycle = new Map<string, number>();
+  for (const a of assessmentRows) assessmentsByCycle.set(a.cycle_id, (assessmentsByCycle.get(a.cycle_id) ?? 0) + 1);
+
+  const yearToCentre = new Map<string, string>();
+  for (const y of yearRows) if (y.test_centre_id) yearToCentre.set(y.id, y.test_centre_id);
+  const yearNameById = new Map(yearRows.map((y) => [y.id, y.name] as const));
+
+  const cycles: LightCycle[] = cycleRows.map((c) => ({
+    id: c.id,
+    name: c.name,
+    status: c.status,
+    yearId: c.year_id,
+    yearName: c.year_id ? yearNameById.get(c.year_id) : undefined,
+    sitting: c.sitting,
+    sittingDate: c.sitting_date ?? null,
+    testCentreId: c.year_id ? yearToCentre.get(c.year_id) : undefined,
+    createdAt: c.created_at,
+    updatedAt: c.updated_at,
+    locked: c.status === "locked",
+    participants: (keysByCycle.get(c.id)?.size ?? 0) - (excludedByCycle.get(c.id)?.size ?? 0),
+    assessments: assessmentsByCycle.get(c.id) ?? 0,
+  }));
+
+  return {
+    cycles,
+    testCentres: testCentreRows.map(toSeedTestCentre),
+    years: yearRows,
+    decisions: {
+      workspace: Object.fromEntries(workspace.map((w) => [w.key, w.value])),
+      elementLabels: elementLabelRows.length ? groupElementLabels(elementLabelRows) : undefined,
+      roles: roleRows.map((r) => ({ id: r.id, name: r.name, is_system: r.is_system, sort: r.sort })),
+      roleActions: roleActionRows.map((r) => ({ role_id: r.role_id, action: r.action })),
+    },
+  };
+}
+
+function toSeedTestCentre(t: TestCentreRow): TestCentreSummary {
+  return { id: t.id, name: t.name, code: t.code, slug: t.slug, active: t.active };
+}
+
+/** A cycle's light summary in the seed's directory shape (no fact data, `mock: false`). */
+export function lightToSeedCycle(l: LightCycle): SeedPriorCycle {
+  const stageIndex = stageIndexFromStatus(l.status);
+  return {
+    id: l.id,
+    name: l.name,
+    testCentreId: l.testCentreId,
+    yearId: l.yearId ?? undefined,
+    yearName: l.yearName,
+    sitting: l.sitting ?? undefined,
+    sittingDate: l.sittingDate ?? undefined,
+    stageIndex,
+    stepsDone: l.locked ? PIPELINE.length : stageIndex,
+    participants: l.participants,
+    assessments: l.assessments,
+    lastActivity: new Date(l.updatedAt).toLocaleString(),
+    locked: l.locked,
+    mock: false,
+  };
+}
+
+// ── FULL load of ONE cycle ──────────────────────────────────────────────────
+/**
+ * Everything one cycle needs — the per-cycle read `hydrate()` used to do for the
+ * newest cycle, with the same content and the same integrity guards, minus the
+ * workspace tables (see `loadWorkspace`). Returns null when the cycle doesn't exist.
+ * Called lazily, when a cycle is opened.
+ */
+export async function hydrateCycle(
+  supabase: DB,
+  cycleId: string,
+  ctx?: CycleHydrationContext,
+): Promise<HydratedCycle | null> {
+  const liveRows = await sel<ExamCycleRow>(supabase.from("exam_cycles").select("*").eq("id", cycleId));
+  const live = liveRows[0];
+  if (!live) return null;
+
+  // 0010 — test centres + the year→centre map, so the sitting resolves to its
   // centre (exam_cycles.year_id → exam_years.test_centre_id). Defensive against a
   // pre-0010 database (no rows / column): the provider falls back to a default
   // centre when the list is empty.
-  const [testCentreRows, yearRows] = await Promise.all([
-    sel<TestCentreRow>(supabase.from("test_centres").select("*").order("created_at", { ascending: true })),
-    sel<ExamYearRow>(supabase.from("exam_years").select("*")),
-  ]);
+  const [testCentreRows, yearRows] = ctx
+    ? [null, ctx.years]
+    : await Promise.all([
+        sel<TestCentreRow>(supabase.from("test_centres").select("*").order("created_at", { ascending: true })),
+        sel<ExamYearRow>(supabase.from("exam_years").select("*")),
+      ]);
   const yearToCentre = new Map<string, string>();
   for (const y of yearRows) if (y.test_centre_id) yearToCentre.set(y.id, y.test_centre_id);
   const centreOfCycle = (c: ExamCycleRow): string | undefined =>
@@ -303,13 +488,7 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
   const yearNameById = new Map(yearRows.map((y) => [y.id, y.name] as const));
   const yearNameOf = (c: ExamCycleRow): string | undefined =>
     c.year_id ? yearNameById.get(c.year_id) : undefined;
-  const seedTestCentres = testCentreRows.map((t) => ({
-    id: t.id,
-    name: t.name,
-    code: t.code,
-    slug: t.slug,
-    active: t.active,
-  }));
+  const seedTestCentres: TestCentreSummary[] = ctx ? ctx.testCentres : (testCentreRows ?? []).map(toSeedTestCentre);
 
   const [assessments, items, participants, responses, sittingRows] = await Promise.all([
     sel<AssessmentRow>(supabase.from("assessments").select("*").eq("cycle_id", cycleId)),
@@ -365,31 +544,20 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
     sel<ItemReviewRow>(supabase.from("item_reviews").select("*").in("item_id", idFilter)),
   ]);
 
-  const [schemes, grades, essayRows, incidentRows, alterationRows, distOverrides, workspace] =
+  const [schemes, essayRows, incidentRows, alterationRows, distOverrides] =
     await Promise.all([
       sel<GradeSchemeRow>(supabase.from("grade_schemes").select("*").eq("cycle_id", cycleId)),
-      sel<GradeRow>(supabase.from("grades").select("*").eq("cycle_id", cycleId)),
       sel<EssayMarkRow>(supabase.from("essay_marks").select("*").eq("cycle_id", cycleId)),
       sel<IncidentRow>(supabase.from("incidents").select("*").eq("cycle_id", cycleId).order("created_at", { ascending: true })),
       sel<AlterationRow>(supabase.from("alterations").select("*").eq("cycle_id", cycleId)),
       sel<DistinctionOverrideRow>(supabase.from("distinction_overrides").select("*").eq("cycle_id", cycleId)),
-      sel<WorkspaceSettingRow>(supabase.from("workspace_settings").select("*")),
     ]);
-  // 0014 — per-subject A–E element labels (workspace-wide config table).
-  const elementLabelRows = await sel<ElementLabelRow>(
-    supabase.from("element_labels").select("*").order("sort_order", { ascending: true }),
-  );
   // 0044 — staged technical-incident export records. `sel` tolerates a
   // pre-migration DB (missing table → []), so hydrate never crashes before the
   // migration is applied. Loaded verbatim; the stored match is authoritative.
   const examIncidentRows = await sel<ExamIncidentRow>(
     supabase.from("exam_incidents").select("*").eq("cycle_id", cycleId).order("imported_at", { ascending: true }),
   );
-  // 0040 — dynamic roles + the role_id → action grid (workspace-wide). `sel`
-  // tolerates a pre-migration DB (missing table → []), so hydrate never crashes
-  // before the migration is run; empty results keep the seeded defaults in place.
-  const roleRows = await sel<RoleRow>(supabase.from("roles").select("*"));
-  const roleActionRows = await sel<RoleActionRow>(supabase.from("role_actions").select("*").eq("granted", true));
   const cleanExclusionRows = await sel<CleanExclusionRow>(
     supabase.from("clean_exclusions").select("*").eq("cycle_id", cycleId),
   );
@@ -671,22 +839,6 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
   };
   const ingestDuplicates = ingestReport?.checks.find((c) => c.id === "duplicates")?.count ?? 0;
 
-  const priorCycles: SeedPriorCycle[] = cycles.slice(1).map((c) => ({
-    id: c.id,
-    name: c.name,
-    testCentreId: centreOfCycle(c),
-    yearId: c.year_id ?? undefined,
-    sitting: c.sitting ?? undefined,
-    yearName: yearNameOf(c),
-    stageIndex: 6,
-    stepsDone: 7,
-    participants: 0,
-    assessments: 0,
-    lastActivity: new Date(c.updated_at).toLocaleDateString(),
-    locked: c.status === "locked",
-    mock: false,
-  }));
-
   const seed: Seed = {
     generatedAt: new Date().toISOString(),
     engineVersion: ENGINE_VERSION,
@@ -715,7 +867,9 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
       diagnostics: diagnostics.map(({ _order, ...d }) => { void _order; return d; }),
       sittings: seedSittings,
     },
-    priorCycles,
+    // A cycle's own seed hosts exactly this cycle. The cycle LIST (every other
+    // sitting) is the directory's concern — see `loadWorkspace` / `lightToSeedCycle`.
+    priorCycles: [],
   };
 
   // ── decision state ────────────────────────────────────────────────────
@@ -820,22 +974,22 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
     adjustmentNotes: null,
   }));
 
-  const decisions: DecisionState = {
+  const decisions: CycleDecisionState = {
     exclusions,
     cleanRemovals,
     cohortExclusions,
     schemes: schemes.map((s) => ({ scope: s.scope, method: s.method, bands: s.bands })),
-    locked: grades.some((g) => g.locked),
+    // exam_cycles.status is the SINGLE source of truth for lock state, read the same
+    // way for every cycle. (`grades.some(g => g.locked)` lost the lock on reload for a
+    // sitting with no `grades` rows — lock_grades only updates rows that exist, and the
+    // app never writes any.)
+    locked: live.status === "locked",
     essays,
     incidents,
     incidentDecisions,
     distinctionConfirmed: distState?.confirmed ?? false,
     distinctionOverrides: distOverrides.map((o) => ({ studentId: o.participant_id, reason: o.reason })),
     docSettings: (docRow?.settings as Record<string, unknown> | undefined) ?? null,
-    workspace: Object.fromEntries(workspace.map((w) => [w.key, w.value])),
-    elementLabels: elementLabelRows.length ? groupElementLabels(elementLabelRows) : undefined,
-    roles: roleRows.map((r) => ({ id: r.id, name: r.name, is_system: r.is_system, sort: r.sort })),
-    roleActions: roleActionRows.map((r) => ({ role_id: r.role_id, action: r.action })),
     examIncidents,
   };
 
@@ -853,6 +1007,25 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
   return { seed, decisions, lookups };
 }
 
+/**
+ * LEGACY single-cycle hydrate: the NEWEST cycle in full, every other cycle as a light
+ * summary, plus the workspace decisions in one `Hydrated`. The live provider no longer
+ * uses this (it lazy-loads each cycle with `hydrateCycle`); it remains for the scripts
+ * and tests that build one provider over one cycle's data.
+ */
+export async function hydrate(supabase: DB): Promise<Hydrated | null> {
+  const workspace = await loadWorkspace(supabase);
+  const newest = workspace.cycles[0];
+  if (!newest) return null;
+  const h = await hydrateCycle(supabase, newest.id, { years: workspace.years, testCentres: workspace.testCentres });
+  if (!h) return null;
+  return {
+    seed: { ...h.seed, priorCycles: workspace.cycles.slice(1).map(lightToSeedCycle) },
+    decisions: { ...h.decisions, ...workspace.decisions },
+    lookups: h.lookups,
+  };
+}
+
 // ── Overall analytics: multi-cycle projection ───────────────────────────────
 /**
  * Page through a whole table in stable key order (no cycle filter), so a large
@@ -860,11 +1033,16 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
  * `selAllByCycle` but spans EVERY centre × year × sitting — the read-model needs
  * all of them, not just the single live cycle.
  */
-async function selAllRows<T>(supabase: DB, table: string, orderCols: readonly string[]): Promise<T[]> {
+async function selAllRows<T>(
+  supabase: DB,
+  table: string,
+  orderCols: readonly string[],
+  columns = "*",
+): Promise<T[]> {
   const PAGE = 1000;
   const out: T[] = [];
   for (let from = 0; ; ) {
-    let q = supabase.from(table).select("*");
+    let q = supabase.from(table).select(columns);
     for (const col of orderCols) q = q.order(col, { ascending: true });
     const page = await sel<T>(q.range(from, from + PAGE - 1));
     if (page.length === 0) break;
