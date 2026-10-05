@@ -87,8 +87,10 @@ export function migrationFiles(upTo?: string): string[] {
 export interface ScratchDb {
   /** Run SQL; returns psql's unaligned, tuples-only stdout. `-v name=value` pairs via `vars`. */
   run(sql: string, vars?: Record<string, string>): string;
-  /** Apply a migration file by name. */
+  /** Apply a migration file by name (from supabase/migrations). */
   apply(file: string): void;
+  /** Run an arbitrary SQL file by path (e.g. a draft under supabase/drafts). */
+  applyFile(absPath: string): void;
   dispose(): void;
 }
 
@@ -110,6 +112,7 @@ export function createScratchDb(upTo?: string): ScratchDb {
   return {
     run,
     apply: (file) => void run(readFileSync(path.join(MIGRATIONS, file), "utf8")),
+    applyFile: (absPath) => void run(readFileSync(absPath, "utf8")),
     dispose: () => void psql(withDb(ADMIN_URL, "postgres"), `drop database if exists ${name};`),
   };
 }

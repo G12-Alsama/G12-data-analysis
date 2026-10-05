@@ -80,3 +80,20 @@ export function buildCreateCycleArgs(
     p_sitting_date: isoDateOrNull(input.sittingDate),
   };
 }
+
+/**
+ * A readable message for a failed create. The database enforces one sitting per
+ * (year, period) with `exam_cycles_year_sitting_key` (migration 0050); the provider
+ * checks first, but two people creating the same slot at once can still reach the
+ * constraint — surface that as plain English, not a raw Postgres error.
+ */
+export function friendlyCreateCycleError(
+  message: string | undefined | null,
+  input: Pick<CreateCycleInput, "sitting">,
+): string {
+  const raw = message ?? "";
+  if (/exam_cycles_year_sitting_key/.test(raw)) {
+    return `A ${sittingLabel(input.sitting)} sitting already exists for this year at this centre.`;
+  }
+  return raw || "Could not create the cycle.";
+}

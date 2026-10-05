@@ -49,6 +49,7 @@ import {
   SITTING_REGION,
   buildCreateCycleArgs,
   findPeriodConflict,
+  friendlyCreateCycleError,
   normalizeYearName,
   sittingLabel,
 } from "./create-cycle";
@@ -1129,7 +1130,7 @@ export class SupabaseDataProvider implements DataProvider {
     const examYearId = await this.resolveExamYearId(input);
 
     // One sitting per (year, period): refuse a second February/May in the same year
-    // up front with a readable message (the DB constraint comes with migration 0050).
+    // up front with a readable message (the DB constraint is drafted in supabase/drafts/0050_year_sitting_unique.sql).
     const conflict = findPeriodConflict(this.inner.listYears(), examYearId, input.sitting);
     if (conflict) {
       throw new Error(
@@ -1149,7 +1150,7 @@ export class SupabaseDataProvider implements DataProvider {
     if (error || !data) {
       // eslint-disable-next-line no-console
       console.error("create_cycle_with_assessments failed:", error?.message ?? "no id returned");
-      throw new Error(error?.message ?? "Could not create the cycle.");
+      throw new Error(friendlyCreateCycleError(error?.message, input));
     }
     await this.rehydrate();
     return data;
