@@ -1413,7 +1413,7 @@ export class SupabaseDataProvider implements DataProvider {
     const examYearId = await this.resolveExamYearId(input);
 
     // One sitting per (year, period): refuse a second one in the same year up front with
-    // a readable message (the DB constraint is drafted in supabase/drafts/0050_year_sitting_unique.sql).
+    // a readable message (the DB constraint is migration 0050_year_sitting_unique.sql).
     const conflict = findPeriodConflict(this.dir.listYears(), examYearId, input.sitting);
     if (conflict) {
       throw new Error(

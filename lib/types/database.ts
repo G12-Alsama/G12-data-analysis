@@ -78,9 +78,11 @@ export interface ExamCycleRow {
   name: string;
   status: CycleStatus;
   region: string;
-  /** 0005 — the year this sitting belongs to (NULL only for un-migrated rows). */
+  /** 0005 — the year this sitting belongs to. NOT NULL once 0050 is applied (nullable here
+   *  so the app still reads a database that predates it). */
   year_id: string | null;
-  /** 0005 — which sitting of the year this pipeline run is. */
+  /** 0005 — which sitting of the year this pipeline run is. NOT NULL once 0050 is applied;
+   *  unique with `year_id` (one sitting per period per year). */
   sitting: SittingPeriod | null;
   /** 0031 — the exam date the human picked when creating the sitting (ISO date,
    *  NULL when not set). Display/reference only — not a key. */
@@ -625,7 +627,9 @@ export interface Database {
     };
     Views: Record<string, never>;
     Functions: {
-      // 0001
+      // 0001 — RETIRED by 0050 (execute revoked: it creates a cycle with no year or period).
+      // Kept in the type map only so the generated shape still matches the function that
+      // exists in the database; nothing in the app calls it.
       create_cycle: { Args: { p_name: string; p_region?: string }; Returns: ExamCycleRow };
       // 0004 (extended in 0005 with year_id / sitting; in 0010 with test_centre_id;
       // in 0031 with sitting_date)

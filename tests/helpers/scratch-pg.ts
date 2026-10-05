@@ -89,7 +89,7 @@ export interface ScratchDb {
   run(sql: string, vars?: Record<string, string>): string;
   /** Apply a migration file by name (from supabase/migrations). */
   apply(file: string): void;
-  /** Run an arbitrary SQL file by path (e.g. a draft under supabase/drafts). */
+  /** Run an arbitrary SQL file by path (e.g. a rollback script, or a diagnostics query file). */
   applyFile(absPath: string): void;
   dispose(): void;
 }

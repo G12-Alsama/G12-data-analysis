@@ -1,9 +1,10 @@
 /**
- * Draft 0050 (one sitting per year+period) — structural guards. The drafts live in
- * supabase/drafts/ and are NOT applied by anything; these tests pin that they stay
- * out of the migration chain, that the pre-flight is strictly READ-ONLY, and that the
- * draft migration keeps its safety properties. (tests/pg.year-sitting-unique.test.ts
- * executes them against a local Postgres, opt-in.)
+ * Migration 0050 (one sitting per year+period) — structural guards. The SQL is applied
+ * by a human in the Supabase editor, so CI can only assert on its text: these pin that
+ * it is the next migration in an unbroken chain, that its read-only pre-flight stays
+ * OUT of the chain and is strictly read-only, and that the migration keeps its safety
+ * properties. (tests/pg.year-sitting-unique.test.ts executes it against a local
+ * Postgres, opt-in.)
  */
 import { describe, it, expect } from "vitest";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -12,21 +13,31 @@ import { friendlyCreateCycleError } from "@/lib/data/create-cycle";
 
 const root = resolve(__dirname, "../supabase");
 const read = (rel: string) => readFileSync(resolve(root, rel), "utf8");
-const PREFLIGHT = read("drafts/0050_year_sitting_preflight.sql");
-const DRAFT = read("drafts/0050_year_sitting_unique.sql");
-const ROLLBACK = read("drafts/0050_year_sitting_unique.rollback.sql");
+const PREFLIGHT = read("diagnostics/0050_year_sitting_preflight.sql");
+const DRAFT = read("migrations/0050_year_sitting_unique.sql"); // (the migration under test)
+const ROLLBACK = read("migrations/0050_year_sitting_unique.rollback.sql");
 
 /** Executable SQL only: comments, then string literals, stripped. */
 const code = (s: string) => s.replace(/--[^\n]*/g, "").replace(/'(?:[^']|'')*'/g, "''");
 
-describe("0050 is a draft: not in the migration chain", () => {
-  it("no 0050 migration exists under supabase/migrations", () => {
-    expect(readdirSync(resolve(root, "migrations")).filter((f) => f.startsWith("0050"))).toEqual([]);
+describe("0050 is the next migration; its pre-flight stays out of the chain", () => {
+  const files = readdirSync(resolve(root, "migrations"));
+  const numbers = [...new Set(files.map((f) => f.slice(0, 4)))].sort();
+
+  it("0050 and its rollback are in supabase/migrations, directly after 0049", () => {
+    expect(files).toContain("0050_year_sitting_unique.sql");
+    expect(files).toContain("0050_year_sitting_unique.rollback.sql");
+    expect(numbers.slice(-2)).toEqual(["0049", "0050"]);
   });
-  it("the drafts and their README exist", () => {
-    for (const f of ["README.md", "0050_year_sitting_preflight.sql", "0050_year_sitting_unique.sql", "0050_year_sitting_unique.rollback.sql"]) {
-      expect(existsSync(resolve(root, "drafts", f)), f).toBe(true);
-    }
+  it("there is exactly one 0050 migration (no number collision)", () => {
+    expect(files.filter((f) => f.startsWith("0050") && !f.endsWith(".rollback.sql"))).toEqual(["0050_year_sitting_unique.sql"]);
+  });
+  it("the read-only pre-flight is NOT in the migration chain (nothing would apply it)", () => {
+    expect(files.some((f) => /preflight/i.test(f))).toBe(false);
+    expect(existsSync(resolve(root, "diagnostics", "0050_year_sitting_preflight.sql"))).toBe(true);
+  });
+  it("the old drafts folder is gone", () => {
+    expect(existsSync(resolve(root, "drafts"))).toBe(false);
   });
 });
 
@@ -45,7 +56,7 @@ describe("0050 pre-flight is strictly read-only", () => {
   });
 });
 
-describe("0050 draft migration", () => {
+describe("0050 migration", () => {
   const sql = code(DRAFT);
 
   it("runs in a single transaction", () => {

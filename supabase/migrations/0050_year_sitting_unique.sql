@@ -1,20 +1,21 @@
 -- ============================================================================
--- 0050 (DRAFT — NOT APPLIED) — one sitting per (year, period)
+-- 0050 — one sitting per (year, period)
 --
 -- Makes the data model enforce what the app now assumes: within an exam year there
 -- is at most ONE February sitting and ONE May sitting, and every sitting HAS a year
 -- and a period. Prerequisite for using several sittings at once (Overall, analytics
 -- and the multi-sitting provider all slot a sitting by (year, period)).
 --
--- DO NOT RUN BLIND. Order of operations:
---   1. Run supabase/drafts/0050_year_sitting_preflight.sql (read-only) and resolve
---      what it reports (duplicates by hand; name/period mismatches via its
---      suggested_fix lines).
---   2. Optional but recommended — so the backfill's audit rows name YOU, set your id
---      first (the SQL editor has no signed-in user):
+-- Order of operations:
+--   1. Run supabase/diagnostics/0050_year_sitting_preflight.sql (read-only) and
+--      resolve what it reports (duplicates by hand; name/period mismatches via its
+--      suggested_fix lines). If it reports nothing, there is nothing to resolve.
+--   2. Only if step 1 reported name/period mismatches — so the backfill's audit rows
+--      name YOU, set your id first (the SQL editor has no signed-in user):
 --         select set_config('request.jwt.claim.sub', '<your auth.users id>', false);
 --      Without it the backfill still runs and RAISEs a NOTICE per change, but writes
---      no audit_log rows (audit_log.actor_id is NOT NULL).
+--      no audit_log rows (audit_log.actor_id is NOT NULL). With nothing to backfill
+--      this step is unnecessary.
 --   3. Run this file once. It is one transaction: it either completes or changes
 --      nothing.
 --
@@ -32,8 +33,10 @@
 --   4. RETIRE the legacy create_cycle(name, region) RPC (0001). It inserts a cycle
 --      with NO year and NO period — it would now fail on NOT NULL, and before this
 --      it let any signed-in user create a sitting outside the one-per-period rule.
---      The app only ever calls create_cycle_with_assessments. (Decision for review:
---      drop this step if anything external still calls create_cycle.)
+--      The app only ever calls create_cycle_with_assessments (a repo-wide search found
+--      no caller of create_cycle in code, scripts, docs or workflow files). If anything
+--      OUTSIDE this repo still calls create_cycle it will start failing; the rollback
+--      restores execute.
 --
 -- Reversible: 0050_year_sitting_unique.rollback.sql (does not undo the backfill).
 -- Touches no fact table and no scoring path.

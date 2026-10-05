@@ -77,7 +77,7 @@ own role check):
 
 | Function | Purpose |
 | --- | --- |
-| `create_cycle` | Create a cycle and make the creator its `lead_admin`. |
+| `create_cycle_with_assessments` | Create a sitting (an `exam_cycles` row) with its assessments, under an exam year and period, and make the creator its `lead_admin`. (The original year-less `create_cycle` was retired by migration 0050.) |
 | `set_cycle_status` / `set_assessment_status` | Move status enums (lead only). |
 | `decide_item_exclusion` | Record human gate 1 + flip `items.status` + audit. |
 | `write_item_stats` | Engine writes `item_stats`, tagged with `engine_version`. |

@@ -1,6 +1,6 @@
 -- ============================================================================
 -- 0050 PRE-FLIGHT — READ-ONLY. Run these in the Supabase SQL editor (EU) BEFORE the
--- draft migration `0050_year_sitting_unique.sql`. They only SELECT; nothing here
+-- migration `supabase/migrations/0050_year_sitting_unique.sql`. They only SELECT; nothing here
 -- changes data. Paste the results back so each finding can be resolved (see the
 -- "WHAT TO DO" note under each query).
 --

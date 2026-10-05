@@ -1,5 +1,5 @@
 -- ============================================================================
--- Rollback for 0050_year_sitting_unique.sql (DRAFT)
+-- Rollback for 0050_year_sitting_unique.sql
 --   Drops unique (year_id, sitting), makes year_id / sitting nullable again and
 --   restores execute on the legacy create_cycle(name, region) RPC. It does NOT undo
 --   the backfill (periods corrected from 'may' to 'february' stay corrected — they
