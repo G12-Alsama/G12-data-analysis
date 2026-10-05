@@ -45,6 +45,7 @@ import type {
   CreateCycleInput,
   CurrentUser,
   CycleDetail,
+  CycleLoadState,
   CycleSummary,
   TestCentreSummary,
   YearSummary,
@@ -231,6 +232,16 @@ export interface DataProvider {
   getYear(yearId: string): YearDetail | null;
   listCycles(): CycleSummary[];
   getCycle(cycleId: string): CycleDetail | null;
+  /**
+   * Lazy loading. The live provider holds each sitting's detailed data separately and
+   * loads it only when the sitting is opened. `getCycleLoadState` says whether a
+   * sitting's pipeline reads are ready; `ensureCycleLoaded` loads it (idempotent,
+   * concurrent callers share one load); `ensureYearLoaded` loads the sittings an
+   * Overall needs (the year's LOCKED ones). The in-memory demo is always "ready".
+   */
+  getCycleLoadState(cycleId: string): CycleLoadState;
+  ensureCycleLoaded(cycleId: string): Promise<void>;
+  ensureYearLoaded(yearId: string): Promise<void>;
   getIngest(cycleId: string): IngestModel | null;
   /**
    * The authoritative per-sitting ingest roster (migration 0026 `sittings`): which

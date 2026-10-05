@@ -83,7 +83,7 @@ import type {
   ItemResponseFact,
   ItemReviewDecision,
 } from "@/lib/export/types";
-import type { Seed, SeedAssessment, SeedItem } from "./seed-types";
+import type { Seed, SeedAssessment, SeedItem, SeedPriorCycle } from "./seed-types";
 import { sittingLabel } from "./create-cycle";
 import { WorkspaceState } from "./workspace-state";
 import type {
@@ -207,6 +207,7 @@ import {
   type IncidentConfigModel,
   type IncidentReviewModel,
   type IncidentReviewStudent,
+  type CycleLoadState,
 } from "./types";
 import {
   validateIncidentCode,
@@ -576,6 +577,63 @@ export class InMemoryDataProvider implements DataProvider {
     return this.cycleCentreOverride.get(cycleId) ?? seedCentreId;
   }
 
+  /**
+   * Does THIS provider host `cycleId`'s detailed data?
+   *
+   * A provider hosts exactly the one cycle in its seed (`seed.liveCycle`). Routing — the
+   * decision of WHICH provider answers for a given cycle id — happens one level up, in
+   * the SupabaseDataProvider, which builds one provider per opened sitting and sends each
+   * cycle-scoped call to the right one. This is the single place that says "yes, mine /
+   * not mine", replacing the `cycleId !== this.seed.liveCycle.id` guard that used to be
+   * repeated in every read and write. The empty placeholder cycle (id "") that a
+   * directory provider carries hosts nothing.
+   */
+  private hostsCycle(cycleId: string): boolean {
+    return cycleId !== "" && cycleId === this.seed.liveCycle.id;
+  }
+
+  /**
+   * DIRECTORY use: how to reach the provider that hosts another cycle. The live provider
+   * sets this on its directory so year-level reads (Overall) can read each sitting's
+   * grades from the provider that holds that sitting's data.
+   */
+  private cycleResolver: ((cycleId: string) => InMemoryDataProvider | null) | null = null;
+  setCycleResolver(resolver: ((cycleId: string) => InMemoryDataProvider | null) | null): void {
+    this.cycleResolver = resolver;
+  }
+  /** A cycle's grades from whichever provider hosts it (this one, or via the resolver). */
+  private gradesOf(cycleId: string): GradesModel | null {
+    if (this.hostsCycle(cycleId)) return this.getGrades(cycleId);
+    return this.cycleResolver?.(cycleId)?.getGrades(cycleId) ?? null;
+  }
+
+  /** True only inside `replayPersisted` — database truth is being loaded. */
+  private replaying = false;
+
+  /** Is the current user allowed `action`? (Always, while replaying persisted state.) */
+  private permitted(action: ActionKey): boolean {
+    return this.replaying || can(this.user, action, this.resolvedActions);
+  }
+
+  /**
+   * Run `fn` as persisted state being LOADED, not as a decision the current user is
+   * making now. While it runs, permission gates are bypassed and no audit entries are
+   * written. The live provider replays a sitting's stored decisions (exclusions, cuts,
+   * clean removals, distinction, …) through the ordinary mutators; without this a
+   * read-only viewer's replay silently dropped every one of them (so they saw different
+   * grades — and a different Overall — than an admin), and each replay wrote phantom
+   * "Excluded item" audit rows attributed to whoever happened to open the sitting.
+   */
+  replayPersisted<T>(fn: () => T): T {
+    const prev = this.replaying;
+    this.replaying = true;
+    try {
+      return fn();
+    } finally {
+      this.replaying = prev;
+    }
+  }
+
   // ── subscription ──────────────────────────────────────────────────────────
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
@@ -611,6 +669,7 @@ export class InMemoryDataProvider implements DataProvider {
     cycleId: string | null,
     extra?: { isOverride?: boolean; priorActor?: string | null; reason?: string | null },
   ): void {
+    if (this.replaying) return; // loading stored state is not a user action — no audit row
     const me = this.members.find((m) => m.id === this.user.id);
     this.auditSeq += 1;
     this.auditEntries.unshift({
@@ -989,8 +1048,11 @@ export class InMemoryDataProvider implements DataProvider {
   // ── cycles ────────────────────────────────────────────────────────────────
   listCycles(): CycleSummary[] {
     const live = this.seed.liveCycle;
-    const liveCentre = this.centreFor(this.effectiveCentreId(live.id, live.testCentreId));
-    const liveSummary: CycleSummary = {
+    // A directory provider hosts no cycle: its liveCycle is an empty placeholder (id "")
+    // that must never appear in a list — the cycle list is its priorCycles.
+    const hosted = live.id !== "";
+    const liveCentre = hosted ? this.centreFor(this.effectiveCentreId(live.id, live.testCentreId)) : undefined;
+    const liveSummary: CycleSummary | null = !hosted || !liveCentre ? null : {
       id: live.id,
       name: live.name,
       stageIndex: live.stageIndex,
@@ -1014,27 +1076,74 @@ export class InMemoryDataProvider implements DataProvider {
         id: p.id,
         name: p.name,
         stageIndex: p.stageIndex,
-        stageLabel: "Locked & exported",
+        // A locked (or illustrative demo) summary reads "Locked & exported"; a live
+        // summary that is still open reads its real pipeline stage.
+        stageLabel: p.locked || p.mock ? "Locked & exported" : PIPELINE[p.stageIndex] ?? "Draft",
         stepsDone: p.stepsDone,
         participants: p.participants,
         assessments: p.assessments,
         lastActivity: p.lastActivity,
         locked: p.locked,
         live: false,
-        mock: true,
+        // Real summaries from the database are NOT mock; only the demo's illustrative
+        // priors are (see SeedPriorCycle.mock).
+        mock: p.mock,
         testCentreId: centre.id,
         testCentreName: centre.name,
         examYearId: p.yearId,
         sitting: p.sitting,
         yearName: p.yearName,
+        sittingDate: p.sittingDate,
       };
     });
-    return [liveSummary, ...priors];
+    return liveSummary ? [liveSummary, ...priors] : priors;
+  }
+
+  /**
+   * DIRECTORY use (the live provider): replace the list of cycle summaries this
+   * provider carries — every real sitting, as the light load reports them. A directory
+   * hosts no cycle's detailed data; its `liveCycle` is an empty placeholder.
+   */
+  setCycleDirectory(entries: SeedPriorCycle[]): void {
+    this.seed = { ...this.seed, priorCycles: entries.map((e) => ({ ...e })) };
+    this.bump();
+  }
+
+  /** Is this cycle's grade lock set? (false for a cycle this provider doesn't host.) */
+  isCycleLocked(cycleId: string): boolean {
+    return this.locked.has(cycleId);
+  }
+
+  /**
+   * Restore a cycle's persisted lock during hydration. UNGATED on purpose: the
+   * interactive `lockCycle` requires the `general.signoff` permission, so replaying a
+   * stored lock through it silently dropped the lock for any read-only viewer. A lock
+   * is database truth (exam_cycles.status), not a decision this user is making now.
+   */
+  hydrateLocked(cycleId: string, locked: boolean): void {
+    if (!this.hostsCycle(cycleId)) return;
+    if (locked) this.locked.add(cycleId);
+    else this.locked.delete(cycleId);
+  }
+
+  /** Lazy-load state of a cycle. The in-memory demo has everything loaded already. */
+  getCycleLoadState(cycleId: string): CycleLoadState {
+    return this.hostsCycle(cycleId) || this.seed.priorCycles.some((p) => p.id === cycleId) ? "ready" : "missing";
+  }
+  /** Nothing to load in memory. */
+  ensureCycleLoaded(cycleId: string): Promise<void> {
+    void cycleId;
+    return Promise.resolve();
+  }
+  /** Nothing to load in memory. */
+  ensureYearLoaded(yearId: string): Promise<void> {
+    void yearId;
+    return Promise.resolve();
   }
 
   getCycle(cycleId: string): CycleDetail | null {
     const live = this.seed.liveCycle;
-    if (cycleId === live.id) {
+    if (this.hostsCycle(cycleId)) {
       const refs = this.assessmentRefs(cycleId);
       return {
         id: live.id,
@@ -1045,6 +1154,7 @@ export class InMemoryDataProvider implements DataProvider {
         stageIndex: this.locked.has(live.id) ? PIPELINE.length - 1 : live.stageIndex,
         locked: this.locked.has(live.id),
         mock: false,
+        loaded: true,
         testCentreName: this.centreFor(this.effectiveCentreId(live.id, live.testCentreId)).name,
         // Land on the cycle's FIRST INCOMPLETE step — never skip ahead to a
         // screen (Review/Boundaries/…) whose data doesn't exist yet. A locked
@@ -1058,17 +1168,40 @@ export class InMemoryDataProvider implements DataProvider {
     }
     const prior = this.seed.priorCycles.find((p) => p.id === cycleId);
     if (prior) {
+      const testCentreName = this.centreFor(this.effectiveCentreId(prior.id, prior.testCentreId)).name;
+      if (prior.mock) {
+        // The demo's illustrative priors: a locked, detail-less record.
+        return {
+          id: prior.id,
+          name: prior.name,
+          participants: prior.participants,
+          assessmentCount: prior.assessments,
+          startedAt: prior.lastActivity,
+          stageIndex: prior.stageIndex,
+          locked: true,
+          mock: true,
+          loaded: false,
+          testCentreName,
+          doNext: { title: "Locked cycle", body: "This is a mock prior cycle with no detailed data in this build.", href: "/", cta: "Back to cycles" },
+          assessments: [],
+        };
+      }
+      // A REAL sitting whose detailed data this provider does not hold (yet): the
+      // summary the cycle list carries — real lock state, real counts, its real next
+      // step — with `loaded: false` and no subject refs until the cycle is opened.
+      const stageIndex = prior.locked ? PIPELINE.length - 1 : prior.stageIndex;
       return {
         id: prior.id,
         name: prior.name,
         participants: prior.participants,
         assessmentCount: prior.assessments,
         startedAt: prior.lastActivity,
-        stageIndex: prior.stageIndex,
-        locked: true,
-        mock: true,
-        testCentreName: this.centreFor(this.effectiveCentreId(prior.id, prior.testCentreId)).name,
-        doNext: { title: "Locked cycle", body: "This is a mock prior cycle with no detailed data in this build.", href: "/", cta: "Back to cycles" },
+        stageIndex,
+        locked: prior.locked,
+        mock: false,
+        loaded: false,
+        testCentreName,
+        doNext: doNextForStage(prior.id, stageIndex),
         assessments: [],
       };
     }
@@ -1172,6 +1305,9 @@ export class InMemoryDataProvider implements DataProvider {
       string,
       { year: string; centre: TestCentreSummary; examYearId?: string; anchorCycleId?: string; february?: SittingRef; may?: SittingRef }
     >();
+    // No cycles → no years; and a workspace with no centres has no "primary" centre to
+    // read an id from (a fresh live database), so don't try.
+    if (this.listCycles().length === 0 || this.testCentres.length === 0) return [];
     const primaryId = this.primaryTestCentre().id;
     for (const c of this.listCycles()) {
       const year = this.yearLabelOf(c);
@@ -1284,7 +1420,7 @@ export class InMemoryDataProvider implements DataProvider {
   // ── ingest & validate ─────────────────────────────────────────────────────
   getIngest(cycleId: string): IngestModel | null {
     const live = this.seed.liveCycle;
-    if (cycleId !== live.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     // A raw export has actually been ingested only once some subject has
     // responses. A freshly-created (empty) cycle has none — the Import screen
     // shows its upload prompt instead of an all-zero "validation report".
@@ -1321,7 +1457,7 @@ export class InMemoryDataProvider implements DataProvider {
    */
   getSittingRoster(cycleId: string): SittingRoster | null {
     const live = this.seed.liveCycle;
-    if (cycleId !== live.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const emailOf = new Map(live.participants.map((p) => [p.id, p.studentId ?? p.id]));
     const byAssessment = new Map<string, Map<string, string>>();
 
@@ -1402,7 +1538,7 @@ export class InMemoryDataProvider implements DataProvider {
 
   getCombinedSplit(cycleId: string): CombinedSplitModel | null {
     const live = this.seed.liveCycle;
-    if (cycleId !== live.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     // The split panel summarises a raw export AFTER it's been ingested. With no
     // upload yet (empty cycle) there is nothing to split — return null so the
     // Import screen shows its upload prompt, not "Detected 0-item subjects".
@@ -1444,7 +1580,7 @@ export class InMemoryDataProvider implements DataProvider {
 
   getRawData(cycleId: string, assessmentId: string): RawDataModel | null {
     const a = this.assessment(assessmentId);
-    if (cycleId !== this.seed.liveCycle.id || !a) return null;
+    if (!this.hostsCycle(cycleId) || !a) return null;
     const refs = this.assessmentRefs(cycleId);
     const labels = this.elementLabelMap(a);
     const byElement: RawElementBreak[] = this.majorsOf(a).map((major) => {
@@ -1473,7 +1609,7 @@ export class InMemoryDataProvider implements DataProvider {
 
   getDataCleaning(cycleId: string, assessmentId: string): DataCleaningModel | null {
     const a = this.assessment(assessmentId);
-    if (cycleId !== this.seed.liveCycle.id || !a) return null;
+    if (!this.hostsCycle(cycleId) || !a) return null;
     const refs = this.assessmentRefs(cycleId);
     // Surface the REAL validation report as cleaning checks; warnings vs must-fix
     // are distinguished by status. The sample data is clean, so blockers only
@@ -1538,7 +1674,7 @@ export class InMemoryDataProvider implements DataProvider {
    */
   getCleanedData(cycleId: string, assessmentId: string): CleanedDataModel | null {
     const a = this.assessment(assessmentId);
-    if (cycleId !== this.seed.liveCycle.id || !a) return null;
+    if (!this.hostsCycle(cycleId) || !a) return null;
     const refs = this.assessmentRefs(cycleId);
     const remRows = this.cleanRows.get(`${cycleId}:${assessmentId}`);
     const remCols = this.cleanCols.get(`${cycleId}:${assessmentId}`);
@@ -1638,7 +1774,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getCleaningImpact(cycleId: string): CleaningImpactModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const refs = this.assessmentRefs(cycleId);
     const exams = this.examAssessments();
     const cohortRemoved = this.cohortRemovedParticipants();
@@ -1724,7 +1860,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getCleaningSummary(cycleId: string): CleaningSummaryModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const refs = this.assessmentRefs(cycleId);
     const exams = this.examAssessments();
     const cohortExcluded = this.cohortExcludedSet();
@@ -1819,7 +1955,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getCleanedMasterDataset(cycleId: string): CleanedMasterDataset | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const exams = this.examAssessments();
     const rows: string[][] = [];
     const idIdx = CLEANED_DATA_COLUMNS.indexOf("ParticipantID" as CleanedDataColumn);
@@ -1843,7 +1979,7 @@ export class InMemoryDataProvider implements DataProvider {
 
   getNaiveScores(cycleId: string, assessmentId: string): NaiveScoresModel | null {
     const a = this.assessment(assessmentId);
-    if (cycleId !== this.seed.liveCycle.id || !a) return null;
+    if (!this.hostsCycle(cycleId) || !a) return null;
     const refs = this.assessmentRefs(cycleId);
     // Honour the Clean stage: columns/rows removed there are CLEANED OUT of the
     // data (distinct from item-review exclusions, which are applied later). The
@@ -1939,7 +2075,7 @@ export class InMemoryDataProvider implements DataProvider {
   // ── item review & scoring ───────────────────────────────────────────────--
   getReview(cycleId: string, assessmentId: string): ReviewModel | null {
     const a = this.assessment(assessmentId);
-    if (cycleId !== this.seed.liveCycle.id || !a) return null;
+    if (!this.hostsCycle(cycleId) || !a) return null;
     const excluded = this.excludedSet(cycleId, assessmentId);
     const refs = this.assessmentRefs(cycleId);
     const ref = refs.find((r) => r.id === assessmentId)!;
@@ -2022,7 +2158,7 @@ export class InMemoryDataProvider implements DataProvider {
     // so a Max Score = 0 item is still reachable here even though it no longer
     // appears as a row in the Review table. Possible follow-up, not fixed here.
     const a = this.assessment(assessmentId);
-    if (cycleId !== this.seed.liveCycle.id || !a) return null;
+    if (!this.hostsCycle(cycleId) || !a) return null;
     const index = a.items.findIndex((it) => it.id === itemId);
     if (index < 0) return null;
     const item = a.items[index]!;
@@ -2262,7 +2398,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getBoundaries(cycleId: string, scope: string): BoundaryModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const scopes = [
       ...this.seed.liveCycle.assessments.map((a) => ({ id: a.id, label: a.shortName })),
       { id: "overall", label: "Overall award" },
@@ -2417,7 +2553,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getGrades(cycleId: string): GradesModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const refs = this.assessmentRefs(cycleId);
     const perfLevels = this.grading.performanceLevels;
     const awardLevels = this.grading.awardLevels;
@@ -2525,7 +2661,7 @@ export class InMemoryDataProvider implements DataProvider {
       starMap: this.grading.starMap,
       performanceLevels: perfLevels,
       locked: this.locked.has(cycleId),
-      canLock: can(this.user, "general.signoff", this.resolvedActions) && !this.locked.has(cycleId),
+      canLock: this.permitted("general.signoff") && !this.locked.has(cycleId),
     };
   }
 
@@ -2546,8 +2682,8 @@ export class InMemoryDataProvider implements DataProvider {
     const year = this.buildYears().find((y) => y.id === yearId);
     if (!year) return null;
 
-    const mayGrades = year.may.cycleId ? this.getGrades(year.may.cycleId) : null;
-    const realFeb = year.february.cycleId ? this.getGrades(year.february.cycleId) : null;
+    const mayGrades = year.may.cycleId ? this.gradesOf(year.may.cycleId) : null;
+    const realFeb = year.february.cycleId ? this.gradesOf(year.february.cycleId) : null;
     // Demo February baseline (only when there's a real May sitting but no real
     // February grades to compare against).
     const febGrades = realFeb ?? (mayGrades ? this.demoFebruaryGrades(mayGrades) : null);
@@ -3102,7 +3238,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getStudentReview(cycleId: string): StudentReviewModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const te = this.technicalErrors.get(cycleId);
     const incidents = te?.incidents ?? [];
     const excluded = incidents.filter((i) => i.decision === "excluded").length;
@@ -3120,7 +3256,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   uploadTechnicalErrors(cycleId: string, fileName: string, rows: TechnicalErrorRow[]): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     const incidents = rows
       .filter((r) => (r.student ?? "").trim() || (r.question ?? "").trim())
@@ -3142,7 +3278,7 @@ export class InMemoryDataProvider implements DataProvider {
    * into scoring); it is flagged `sample: true` everywhere it surfaces.
    */
   clearTechnicalErrors(cycleId: string): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     if (!this.technicalErrors.has(cycleId)) return;
     this.technicalErrors.delete(cycleId);
@@ -3209,7 +3345,7 @@ export class InMemoryDataProvider implements DataProvider {
    * language file replaces that subject's marks → idempotent, never duplicated.
    */
   uploadEssayMarks(cycleId: string, fileName: string, rows: EssayUploadRow[]): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     const incoming = this.buildEssayState(rows, false, fileName);
     const touched = this.essaySubjectsTouched(rows);
@@ -3277,7 +3413,7 @@ export class InMemoryDataProvider implements DataProvider {
    * per student per subject exercise the averaging rule.
    */
   clearEssayMarks(cycleId: string): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     if (!this.essayMarksByCycle.has(cycleId)) return;
     this.essayMarksByCycle.delete(cycleId);
@@ -3295,7 +3431,7 @@ export class InMemoryDataProvider implements DataProvider {
    * lowercased — the ONLY valid join key.
    */
   getExamIncidentMatchContext(cycleId: string): ExamIncidentMatchContext | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const byId = new Map(this.seed.liveCycle.participants.map((p) => [p.id, p]));
     const emailOf = (id: string) => (byId.get(id)?.studentId ?? id).trim().toLowerCase();
     const nameOf = (id: string) => byId.get(id)?.label ?? id;
@@ -3325,7 +3461,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   upsertExamIncidents(cycleId: string, batchId: string, fileName: string, records: readonly ExamIncidentRecord[]): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     const map = this.examIncidentsByCycle.get(cycleId) ?? new Map<string, ExamIncidentRecord>();
     let n = 0;
@@ -3352,7 +3488,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   clearExamIncidents(cycleId: string): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     if (!this.examIncidentsByCycle.has(cycleId)) return;
     this.examIncidentsByCycle.delete(cycleId);
@@ -3419,7 +3555,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getEssayMarks(cycleId: string): EssayMarksModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const st = this.essayMarksByCycle.get(cycleId);
     const essayIds = new Set(this.essaySubjectIds());
     const subjects: EssaySubjectRef[] = this.seed.liveCycle.assessments
@@ -3476,7 +3612,7 @@ export class InMemoryDataProvider implements DataProvider {
    * removed sitting. Nothing here writes.
    */
   getEssayContext(cycleId: string): EssayUploadContext | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const essayIds = new Set(this.essaySubjectIds());
     const cohortExcluded = this.cohortExcludedSet();
     const byId = new Map(this.seed.liveCycle.participants.map((p) => [p.id, p]));
@@ -3564,7 +3700,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   uploadIncidentLog(cycleId: string, fileName: string, rows: IncidentInput[]): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     const incidents = rows.map((r) => this.buildTriageIncident(r));
     this.incidentLogByCycle.set(cycleId, { uploaded: true, sample: false, fileName, incidents });
@@ -3607,7 +3743,7 @@ export class InMemoryDataProvider implements DataProvider {
    * auto-applied — every row still needs a human decision.
    */
   clearIncidentLog(cycleId: string): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     if (!this.incidentLogByCycle.has(cycleId)) return;
     this.incidentLogByCycle.delete(cycleId);
@@ -3617,7 +3753,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   decideIncident(cycleId: string, incidentId: string, decision: IncidentDecisionInput): void {
-    if (!can(this.user, "incidents.triage", this.resolvedActions)) return;
+    if (!this.permitted("incidents.triage")) return;
     if (this.locked.has(cycleId)) return;
     const st = this.incidentLogByCycle.get(cycleId);
     const inc = st?.incidents.find((i) => i.id === incidentId);
@@ -3646,7 +3782,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getAdjustments(cycleId: string): AdjustmentsModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const st = this.incidentLogByCycle.get(cycleId);
     const incidents = st?.incidents ?? [];
     const roster = this.seed.liveCycle.participants.map((p) => ({ id: p.id, name: p.label }));
@@ -3697,8 +3833,8 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   uploadCgjFile(cycleId: string, fileName: string, rows: CgjUploadRow[]): void {
-    if (!can(this.user, "cgj.upload", this.resolvedActions)) return;
-    if (cycleId !== this.seed.liveCycle.id || this.locked.has(cycleId)) return;
+    if (!this.permitted("cgj.upload")) return;
+    if (!this.hostsCycle(cycleId) || this.locked.has(cycleId)) return;
     const students = this.buildCgjStudents(rows);
     this.cgjByCycle.set(cycleId, { uploaded: true, sample: false, fileName, students });
     this.audit("upload", "Added centre grade judgement", `${fileName} — expected grades for ${students.length} student(s)`, cycleId);
@@ -3712,7 +3848,7 @@ export class InMemoryDataProvider implements DataProvider {
    * comparison shows all four outcomes. Flagged `sample: true` everywhere.
    */
   clearCgj(cycleId: string): void {
-    if (!can(this.user, "cgj.upload", this.resolvedActions)) return;
+    if (!this.permitted("cgj.upload")) return;
     if (this.locked.has(cycleId)) return;
     if (!this.cgjByCycle.has(cycleId)) return;
     this.cgjByCycle.delete(cycleId);
@@ -3721,7 +3857,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getCgj(cycleId: string): CgjModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const grades = this.getGrades(cycleId);
     const refs = this.assessmentRefs(cycleId);
     const perfLevels = this.grading.performanceLevels;
@@ -3833,7 +3969,7 @@ export class InMemoryDataProvider implements DataProvider {
 
   /** Cronbach's-α reliability for the cycle, at every construct grouping (read-only). */
   getReliability(cycleId: string): ReliabilityModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const { responses, items } = this.usableResponsesAndItems(cycleId);
     const result = engine.computeReliability({ responses, items });
     const nameById = new Map(this.seed.liveCycle.assessments.map((a) => [a.id, a.name]));
@@ -3878,7 +4014,7 @@ export class InMemoryDataProvider implements DataProvider {
    * building happen in the page (so xlsx-js-style stays out of the main bundle).
    */
   getScoreAnalysisData(cycleId: string, preExclusion = false): AssembleScoreAnalysisArgs | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const responses: ResponseRecord[] = [];
     const items: ItemMeta[] = [];
     const excludedItemIds: string[] = [];
@@ -3922,7 +4058,7 @@ export class InMemoryDataProvider implements DataProvider {
 
   /** Engine primitives for the item-analysis export (full ItemStat per item). */
   getItemAnalysisData(cycleId: string): AssembleItemAnalysisArgs | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const stats: ItemStat[] = [];
     const facts: ItemResponseFact[] = [];
     const reviews: Record<string, ItemReviewDecision> = {};
@@ -3985,7 +4121,7 @@ export class InMemoryDataProvider implements DataProvider {
    * already recompute over `responsesOf`'s corrected cohort.
    */
   getDiagnostics(cycleId: string): DiagnosticsModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const cohortExcluded = this.cohortExcludedSet();
     return {
       cycleId,
@@ -4026,7 +4162,7 @@ export class InMemoryDataProvider implements DataProvider {
    * lib/export/per-item-analysis.ts, so nothing in the diagnostics path changes.
    */
   getPerItemSource(cycleId: string): PerItemSource | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const cohortExcluded = this.cohortExcludedSet();
     return {
       cycleId,
@@ -4062,7 +4198,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getComposition(cycleId: string): CompositionModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const essayIds = new Set(this.essaySubjectIds());
     const subjects = this.seed.liveCycle.assessments.map((a) => ({ id: a.id, name: a.name, shortName: a.shortName, hasEssay: essayIds.has(a.id) }));
     const labelOf = (id: string) => this.seed.liveCycle.participants.find((p) => p.id === id)?.label ?? id;
@@ -4178,7 +4314,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   setIncidentDecision(cycleId: string, incidentId: string, decision: IncidentDecision, reason?: string | null): void {
-    if (!can(this.user, "incidents.triage", this.resolvedActions)) return;
+    if (!this.permitted("incidents.triage")) return;
     if (this.locked.has(cycleId)) return;
     const te = this.technicalErrors.get(cycleId);
     const inc = te?.incidents.find((i) => i.id === incidentId);
@@ -4296,7 +4432,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getDistinctionSafeguard(cycleId: string, scope?: string): DistinctionSafeguardModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const assessments = this.seed.liveCycle.assessments;
     const scopes = assessments.map((a) => ({ id: a.id, label: a.shortName }));
     const scopeId = scope && assessments.some((a) => a.id === scope) ? scope : assessments[0]?.id ?? "";
@@ -4362,14 +4498,14 @@ export class InMemoryDataProvider implements DataProvider {
         capped: vals.filter((v) => v === "capped").length,
         overridden: vals.filter((v) => v === "override").length,
       },
-      canOverride: can(this.user, "general.override_distinction", this.resolvedActions),
+      canOverride: this.permitted("general.override_distinction"),
       attemptedNote:
         "Eligibility uses D3 items answered CORRECTLY against the MAJORITY of D3 items AVAILABLE on each exam (dynamic per exam; recomputed after exclusions) — not attempts, and not a fixed count.",
     };
   }
 
   confirmDistinctionCaps(cycleId: string): void {
-    if (!can(this.user, "grades.confirm_distinction", this.resolvedActions)) return;
+    if (!this.permitted("grades.confirm_distinction")) return;
     if (this.locked.has(cycleId)) return;
     const capped = [...this.distinctionDecisions(cycleId).values()].filter((v) => v === "capped").length;
     this.distinctionConfirmed.add(cycleId);
@@ -4383,7 +4519,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   overrideDistinctionCap(cycleId: string, studentId: string, reason: string): void {
-    if (!can(this.user, "general.override_distinction", this.resolvedActions) || this.locked.has(cycleId)) return;
+    if (!this.permitted("general.override_distinction") || this.locked.has(cycleId)) return;
     const clean = reason.trim();
     if (!clean) return;
     const m = this.distinctionOverrides.get(cycleId) ?? new Map<string, { reason: string; by: string }>();
@@ -4395,7 +4531,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   undoDistinctionOverride(cycleId: string, studentId: string): void {
-    if (!can(this.user, "general.override_distinction", this.resolvedActions) || this.locked.has(cycleId)) return;
+    if (!this.permitted("general.override_distinction") || this.locked.has(cycleId)) return;
     const m = this.distinctionOverrides.get(cycleId);
     if (m?.delete(studentId)) {
       const label = this.seed.liveCycle.participants.find((p) => p.id === studentId)?.label ?? studentId;
@@ -4415,8 +4551,8 @@ export class InMemoryDataProvider implements DataProvider {
    * reason, time). Engine parity is unaffected: only the alterations INPUT changes.
    */
   adjustStudentMark(cycleId: string, participantId: string, assessmentId: string, newMark: number, reason: string): void {
-    if (!can(this.user, "grades.adjust", this.resolvedActions)) return;
-    if (cycleId !== this.seed.liveCycle.id || this.locked.has(cycleId)) return;
+    if (!this.permitted("grades.adjust")) return;
+    if (!this.hostsCycle(cycleId) || this.locked.has(cycleId)) return;
     const clean = (reason ?? "").trim();
     if (!clean) return; // reason is required
     if (!Number.isFinite(newMark)) return;
@@ -4468,7 +4604,7 @@ export class InMemoryDataProvider implements DataProvider {
    * audits the removal.
    */
   removeStudentMarkAdjustment(cycleId: string, adjustmentId: string): void {
-    if (!can(this.user, "grades.adjust", this.resolvedActions)) return;
+    if (!this.permitted("grades.adjust")) return;
     if (this.locked.has(cycleId)) return;
     const list = this.manualAdjustmentsByCycle.get(cycleId);
     const adj = list?.find((m) => m.id === adjustmentId);
@@ -4485,18 +4621,21 @@ export class InMemoryDataProvider implements DataProvider {
     this.bump();
   }
 
-  setSafeguardConfig(patch: { topDifficultyDemand?: string }): void {
-    if (!can(this.user, "general.config_methodology", this.resolvedActions)) return;
+  private mergeSafeguard(patch: { topDifficultyDemand?: string }): void {
     if (patch.topDifficultyDemand != null) {
       this.safeguard.topDifficultyDemand = patch.topDifficultyDemand;
     }
+  }
+  setSafeguardConfig(patch: { topDifficultyDemand?: string }): void {
+    if (!this.permitted("general.config_methodology")) return;
+    this.mergeSafeguard(patch);
     this.audit("safeguard", "Updated Distinction safeguard", `top-difficulty ${this.resolveTopDifficulty()}`, null);
     this.bump();
   }
 
   // ── document generation (Student Summary) ────────────────────────────────
   getDocuments(cycleId: string): DocumentsModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const locked = this.locked.has(cycleId);
 
     // Canonical template slots S1..S5 mapped to suite assessments by alias
@@ -4653,7 +4792,7 @@ export class InMemoryDataProvider implements DataProvider {
     excluded: boolean,
     reason?: string | null,
   ): void {
-    if (!can(this.user, "review.exclude", this.resolvedActions)) return;
+    if (!this.permitted("review.exclude")) return;
     if (this.locked.has(cycleId)) return;
     this.applyItemExclusionState(cycleId, assessmentId, itemId, excluded, reason ?? null);
     // A fresh direct decision supersedes any prior override provenance.
@@ -4689,7 +4828,7 @@ export class InMemoryDataProvider implements DataProvider {
     exclude: boolean,
     reason: string,
   ): void {
-    if (!can(this.user, "general.override_marks", this.resolvedActions)) return;
+    if (!this.permitted("general.override_marks")) return;
     if (this.locked.has(cycleId)) return;
     const key = `${cycleId}:${assessmentId}:${itemId}`;
     // `prior` names the previous decider for the override audit trail. P2 gates
@@ -4732,7 +4871,7 @@ export class InMemoryDataProvider implements DataProvider {
     newMark: number | null,
     reason: string,
   ): void {
-    if (!can(this.user, "general.override_marks", this.resolvedActions)) return;
+    if (!this.permitted("general.override_marks")) return;
     if (this.locked.has(cycleId)) return;
     const list = this.manualAdjustmentsByCycle.get(cycleId) ?? [];
     const existing = list.find((m) => m.participantId === participantId && m.assessmentId === assessmentId);
@@ -4809,7 +4948,7 @@ export class InMemoryDataProvider implements DataProvider {
     target: { rows?: string[]; cols?: string[] },
     removed: boolean,
   ): void {
-    if (!can(this.user, "clean.rows", this.resolvedActions)) return;
+    if (!this.permitted("clean.rows")) return;
     if (this.locked.has(cycleId)) return;
     const key = `${cycleId}:${assessmentId}`;
     const rows = this.cleanRows.get(key) ?? new Set<string>();
@@ -4857,7 +4996,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   clearCleanRemovals(cycleId: string, assessmentId: string): void {
-    if (!can(this.user, "clean.rows", this.resolvedActions)) return;
+    if (!this.permitted("clean.rows")) return;
     if (this.locked.has(cycleId)) return;
     const key = `${cycleId}:${assessmentId}`;
     const hadR = this.cleanRows.get(key)?.size ?? 0;
@@ -4877,7 +5016,7 @@ export class InMemoryDataProvider implements DataProvider {
     excluded: boolean,
     reason?: string | null,
   ): void {
-    if (!can(this.user, "clean.cohort", this.resolvedActions)) return;
+    if (!this.permitted("clean.cohort")) return;
     if (this.locked.has(cycleId)) return;
     let m = this.participantExclusions.get(cycleId);
     if (!m) this.participantExclusions.set(cycleId, (m = new Map<string, string>()));
@@ -4901,7 +5040,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   setBoundary(cycleId: string, scope: string, input: SetBoundaryInput): void {
-    if (!can(this.user, "cuts.set", this.resolvedActions)) return;
+    if (!this.permitted("cuts.set")) return;
     if (this.locked.has(cycleId)) return;
     const key = `${cycleId}:${scope}`;
     const cur = this.boundaryState(cycleId, scope);
@@ -5001,8 +5140,8 @@ export class InMemoryDataProvider implements DataProvider {
     this.bump();
   }
 
-  setGradingDefaults(patch: Partial<GradingConfig>): void {
-    if (!can(this.user, "general.config_methodology", this.resolvedActions)) return;
+  /** Merge a grading patch into the (shared) grading config. Ungated; no audit. */
+  private mergeGrading(patch: Partial<GradingConfig>): void {
     // When the level/award arrays are replaced, replace the star map wholesale
     // (rather than merging) so renamed/removed levels don't leave stale stars.
     const starMap = patch.starMap
@@ -5011,14 +5150,27 @@ export class InMemoryDataProvider implements DataProvider {
         : { ...this.grading.starMap, ...patch.starMap }
       : this.grading.starMap;
     this.grading = { ...this.grading, ...patch, starMap };
-    // Drop any boundary state that no longer matches the new band count so it
-    // re-derives from the updated defaults.
+    this.reconcileBoundariesWithGrading();
+  }
+
+  /**
+   * Drop any boundary state that no longer matches the current band count so it
+   * re-derives from the grading defaults. The grading config is workspace-level (shared
+   * by every sitting's provider) but boundaries are per cycle, so the live provider calls
+   * this on EVERY loaded sitting after a grading change — not just the one that made it.
+   */
+  reconcileBoundariesWithGrading(): void {
     const perfLen = this.grading.performanceLevels.length - 1;
     const awardLen = this.grading.awardLevels.length - 1;
     for (const [key, st] of [...this.boundaries.entries()]) {
       const isAward = key.endsWith(":overall");
       if (st.cuts.length !== (isAward ? awardLen : perfLen)) this.boundaries.delete(key);
     }
+  }
+
+  setGradingDefaults(patch: Partial<GradingConfig>): void {
+    if (!this.permitted("general.config_methodology")) return;
+    this.mergeGrading(patch);
     this.audit(
       "config",
       "Updated grading defaults",
@@ -5028,14 +5180,17 @@ export class InMemoryDataProvider implements DataProvider {
     this.bump();
   }
 
-  setQualityThresholds(patch: Partial<QualityThresholds>): void {
-    if (!can(this.user, "general.config_methodology", this.resolvedActions)) return;
+  private mergeQuality(patch: Partial<QualityThresholds>): void {
     this.quality = {
       pValue: { ...this.quality.pValue, ...(patch.pValue ?? {}) },
       itemTotal: { ...this.quality.itemTotal, ...(patch.itemTotal ?? {}) },
       pointBiserial: { ...this.quality.pointBiserial, ...(patch.pointBiserial ?? {}) },
       discrimination: { ...this.quality.discrimination, ...(patch.discrimination ?? {}) },
     };
+  }
+  setQualityThresholds(patch: Partial<QualityThresholds>): void {
+    if (!this.permitted("general.config_methodology")) return;
+    this.mergeQuality(patch);
     this.audit("config", "Changed item-quality thresholds", "Engine Good/Review/Flag rating bands updated", null);
     this.bump();
   }
@@ -5058,9 +5213,9 @@ export class InMemoryDataProvider implements DataProvider {
     // `clean`, keeping parity untouched).
     extra?: { canonical?: CanonicalModel; files?: { items?: string; assessments?: string; topics?: string } },
   ): Promise<void> {
-    if (!can(this.user, "upload.ingest", this.resolvedActions)) return Promise.resolve();
+    if (!this.permitted("upload.ingest")) return Promise.resolve();
     const lc = this.seed.liveCycle;
-    if (cycleId !== lc.id) return Promise.resolve();
+    if (!this.hostsCycle(cycleId)) return Promise.resolve();
 
     const built = buildLiveCycleData(clean);
 
@@ -5113,14 +5268,14 @@ export class InMemoryDataProvider implements DataProvider {
   // a clear/delete. Kept async to match the interface (and the live provider, which
   // awaits the DB). A re-ingest repopulates the seed and the counts recompute.
   clearSittingData(cycleId: string): Promise<void> {
-    if (!can(this.user, "upload.manage", this.resolvedActions)) return Promise.resolve();
+    if (!this.permitted("upload.manage")) return Promise.resolve();
     this.resetCycleToEmpty(cycleId);
     this.audit("upload", "Cleared sitting data", "Emptied ingested data — sitting returned to the Upload state", cycleId);
     this.bump();
     return Promise.resolve();
   }
   deleteSitting(cycleId: string): Promise<void> {
-    if (!can(this.user, "general.delete", this.resolvedActions)) return Promise.resolve();
+    if (!this.permitted("general.delete")) return Promise.resolve();
     const name = cycleId === this.seed.liveCycle.id ? this.seed.liveCycle.name : cycleId;
     this.resetCycleToEmpty(cycleId);
     this.audit("cycle", "Deleted sitting", `Removed sitting "${name}" and all its ingested data`, null);
@@ -5133,7 +5288,7 @@ export class InMemoryDataProvider implements DataProvider {
   // seeded cycle is emptied in place rather than removed, so it still shows here
   // after delete — the live Supabase path deletes for real and reaches zero.)
   deleteCycle(cycleId: string): Promise<void> {
-    if (!can(this.user, "general.delete", this.resolvedActions)) return Promise.resolve();
+    if (!this.permitted("general.delete")) return Promise.resolve();
     const name = cycleId === this.seed.liveCycle.id ? this.seed.liveCycle.name : cycleId;
     this.resetCycleToEmpty(cycleId);
     this.audit("cycle", "Deleted cycle", `Removed cycle "${name}" and every row keyed to it`, null);
@@ -5214,14 +5369,16 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   lockCycle(cycleId: string): void {
-    if (!can(this.user, "general.signoff", this.resolvedActions)) return;
+    if (!this.hostsCycle(cycleId) || this.locked.has(cycleId)) return;
+    if (!this.permitted("general.signoff")) return;
     this.locked.add(cycleId);
     const n = this.seed.liveCycle.participants.length;
     this.audit("lock", "Locked grades", `${n} students signed off across ${this.seed.liveCycle.assessments.length} assessments`, cycleId);
     this.bump();
   }
   unlockCycle(cycleId: string): void {
-    if (!can(this.user, "general.signoff", this.resolvedActions)) return;
+    if (!this.hostsCycle(cycleId) || !this.locked.has(cycleId)) return;
+    if (!this.permitted("general.signoff")) return;
     this.locked.delete(cycleId);
     this.audit("reopen", "Re-opened cycle", "Cycle unlocked for further review", cycleId);
     this.bump();
@@ -5237,7 +5394,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   inviteMember(email: string, roleId: string): void {
-    if (!can(this.user, MANAGE_USERS_ACTION, this.resolvedActions)) return;
+    if (!this.permitted(MANAGE_USERS_ACTION)) return;
     const clean = email.trim();
     if (!clean || this.members.some((m) => m.email.toLowerCase() === clean.toLowerCase())) return;
     const role = this.roles.find((r) => r.id === roleId) ?? [...this.roles].sort((a, b) => a.sort - b.sort)[0];
@@ -5261,7 +5418,7 @@ export class InMemoryDataProvider implements DataProvider {
     this.bump();
   }
   setMemberRole(memberId: string, roleId: string): void {
-    if (!can(this.user, MANAGE_USERS_ACTION, this.resolvedActions)) return;
+    if (!this.permitted(MANAGE_USERS_ACTION)) return;
     const m = this.members.find((x) => x.id === memberId);
     const role = this.roles.find((r) => r.id === roleId);
     if (!m || !role) return;
@@ -5270,12 +5427,12 @@ export class InMemoryDataProvider implements DataProvider {
     this.bump();
   }
   removeMember(memberId: string): void {
-    if (!can(this.user, MANAGE_USERS_ACTION, this.resolvedActions) || memberId === this.user.id) return;
+    if (!this.permitted(MANAGE_USERS_ACTION) || memberId === this.user.id) return;
     this.members = this.members.filter((m) => m.id !== memberId);
     this.bump();
   }
   resendInvite(memberId: string): void {
-    if (!can(this.user, MANAGE_USERS_ACTION, this.resolvedActions)) return;
+    if (!this.permitted(MANAGE_USERS_ACTION)) return;
     const m = this.members.find((x) => x.id === memberId);
     if (m && m.status === "invited") {
       m.lastActive = "Invite re-sent just now";
@@ -5311,7 +5468,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   createRole(name: string): void {
-    if (!can(this.user, MANAGE_ROLES_ACTION, this.resolvedActions)) return;
+    if (!this.permitted(MANAGE_ROLES_ACTION)) return;
     const clean = name.trim();
     if (!clean || this.roles.some((r) => r.name.toLowerCase() === clean.toLowerCase())) return;
     const id = `role-${this.seq++}-${clean.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
@@ -5324,7 +5481,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   renameRole(id: string, name: string): void {
-    if (!can(this.user, MANAGE_ROLES_ACTION, this.resolvedActions)) return;
+    if (!this.permitted(MANAGE_ROLES_ACTION)) return;
     const r = this.roles.find((x) => x.id === id);
     if (!r) return;
     const clean = name.trim();
@@ -5337,7 +5494,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   deleteRole(id: string): void {
-    if (!can(this.user, MANAGE_ROLES_ACTION, this.resolvedActions)) return;
+    if (!this.permitted(MANAGE_ROLES_ACTION)) return;
     const r = this.roles.find((x) => x.id === id);
     if (!r) return;
     // Lockout guard: the Admin system role is undeletable.
@@ -5354,7 +5511,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   setRoleAction(roleId: string, action: ActionKey, granted: boolean): void {
-    if (!can(this.user, MANAGE_ROLES_ACTION, this.resolvedActions)) return;
+    if (!this.permitted(MANAGE_ROLES_ACTION)) return;
     const r = this.roles.find((x) => x.id === roleId);
     if (!r || !(ACTION_KEYS as string[]).includes(action)) return;
     // Lockout guard: the Admin role's manage-roles + manage-users cells are
@@ -5421,11 +5578,34 @@ export class InMemoryDataProvider implements DataProvider {
    * Supabase RPC also validates server-side), and a change re-flags through the
    * full grade recompute on the next read (marginalInfo runs inside getGrades).
    */
-  setBorderlineConfig(patch: Partial<BorderlineConfig>): void {
-    if (!can(this.user, "general.config_methodology", this.resolvedActions)) return;
-    if (patch.bandPct == null || !Number.isFinite(patch.bandPct)) return;
+  private mergeBorderline(patch: Partial<BorderlineConfig>): boolean {
+    if (patch.bandPct == null || !Number.isFinite(patch.bandPct)) return false;
     this.borderline = { bandPct: clampBorderlineBand(patch.bandPct) };
+    return true;
+  }
+  setBorderlineConfig(patch: Partial<BorderlineConfig>): void {
+    if (!this.permitted("general.config_methodology")) return;
+    if (!this.mergeBorderline(patch)) return;
     this.audit("config", "Updated borderline flagging band", `±${this.borderline.bandPct}% around each grade boundary`, null);
+    this.bump();
+  }
+
+  /**
+   * Apply the PERSISTED workspace configuration to the shared workspace state —
+   * grading defaults, quality thresholds, safeguard, borderline band and element labels.
+   * HYDRATION, not an edit: UNGATED (the interactive setters need `config_methodology`,
+   * so replaying through them silently dropped the stored config for a read-only viewer
+   * and for any session whose role grid wasn't applied yet), and it writes no audit
+   * entries. Values are validated exactly as the interactive setters validate them.
+   */
+  hydrateWorkspaceConfig(settings: Record<string, unknown>, elementLabels?: ElementLabelsConfig): void {
+    if (settings.grading_defaults) this.mergeGrading(settings.grading_defaults as Partial<GradingConfig>);
+    if (settings.quality_thresholds) this.mergeQuality(settings.quality_thresholds as Partial<QualityThresholds>);
+    if (settings.safeguard) this.mergeSafeguard(settings.safeguard as { topDifficultyDemand?: string });
+    if (settings.borderline) this.mergeBorderline(settings.borderline as Partial<BorderlineConfig>);
+    if (elementLabels && !validateElementLabels(elementLabels)) {
+      this.elementLabels = JSON.parse(JSON.stringify(elementLabels));
+    }
     this.bump();
   }
 
@@ -5433,7 +5613,7 @@ export class InMemoryDataProvider implements DataProvider {
     return JSON.parse(JSON.stringify(this.elementLabels));
   }
   setElementLabels(config: ElementLabelsConfig): void {
-    if (!can(this.user, "general.config_methodology", this.resolvedActions)) return;
+    if (!this.permitted("general.config_methodology")) return;
     // Server-side parity: reject an invalid set (empty labels, duplicate letters).
     if (validateElementLabels(config)) return;
     this.elementLabels = JSON.parse(JSON.stringify(config));
@@ -5445,7 +5625,7 @@ export class InMemoryDataProvider implements DataProvider {
   getIncidentConfig(): IncidentConfigModel {
     const c = this.incidentConfig;
     return {
-      canEdit: can(this.user, "general.config_incidents", this.resolvedActions),
+      canEdit: this.permitted("general.config_incidents"),
       perStudentCap: c.perStudentCap,
       mapping: { ...c.mapping },
       codes: c.codes.map((code) => ({
@@ -5457,7 +5637,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   upsertIncidentCode(input: IncidentCodeInput): void {
-    if (!can(this.user, "general.config_incidents", this.resolvedActions)) return;
+    if (!this.permitted("general.config_incidents")) return;
     // Defence in depth (the UI validates too): reject anything not add-only / invalid.
     if (validateIncidentCode(input, this.incidentConfig.codes).length > 0) return;
     if (input.id) {
@@ -5474,7 +5654,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   deleteIncidentCode(id: string): void {
-    if (!can(this.user, "general.config_incidents", this.resolvedActions)) return;
+    if (!this.permitted("general.config_incidents")) return;
     const before = this.incidentConfig.codes.length;
     this.incidentConfig.codes = this.incidentConfig.codes.filter((c) => c.id !== id);
     if (this.incidentConfig.codes.length !== before) {
@@ -5484,7 +5664,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   setIncidentPerStudentCap(cap: number | null): void {
-    if (!can(this.user, "general.config_incidents", this.resolvedActions)) return;
+    if (!this.permitted("general.config_incidents")) return;
     if (validatePerStudentCap(cap).length > 0) return;
     this.incidentConfig.perStudentCap = cap;
     this.audit("config", "Updated per-student incident cap", cap === null ? "No cap" : `${cap} marks`, null);
@@ -5492,7 +5672,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   setIncidentMapping(mapping: IncidentColumnMapping): void {
-    if (!can(this.user, "general.config_incidents", this.resolvedActions)) return;
+    if (!this.permitted("general.config_incidents")) return;
     this.incidentConfig.mapping = { ...mapping };
     this.audit("config", "Updated incident import mapping", "Column mapping", null);
     this.bump();
@@ -5512,7 +5692,7 @@ export class InMemoryDataProvider implements DataProvider {
     rows: readonly ResolvedIncidentRow[],
     source?: { fileName: string; sample: boolean },
   ): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     this.incidentRows.set(cycleId, rows.map((r) => ({ ...r, errors: [...r.errors] })));
     if (source) this.incidentSource.set(cycleId, { ...source });
@@ -5523,7 +5703,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   clearIncidentRows(cycleId: string): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     if (!this.incidentRows.has(cycleId) && !this.incidentSource.has(cycleId)) return;
     this.incidentRows.delete(cycleId);
@@ -5600,7 +5780,7 @@ export class InMemoryDataProvider implements DataProvider {
       applied: applied !== null,
       appliedBy: applied?.by ?? null,
       appliedAt: applied?.at ?? null,
-      canApply: can(this.user, "incidents.apply", this.resolvedActions),
+      canApply: this.permitted("incidents.apply"),
       perStudentCap: this.incidentConfig.perStudentCap,
       source: this.incidentSource.get(cycleId) ?? null,
       students: matched,
@@ -5619,7 +5799,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   applyIncidentAdjustments(cycleId: string): void {
-    if (!can(this.user, "incidents.apply", this.resolvedActions)) return; // only admin may commit to scores
+    if (!this.permitted("incidents.apply")) return; // only admin may commit to scores
     if (this.locked.has(cycleId)) return;
     if ((this.incidentRows.get(cycleId) ?? []).length === 0) return;
     this.incidentApplied.set(cycleId, { by: this.user.name, at: new Date().toISOString() });
@@ -5630,7 +5810,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   unapplyIncidentAdjustments(cycleId: string): void {
-    if (!can(this.user, "incidents.apply", this.resolvedActions)) return;
+    if (!this.permitted("incidents.apply")) return;
     if (!this.incidentApplied.has(cycleId)) return;
     this.incidentApplied.delete(cycleId);
     this.audit("student", "Reverted incident adjustments", "Base scores stand alone", cycleId);
@@ -5670,7 +5850,7 @@ export class InMemoryDataProvider implements DataProvider {
     // P2: a decision is overridable when the signed-in user holds the `override`
     // permission and the sitting is unlocked — the matrix, not the old
     // strictly-higher role hierarchy. `decidedByRole` is kept purely as a label.
-    const mayOverride = (): boolean => !locked && can(this.user, "general.override_marks", this.resolvedActions);
+    const mayOverride = (): boolean => !locked && this.permitted("general.override_marks");
 
     // Excluded items (the grade-bearing item-review state).
     for (const [key, set] of this.exclusions) {
@@ -5729,7 +5909,7 @@ export class InMemoryDataProvider implements DataProvider {
       // Override rights AT ALL: holds the `override` permission on an unlocked
       // sitting. Each row's `canOverride` reflects the same permission (P2: the
       // matrix is the source of truth, not the old strictly-higher hierarchy).
-      canOverride: can(this.user, "general.override_marks", this.resolvedActions) && !locked,
+      canOverride: this.permitted("general.override_marks") && !locked,
       decisions,
       counts: { decisions: decisions.length, overridden: decisions.filter((d) => d.override).length },
     };
@@ -6062,7 +6242,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   createCycle(input: CreateCycleInput): Promise<string> {
-    if (!can(this.user, "upload.manage", this.resolvedActions)) return Promise.resolve(this.seed.liveCycle.id);
+    if (!this.permitted("upload.manage")) return Promise.resolve(this.seed.liveCycle.id);
     // In-memory/demo mode has no database: record the intent in the audit log and
     // resolve to the demo cycle id (the only one with real data) so navigation
     // works. The Supabase provider overrides this to persist a real cycle.
@@ -6083,7 +6263,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   createTestCentre(input: { name: string; code: string }): void {
-    if (!can(this.user, "general.manage_centres", this.resolvedActions)) return;
+    if (!this.permitted("general.manage_centres")) return;
     const name = input.name.trim();
     const code = input.code.trim();
     if (!name || !code) return;
@@ -6095,7 +6275,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   updateTestCentre(id: string, patch: { name?: string; code?: string; active?: boolean }): void {
-    if (!can(this.user, "general.manage_centres", this.resolvedActions)) return;
+    if (!this.permitted("general.manage_centres")) return;
     const c = this.testCentres.find((x) => x.id === id);
     if (!c) return;
     if (patch.name !== undefined && patch.name.trim()) c.name = patch.name.trim();
@@ -6106,7 +6286,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   setTestCentreActive(id: string, active: boolean): void {
-    if (!can(this.user, "general.manage_centres", this.resolvedActions)) return;
+    if (!this.permitted("general.manage_centres")) return;
     const c = this.testCentres.find((x) => x.id === id);
     if (!c) return;
     c.active = active;
@@ -6124,7 +6304,7 @@ export class InMemoryDataProvider implements DataProvider {
    * re-run. `yearId` is the derived year id from `listYears()`.
    */
   moveExamYearToCentre(yearId: string, testCentreId: string): Promise<void> {
-    if (!can(this.user, "general.manage_centres", this.resolvedActions)) return Promise.resolve();
+    if (!this.permitted("general.manage_centres")) return Promise.resolve();
     const years = this.buildYears();
     const year = years.find((y) => y.id === yearId);
     if (!year) return Promise.reject(new Error("Exam year not found."));

@@ -95,7 +95,7 @@ function makeClient(db: MockDb) {
 const newProvider = async (db: MockDb) => {
   const { client, calls } = makeClient(db);
   const provider = new SupabaseDataProvider(client as never);
-  await (provider as unknown as { rehydrate(): Promise<void> }).rehydrate();
+  await (provider as unknown as { refreshWorkspace(): Promise<void> }).refreshWorkspace();
   calls.length = 0; // only count what createCycle itself sends
   return { provider, calls, db };
 };

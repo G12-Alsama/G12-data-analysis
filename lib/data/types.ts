@@ -202,7 +202,17 @@ export interface CycleDetail {
   testCentreName: string;
   doNext: { title: string; body: string; href: string; cta: string };
   assessments: AssessmentRef[];
+  /**
+   * True when this sitting's detailed data is loaded and its pipeline pages can read
+   * it. False for a real sitting the cycle list knows only as a light summary (the
+   * live provider loads a sitting's full data lazily, when it is opened): the summary
+   * fields above are real, but `assessments` is empty until it loads. Absent = loaded.
+   */
+  loaded?: boolean;
 }
+
+/** Lazy-load state of one sitting: "ready" to read, "loading", "error", or "missing" (no such sitting). */
+export type CycleLoadState = "ready" | "loading" | "error" | "missing";
 
 /** Optional technical-errors spreadsheet attached at ingest (never gates progress). */
 export interface TechnicalErrorsUpload {
