@@ -87,6 +87,7 @@ import type {
   ItemReviewDecision,
 } from "@/lib/export/types";
 import type { Seed, SeedAssessment, SeedItem } from "./seed-types";
+import { sittingLabel } from "./create-cycle";
 import type {
   DataProvider,
   SetBoundaryInput,
@@ -999,6 +1000,8 @@ export class InMemoryDataProvider implements DataProvider {
       testCentreId: liveCentre.id,
       testCentreName: liveCentre.name,
       examYearId: live.yearId,
+      sitting: live.sitting,
+      yearName: live.yearName,
     };
     const priors: CycleSummary[] = this.seed.priorCycles.map((p) => {
       const centre = this.centreFor(this.effectiveCentreId(p.id, p.testCentreId));
@@ -1017,6 +1020,8 @@ export class InMemoryDataProvider implements DataProvider {
         testCentreId: centre.id,
         testCentreName: centre.name,
         examYearId: p.yearId,
+        sitting: p.sitting,
+        yearName: p.yearName,
       };
     });
     return [liveSummary, ...priors];
@@ -1082,9 +1087,24 @@ export class InMemoryDataProvider implements DataProvider {
     return m ? m[0] : "Unknown";
   }
 
-  /** Map a cycle name to its sitting: Jan–Apr → February, otherwise May. */
-  private sittingOf(name: string): SittingKey {
+  /**
+   * LEGACY fallback only: guess a period from a cycle name (Jan–Apr → February,
+   * otherwise May). Used solely for cycles that carry NO stored period — the demo
+   * fixtures and un-migrated rows. A sitting created through the app always has an
+   * explicit `exam_cycles.sitting`, which `sittingOfCycle` prefers.
+   */
+  private legacySittingFromName(name: string): SittingKey {
     return /\b(jan|feb|mar|apr)/i.test(name) ? "february" : "may";
+  }
+
+  /** The sitting slot of a cycle: the STORED period, never a guess from its name. */
+  private sittingOfCycle(c: CycleSummary): SittingKey {
+    return c.sitting ?? this.legacySittingFromName(c.name);
+  }
+
+  /** The year label of a cycle: the stored exam_years.name, else the name's 4-digit year. */
+  private yearLabelOf(c: CycleSummary): string {
+    return c.yearName ?? this.yearOf(c.name);
   }
 
   private sittingRefFrom(c: CycleSummary, sitting: SittingKey): SittingRef {
@@ -1149,8 +1169,8 @@ export class InMemoryDataProvider implements DataProvider {
     >();
     const primaryId = this.primaryTestCentre().id;
     for (const c of this.listCycles()) {
-      const year = this.yearOf(c.name);
-      const sitting = this.sittingOf(c.name);
+      const year = this.yearLabelOf(c);
+      const sitting = this.sittingOfCycle(c);
       const centre = this.centreFor(c.testCentreId);
       // GROUPING KEY — always id-anchored for live data so a route param is never a
       // name label:
@@ -5836,7 +5856,7 @@ export class InMemoryDataProvider implements DataProvider {
     const subjects = [...subjectsSeen.values()];
 
     const liveCentre = this.centreFor(this.effectiveCentreId(liveId, this.seed.liveCycle.testCentreId)).name;
-    const liveYearRaw = this.yearOf(this.seed.liveCycle.name);
+    const liveYearRaw = this.seed.liveCycle.yearName ?? this.yearOf(this.seed.liveCycle.name);
     const liveYear = /^\d{4}$/.test(liveYearRaw) ? Number(liveYearRaw) : 2026;
 
     const cells: OACell[] = [];
@@ -6018,6 +6038,21 @@ export class InMemoryDataProvider implements DataProvider {
       // 0010 — the sitting (and its year) is created under a chosen test centre.
       testCentres: active.map((c) => ({ ...c })),
       defaultTestCentreId: active[0]?.id ?? null,
+      defaultSitting: "may",
+      // Existing REAL exam years (a year row exists only on live data) the new
+      // sitting can attach to, with the periods each already has.
+      // (A workspace with no centres has no years either — and no primary centre to
+      // group them under — so skip the grouping rather than crash the create form.)
+      years: (this.testCentres.length === 0 ? [] : this.listYears())
+        .filter((y) => !!y.examYearId)
+        .map((y) => ({
+          examYearId: y.examYearId!,
+          name: y.name,
+          testCentreId: y.testCentreId,
+          takenSittings: ([y.february, y.may] as const)
+            .filter((slot) => slot.started)
+            .map((slot) => slot.sitting),
+        })),
     };
   }
 
@@ -6030,7 +6065,7 @@ export class InMemoryDataProvider implements DataProvider {
     this.audit(
       "cycle",
       "Created cycle",
-      `${centre.name} · ${input.name} — ${input.assessmentIds.length} assessments`,
+      `${centre.name} · ${input.name} [${sittingLabel(input.sitting)}${input.yearName ? ` ${input.yearName}` : ""}] — ${input.assessmentIds.length} assessments`,
       this.seed.liveCycle.id,
     );
     this.bump();
@@ -6104,7 +6139,7 @@ export class InMemoryDataProvider implements DataProvider {
     // cycle's CycleSummary.testCentreId is already the EFFECTIVE id, so matching
     // on the year's current centre selects exactly this year's cycles.
     for (const c of this.listCycles()) {
-      if (this.yearOf(c.name) === year.name && c.testCentreId === year.testCentreId) {
+      if (this.yearLabelOf(c) === year.name && c.testCentreId === year.testCentreId) {
         this.cycleCentreOverride.set(c.id, testCentreId);
       }
     }

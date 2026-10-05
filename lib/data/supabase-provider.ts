@@ -45,6 +45,13 @@ import {
 } from "./supabase-hydrate";
 import { computeOverallAnalytics, overallAwardBands, overallPLevels } from "./overall-analytics";
 import { catalogNamesFor } from "./subject-catalog";
+import {
+  SITTING_REGION,
+  buildCreateCycleArgs,
+  findPeriodConflict,
+  normalizeYearName,
+  sittingLabel,
+} from "./create-cycle";
 import type { Seed } from "./seed-types";
 import type { GradingConfig } from "./grading";
 import type { ElementLabelsConfig } from "./element-labels";
@@ -1113,18 +1120,32 @@ export class SupabaseDataProvider implements DataProvider {
   // SECURITY DEFINER call, then re-hydrates from the database (which loads the
   // newly-created cycle as the live one) and returns its REAL id so the caller
   // can navigate straight to it.
+  //
+  // The PERIOD (february | may) and the YEAR are explicit inputs, sent as
+  // `p_sitting` / `p_year_id` — never inferred from the sitting's name. An existing
+  // year is attached by id; a new year is find-or-created first through
+  // `create_exam_year` (centre-aware, idempotent) so its id can be passed too.
   async createCycle(input: CreateCycleInput): Promise<string> {
-    const p_assessments = catalogNamesFor(input.assessmentIds).map((name) => ({ name }));
-    const { data, error } = await this.rpcData<string>("create_cycle_with_assessments", {
-      p_name: input.name,
-      p_region: "eu-west",
-      p_assessments,
-      // 0010 — create the sitting (and find-or-create its year) under the centre.
-      p_test_centre_id: input.testCentreId || null,
-      // 0031 — the chosen exam date. The picker emits an ISO `yyyy-mm-dd`; pass a
-      // non-ISO/empty value as null so the `date` column never rejects the insert.
-      p_sitting_date: /^\d{4}-\d{2}-\d{2}$/.test(input.sittingDate ?? "") ? input.sittingDate : null,
-    });
+    const examYearId = await this.resolveExamYearId(input);
+
+    // One sitting per (year, period): refuse a second February/May in the same year
+    // up front with a readable message (the DB constraint comes with migration 0050).
+    const conflict = findPeriodConflict(this.inner.listYears(), examYearId, input.sitting);
+    if (conflict) {
+      throw new Error(
+        `A ${sittingLabel(input.sitting)} sitting already exists for ${conflict.yearName} at ${conflict.centreName}` +
+          (conflict.cycleName ? ` (“${conflict.cycleName}”)` : "") + ".",
+      );
+    }
+
+    const { data, error } = await this.rpcData<string>(
+      "create_cycle_with_assessments",
+      buildCreateCycleArgs(
+        input,
+        examYearId,
+        catalogNamesFor(input.assessmentIds),
+      ),
+    );
     if (error || !data) {
       // eslint-disable-next-line no-console
       console.error("create_cycle_with_assessments failed:", error?.message ?? "no id returned");
@@ -1132,5 +1153,31 @@ export class SupabaseDataProvider implements DataProvider {
     }
     await this.rehydrate();
     return data;
+  }
+
+  /** The exam_years.id a new sitting attaches to: the chosen existing year, or the
+   *  year find-or-created for the typed 4-digit name under the chosen centre. */
+  private async resolveExamYearId(input: CreateCycleInput): Promise<string> {
+    if (input.examYearId) {
+      // The year decides the centre; refuse a mismatch rather than silently moving it.
+      const known = this.inner.listYears().find((y) => y.examYearId === input.examYearId);
+      if (known && input.testCentreId && known.testCentreId !== input.testCentreId) {
+        throw new Error(`Year ${known.name} belongs to ${known.testCentreName}, not the chosen centre.`);
+      }
+      return input.examYearId;
+    }
+    const yearName = normalizeYearName(input.yearName);
+    if (!yearName) throw new Error("Choose an existing year or enter a 4-digit year (e.g. 2026).");
+    const { data, error } = await this.rpcData<{ id: string }>("create_exam_year", {
+      p_name: yearName,
+      p_region: SITTING_REGION,
+      p_test_centre_id: input.testCentreId || null,
+    });
+    if (error || !data?.id) {
+      // eslint-disable-next-line no-console
+      console.error("create_exam_year failed:", error?.message ?? "no year returned");
+      throw new Error(error?.message ?? `Could not create the ${yearName} year.`);
+    }
+    return data.id;
   }
 }

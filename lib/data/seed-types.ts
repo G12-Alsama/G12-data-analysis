@@ -11,7 +11,7 @@
 import type { QualityRating } from "@/lib/engine";
 import type { AssessmentDiagnostics } from "@/lib/diagnostics";
 import type { ValidationReport } from "@/lib/ingest/types";
-import type { TestCentreSummary } from "./types";
+import type { SittingKey, TestCentreSummary } from "./types";
 
 /** One multiple-choice answer option for a question (from the QM export). */
 export interface SeedAnswerOption {
@@ -177,6 +177,10 @@ export interface SeedLiveCycle {
    *  Absent in the demo seed (no database year rows); carried so the Years list
    *  can target the year-reassignment RPC. */
   yearId?: string;
+  /** 0005 — the stored period (exam_cycles.sitting). Absent for demo fixtures. */
+  sitting?: SittingKey;
+  /** The stored exam_years.name for `yearId` (live data only). */
+  yearName?: string;
   startedAt: string;
   lastActivity: string;
   stageIndex: number;
@@ -225,6 +229,10 @@ export interface SeedPriorCycle {
   testCentreId?: string;
   /** 0013 — the real exam_years.id this sitting groups under (live data only). */
   yearId?: string;
+  /** 0005 — the stored period (exam_cycles.sitting). Absent for demo fixtures. */
+  sitting?: SittingKey;
+  /** The stored exam_years.name for `yearId` (live data only). */
+  yearName?: string;
   stageIndex: number;
   stepsDone: number;
   participants: number;

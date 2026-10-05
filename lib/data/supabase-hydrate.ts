@@ -300,6 +300,9 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
   for (const y of yearRows) if (y.test_centre_id) yearToCentre.set(y.id, y.test_centre_id);
   const centreOfCycle = (c: ExamCycleRow): string | undefined =>
     c.year_id ? yearToCentre.get(c.year_id) : undefined;
+  const yearNameById = new Map(yearRows.map((y) => [y.id, y.name] as const));
+  const yearNameOf = (c: ExamCycleRow): string | undefined =>
+    c.year_id ? yearNameById.get(c.year_id) : undefined;
   const seedTestCentres = testCentreRows.map((t) => ({
     id: t.id,
     name: t.name,
@@ -673,6 +676,8 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
     name: c.name,
     testCentreId: centreOfCycle(c),
     yearId: c.year_id ?? undefined,
+    sitting: c.sitting ?? undefined,
+    yearName: yearNameOf(c),
     stageIndex: 6,
     stepsDone: 7,
     participants: 0,
@@ -692,6 +697,9 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
       region: live.region,
       testCentreId: centreOfCycle(live),
       yearId: live.year_id ?? undefined,
+      // The STORED period + year name — the Years UI slots by these, never by name.
+      sitting: live.sitting ?? undefined,
+      yearName: yearNameOf(live),
       startedAt: new Date(live.created_at).toLocaleDateString(),
       lastActivity: new Date(live.updated_at).toLocaleString(),
       stageIndex: stageIndexFromStatus(live.status),

@@ -100,6 +100,12 @@ export interface CycleSummary {
    *  undefined in the demo seed, which has no database year rows). Used to target
    *  the year-reassignment RPC. */
   examYearId?: string;
+  /** 0005 — the STORED period of this sitting (exam_cycles.sitting). The Years UI
+   *  slots a sitting by this, not by guessing from its name. Absent only for demo
+   *  fixtures / un-migrated rows, which fall back to the legacy name inference. */
+  sitting?: SittingKey;
+  /** The stored exam_years.name this sitting belongs to (live data only). */
+  yearName?: string;
 }
 
 /** Which sitting of a year. "overall" is the derived best-of-two view. */
@@ -1802,6 +1808,19 @@ export interface NewCycleModel {
   testCentres: TestCentreSummary[];
   /** Pre-selected centre (first active centre), or null when none exist yet. */
   defaultTestCentreId: string | null;
+  /** Pre-selected period. */
+  defaultSitting: SittingKey;
+  /** Existing exam years the sitting can be attached to (real DB years only). */
+  years: NewCycleYearOption[];
+}
+
+/** An existing exam year offered in the create-sitting form. */
+export interface NewCycleYearOption {
+  examYearId: string;
+  name: string;
+  testCentreId: string;
+  /** Periods that already have a sitting in this year (can't be created twice). */
+  takenSittings: SittingKey[];
 }
 
 export interface CreateCycleInput {
@@ -1810,6 +1829,12 @@ export interface CreateCycleInput {
   assessmentIds: string[];
   /** 0010 — the test centre to create this sitting (and its year) under. */
   testCentreId: string;
+  /** The period of this sitting — an explicit choice, never inferred from `name`. */
+  sitting: SittingKey;
+  /** Attach to this existing exam year (exam_years.id)… */
+  examYearId?: string;
+  /** …or create/find the year with this name (a 4-digit year) under the centre. */
+  yearName?: string;
 }
 
 // --- Per-student technical exclusions (Student review step) ------------------

@@ -117,7 +117,7 @@ describe("test centres — scoping & labelling", () => {
 
   it("createCycle records the chosen centre in the audit trail", () => {
     const p = new InMemoryDataProvider(twoCentreSeed());
-    return p.createCycle({ name: "May 2026", sittingDate: "14 May 2026", assessmentIds: [], testCentreId: "tc-b" }).then(() => {
+    return p.createCycle({ name: "May 2026", sittingDate: "14 May 2026", assessmentIds: [], testCentreId: "tc-b", sitting: "may", yearName: "2026" }).then(() => {
       const entry = p.getAuditLog(null, "all", "").entries.find((e) => /created cycle/i.test(e.action) && !e.seeded);
       expect(entry).toBeDefined();
       expect(entry!.detail).toContain("Shatila 2");
