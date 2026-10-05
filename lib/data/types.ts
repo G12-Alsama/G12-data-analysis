@@ -135,6 +135,8 @@ export interface SittingRef {
   participants: number;
   assessments: number;
   lastActivity: string;
+  /** ISO date the sitting was held (exam_cycles.sitting_date); display only. */
+  sittingDate?: string;
   live: boolean;
   mock: boolean;
 }

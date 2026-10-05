@@ -30,6 +30,8 @@ export interface SittingSpec {
   subject?: string;
   /** Optional extra participant rows that sit nothing (e.g. staff). */
   staff?: string[];
+  /** exam_cycles.sitting_date (ISO date). */
+  date?: string;
 }
 
 const T0 = Date.parse("2026-01-01T00:00:00Z");
@@ -52,7 +54,7 @@ export function buildDb(specs: SittingSpec[], extra: Partial<MockDb> = {}): Mock
     const age = s.age ?? 10 + i * 10;
     db.exam_cycles!.push({
       id: s.id, name: s.name, status: s.status ?? "in_review", region: "eu-west",
-      year_id: YEAR, sitting: s.sitting, sitting_date: null,
+      year_id: YEAR, sitting: s.sitting, sitting_date: s.date ?? null,
       created_by: USER, created_at: iso(age), updated_at: iso(age),
     });
     const a = `a-${s.id}`;

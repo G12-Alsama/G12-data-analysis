@@ -21,6 +21,14 @@ import { PIPELINE, type SittingRef } from "@/lib/data/types";
 // more steps done than exist.
 const TOTAL_STEPS = PIPELINE.length;
 
+/** "2026-05-14" → "14 May 2026" (date-only: parsed as UTC so it never shifts a day). */
+function formatSittingDate(iso: string): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+}
+
 function SittingCard({ s }: { s: SittingRef }) {
   return (
     <Card style={{ padding: 20, display: "flex", flexDirection: "column", gap: 14, minHeight: 190 }}>
@@ -46,7 +54,10 @@ function SittingCard({ s }: { s: SittingRef }) {
 
       {s.started ? (
         <>
-          <div className="hf-sub">{s.cycleName}</div>
+          <div className="hf-sub">
+            {s.cycleName}
+            {s.sittingDate && <> · {formatSittingDate(s.sittingDate)}</>}
+          </div>
           <div style={{ display: "flex", gap: 22, marginTop: "auto" }}>
             <div>
               <div className="hf-mono" style={{ fontSize: 18, fontWeight: 700 }}>{s.participants.toLocaleString()}</div>

@@ -1262,6 +1262,7 @@ export class InMemoryDataProvider implements DataProvider {
       participants: c.participants,
       assessments: c.assessments,
       lastActivity: c.lastActivity,
+      sittingDate: c.sittingDate,
       live: c.live,
       mock: c.mock,
     };
@@ -1396,6 +1397,17 @@ export class InMemoryDataProvider implements DataProvider {
     });
   }
 
+  /** The Year page's Overall card text for LIVE data: only locked sittings count. */
+  private overallCardNote(y: { february: SittingRef; may: SittingRef }): string {
+    const parts = SITTING_ORDER.map((key) => {
+      const ref = y[key];
+      const label = periodLabel(key);
+      if (!ref.started) return `${label}: no sitting`;
+      return ref.locked ? `${label}: locked — counted` : `${label}: not counted yet — grades not locked`;
+    });
+    return `Overall counts only sittings whose grades are locked. ${parts.join(" · ")}.`;
+  }
+
   getYear(yearId: string): YearDetail | null {
     // Resolve on the canonical id (the real exam_years.id for live data), also
     // accepting the legacy derived label-key so any older link still opens.
@@ -1413,9 +1425,11 @@ export class InMemoryDataProvider implements DataProvider {
       may: y.may,
       overall: {
         ready,
-        note: ready
-          ? "Both sittings are locked — the Overall best-of-two rollup runs here."
-          : "Overall becomes available once both the February and May sittings are locked.",
+        note: this.hydrated
+          ? this.overallCardNote(y)
+          : ready
+            ? "Both sittings are locked — the Overall best-of-two rollup runs here."
+            : "Overall becomes available once both the February and May sittings are locked.",
       },
     };
   }
