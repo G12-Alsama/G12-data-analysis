@@ -167,6 +167,12 @@ export function buildLiveCycleData(
     for (const r of recs) {
       if (!itemSetMap.has(r.qmQuestionId)) itemSetMap.set(r.qmQuestionId, r.itemSet ?? null);
     }
+    // QuestionDescription per item (first occurrence) — same off-ItemMeta treatment:
+    // display/export-only, surfaced via `SeedItem.description`.
+    const descriptionMap = new Map<string, string | null>();
+    for (const r of recs) {
+      if (!descriptionMap.has(r.qmQuestionId)) descriptionMap.set(r.qmQuestionId, r.description ?? null);
+    }
 
     const responses: ResponseRecord[] = recs.map((r) => ({
       participantId: r.participantPseudonym,
@@ -197,7 +203,9 @@ export function buildLiveCycleData(
       const a = agg.get(m.itemId);
       return {
         id: m.itemId,
+        qmQuestionId: m.itemId,
         wording: m.wording ?? null,
+        description: descriptionMap.get(m.itemId) ?? null,
         major: m.majorElement ?? null,
         sub: m.subElement ?? null,
         demand: m.demandLevel ?? null,

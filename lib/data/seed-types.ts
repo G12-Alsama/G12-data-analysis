@@ -25,12 +25,20 @@ export interface SeedAnswerOption {
 
 export interface SeedItem {
   id: string;
+  /**
+   * QM's own `QuestionId` (e.g. 100002805825). Equals `id` on the live-ingest path
+   * (items are keyed by it there) but NOT on the DB-hydrate path, where `id` is the
+   * `items` row UUID and the QM id lives in `items.qm_question_id`. Optional — the
+   * demo seed leaves it absent (its `id` already is the QM id).
+   */
+  qmQuestionId?: string | null;
   wording: string | null;
   /**
    * The item's `QuestionDescription` (an internal code/label) and its
    * `QuestionParentQuestionWording` (the stimulus/parent passage shown above the
-   * question). Optional — only the generated demo seed carries these; live/DB-
-   * hydrated items leave them absent (same precedent as `options`).
+   * question). Optional. `description` is now also carried by live ingest and
+   * DB hydrate (migration 0048); `parentWording` is still demo-seed-only, like
+   * `options`. Existing cycles have no description until re-ingested.
    */
   description?: string | null;
   parentWording?: string | null;

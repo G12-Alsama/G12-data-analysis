@@ -504,7 +504,9 @@ export async function hydrate(supabase: DB): Promise<Hydrated | null> {
       const times = answered.map((r) => r.response_time).filter((t): t is number => t != null && Number.isFinite(t));
       return {
         id: it.id,
+        qmQuestionId: it.qm_question_id ?? null,
         wording: it.wording,
+        description: it.description ?? null,
         major: it.major_element,
         sub: it.sub_element,
         demand: it.demand_level,

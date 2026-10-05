@@ -48,9 +48,10 @@ export default function AssessmentHealthPage({ params }: { params: { cycleId: st
   const a = model.assessments[Math.min(active, model.assessments.length - 1)]!;
 
   // CSV = the reliability table (α with item k + participant n alongside);
-  // XLSX = three separate workbooks — Reliability, Speededness, Timing — each
-  // reconciled cell-by-cell against the team's original manual-analysis
-  // files, replacing the old single condensed "assessment health" export.
+  // XLSX = four separate workbooks — Reliability, Speededness, Timing and the
+  // per-item Speededness/Omission/Completion file — the first three reconciled
+  // cell-by-cell against the team's original manual-analysis files, replacing
+  // the old single condensed "assessment health" export.
   const exportCsv = () => {
     if (!reliability) return;
     const headers = ["Level", "Group", "Subject", "Items (k)", "Participants (n)", "Cronbach's Alpha", "Low items?", "Small sample?", "Note"];
@@ -65,6 +66,17 @@ export default function AssessmentHealthPage({ params }: { params: { cycleId: st
     const reliabilityWb = exp.buildReliabilityWorkbook({ cycleName, reliability });
     const speedednessWb = exp.buildSpeedednessWorkbook({ cycleName, reliability, diagnostics: model });
     const timingWb = exp.buildTimingWorkbook({ cycleName, reliability, diagnostics: model });
+    // 4th file: per-item Speededness / Omission / Completion. Built separately so
+    // a problem with it (e.g. no scored items) can never block the other three.
+    const perItemSource = provider.getPerItemSource(cycleId);
+    let perItemWb: ReturnType<typeof exp.buildPerItemWorkbook> | null = null;
+    let perItemError: string | null = null;
+    try {
+      if (perItemSource) perItemWb = exp.buildPerItemWorkbook({ cycleName, source: perItemSource });
+      else perItemError = "No per-item data for this sitting.";
+    } catch (e) {
+      perItemError = e instanceof Error ? e.message : String(e);
+    }
     const [reliabilityBytes, speedednessBytes, timingBytes] = await Promise.all([
       reliabilityWb.bytes(),
       speedednessWb.bytes(),
@@ -73,7 +85,21 @@ export default function AssessmentHealthPage({ params }: { params: { cycleId: st
     downloadXlsxBuffer(`mcq_reliability_internal_consistency_${suffix}.xlsx`, reliabilityBytes);
     downloadXlsxBuffer(`speededness_omission_rate_${suffix}.xlsx`, speedednessBytes);
     downloadXlsxBuffer(`timing_performance_analysis_${suffix}.xlsx`, timingBytes);
-    provider.recordExport(cycleId, "Assessment health: Reliability, Speededness & Timing (Excel, 3 files)");
+    const notices: string[] = [];
+    if (perItemWb) {
+      downloadXlsxBuffer(`per_item_speededness_omission_completion_${suffix}.xlsx`, await perItemWb.bytes());
+      notices.push(...perItemWb.warnings);
+    } else if (perItemError) {
+      notices.push(`The per-item Speededness / Omission / Completion file was not produced: ${perItemError}`);
+    }
+    provider.recordExport(
+      cycleId,
+      perItemWb
+        ? "Assessment health: Reliability, Speededness, Timing & Per-item (Excel, 4 files)"
+        : "Assessment health: Reliability, Speededness & Timing (Excel, 3 files)",
+    );
+    // Surface data-quality notes (e.g. items missing QuestionPresentedNumber) — never silent.
+    if (notices.length > 0) window.alert(notices.join("\n\n"));
   };
 
   const whole = a.whole.speeded;

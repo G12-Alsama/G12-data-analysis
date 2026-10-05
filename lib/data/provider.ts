@@ -18,6 +18,7 @@
 
 import type { AssembleScoreAnalysisArgs, AssembleItemAnalysisArgs } from "@/lib/export/types";
 import type { CleanResponse, ValidationReport } from "@/lib/ingest/types";
+import type { PerItemSource } from "@/lib/data/per-item-source";
 import type { CanonicalModel } from "@/lib/ingest/qm";
 
 /**
@@ -515,6 +516,12 @@ export interface DataProvider {
   getDiagnostics(cycleId: string): DiagnosticsModel | null;
   /** Cronbach's-α reliability at every construct grouping (read-only, additive). */
   getReliability(cycleId: string): ReliabilityModel | null;
+  /**
+   * Raw per-item source (items + responses + participant drop-set per assessment)
+   * for the Per-Item Speededness / Omission / Completion export. Read-only and
+   * additive — see lib/data/per-item-source.ts. Null for a non-live cycle.
+   */
+  getPerItemSource(cycleId: string): PerItemSource | null;
 
   // distinction safeguard (grading stage)
   confirmDistinctionCaps(cycleId: string): void;
