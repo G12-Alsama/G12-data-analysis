@@ -14,7 +14,7 @@
  *    mapping) AND the operator explicitly confirms on this screen. Real issuance
  *    is never silently enabled — see `IssuanceSignOff` in the documents model.
  */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useProvider, useProviderData } from "@/lib/data/context";
 import { H } from "@/lib/ui/tokens";
@@ -41,6 +41,10 @@ export default function OverallDocumentsPage({ params }: { params: { yearId: str
   const provider = useProvider();
   const year = useProviderData((p) => p.getYear(yearId), [yearId]);
   const model = useProviderData((p) => p.getOverallDocuments(yearId), [yearId]);
+  // The Overall counts the year's LOCKED sittings; make sure their data is loaded.
+  useEffect(() => {
+    void provider.ensureYearLoaded(yearId);
+  }, [provider, yearId]);
 
   const [selected, setSelected] = useState<Set<DocKind>>(() => new Set<DocKind>(["certificate"]));
   const [step, setStep] = useState<"config" | "generating" | "results">("config");

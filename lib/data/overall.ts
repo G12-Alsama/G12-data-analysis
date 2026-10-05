@@ -26,6 +26,7 @@
 import { deriveAward } from "@/lib/engine";
 import type {
   AssessmentRef,
+  GradeCell,
   GradeMatrixRow,
   GradesModel,
   OverallGradeCell,
@@ -146,6 +147,63 @@ export function rollupOverall(args: RollupArgs): OverallGradeRow[] {
     });
   }
   return rows;
+}
+
+export interface OrderedRollupArgs {
+  /**
+   * The sittings' grades OLDEST → NEWEST (the order of `SITTING_ORDER`); a sitting that
+   * is absent or not counted is `null`. Ties go to the NEWEST sitting.
+   */
+  sittings: readonly (GradesModel | null)[];
+  assessments: AssessmentRef[];
+  performanceLevels: readonly string[];
+  awardLevels: readonly string[];
+  starMap: Record<string, string>;
+}
+
+/**
+ * `rollupOverall` for sittings supplied as an ordered list, so callers never name the
+ * periods. THE one place that maps an ordered list onto the rollup's two slots: today the
+ * rollup compares exactly two sittings (and `OverallGradeCell` records `februaryLevel` /
+ * `mayLevel`), so more than two is not yet representable and is refused loudly rather
+ * than silently dropped. Phase 2 generalises the rollup to N sittings.
+ */
+export function rollupOrdered(args: OrderedRollupArgs): OverallGradeRow[] {
+  const { sittings, ...rest } = args;
+  if (sittings.length > 2) {
+    throw new Error(`rollupOrdered: ${sittings.length} sittings given, but the rollup compares at most two (Phase 2 generalises).`);
+  }
+  const [older = null, newer = null] = sittings;
+  return rollupOverall({ ...rest, february: older, may: newer });
+}
+
+/**
+ * Re-key a sitting's grades by a canonical SUBJECT key instead of its assessment id.
+ *
+ * Every sitting has its own assessment rows (own uuids), so the same subject in two
+ * sittings has two different ids and rolling them up by id would never line the subjects
+ * up. `keyOf` supplies the stable key (the subject, not the row). The returned model's
+ * assessments carry the key as their `id`; nothing else about them changes.
+ */
+export function canonicalizeSubjects(model: GradesModel, keyOf: (a: AssessmentRef) => string): GradesModel {
+  const keyByAssessment = new Map(model.assessments.map((a) => [a.id, keyOf(a)] as const));
+  const seen = new Set<string>();
+  const assessments: AssessmentRef[] = [];
+  for (const a of model.assessments) {
+    const key = keyByAssessment.get(a.id)!;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    assessments.push({ ...a, id: key });
+  }
+  const rows: GradeMatrixRow[] = model.rows.map((r) => {
+    const grades: Record<string, GradeCell> = {};
+    for (const [assessmentId, cell] of Object.entries(r.grades)) {
+      const key = keyByAssessment.get(assessmentId);
+      if (key) grades[key] = cell;
+    }
+    return { ...r, grades };
+  });
+  return { ...model, assessments, rows };
 }
 
 export interface ReconcileArgs {

@@ -1220,6 +1220,27 @@ export interface OverallGradeRow {
   inMay: boolean;
 }
 
+/** Why a sitting does / doesn't contribute to an Overall. */
+export type OverallSittingStatus =
+  | "counted" //     grades locked and loaded — in the rollup
+  | "not_locked" //  started, but grades not locked yet — NOT counted
+  | "not_started" // no sitting in this period
+  | "loading" //     locked, but its data is still being loaded
+  | "no_data"; //    locked, but it has no grades to roll up
+
+export interface OverallSittingInfo {
+  key: SittingKey;
+  /** Period label, e.g. "February". */
+  label: string;
+  cycleId: string | null;
+  cycleName: string | null;
+  started: boolean;
+  locked: boolean;
+  status: OverallSittingStatus;
+  /** Human reading of `status`, e.g. "Not counted yet: grades not locked". */
+  note: string;
+}
+
 export interface OverallGradesModel {
   yearId: string;
   yearName: string;
@@ -1233,6 +1254,13 @@ export interface OverallGradesModel {
   performanceLevels: string[];
   february: { cycleId: string | null; cycleName: string | null } | null;
   may: { cycleId: string | null; cycleName: string | null } | null;
+  /**
+   * Every sitting of the year in period order, with whether it COUNTS toward this
+   * Overall. Only sittings whose grades are locked count; an unlocked one is listed with
+   * its reason ("not counted yet: grades not locked") so the page can say so. Absent only
+   * in the in-memory demo.
+   */
+  sittings?: OverallSittingInfo[];
   /** True when both sittings are locked (signed off) — Overall is final / certifiable. */
   ready: boolean;
   /** Alias of `ready`: certificates issue only from a signed-off Overall. */

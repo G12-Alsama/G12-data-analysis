@@ -44,7 +44,8 @@ import {
   type ResolvedRoleActions,
   type Role as RoleModel,
 } from "@/lib/auth/actions";
-import { rollupOverall, overallAwardsReconcile } from "./overall";
+import { rollupOverall, rollupOrdered, canonicalizeSubjects, overallAwardsReconcile } from "./overall";
+import { SITTING_ORDER, periodLabel } from "./periods";
 import {
   computeOverallAnalytics,
   overallAwardBands,
@@ -208,6 +209,8 @@ import {
   type IncidentReviewModel,
   type IncidentReviewStudent,
   type CycleLoadState,
+  type OverallSittingInfo,
+  type OverallSittingStatus,
 } from "./types";
 import {
   validateIncidentCode,
@@ -2665,23 +2668,110 @@ export class InMemoryDataProvider implements DataProvider {
     };
   }
 
-  // ── Overall (best-of-two across the year's two sittings) ──────────────────
+  // ── Overall (best-of across the year's sittings) ─────────────────────────
   /**
-   * The year's Overall view: per student, per subject, the HIGHER award of the
-   * two sittings (by level rank), plus the derived overall award. Pure
-   * aggregation over each sitting's signed-off `GradesModel` (see
-   * `lib/data/overall.ts`) — no scoring, cut-score, or safeguard work runs here.
+   * The year's Overall view: per student, per subject, the BEST performance level across
+   * the year's sittings (by level rank; ties go to the LATEST sitting), plus the derived
+   * overall award. Pure aggregation over each sitting's `GradesModel` (see
+   * `lib/data/overall.ts`) — no scoring, cut-score, or safeguard work runs here. Students
+   * are matched across sittings by Student ID (qm_participant_id).
    *
-   * In this build only the live (May) sitting carries real grades, and live
-   * Supabase is unreachable, so the February baseline is synthesized from the May
-   * cohort (clearly flagged `demo: true`) to give the rollup two sittings to
-   * compare. With real two-sitting data, both sittings' `getGrades` feed the same
-   * `rollupOverall` unchanged.
+   * Two modes:
+   *  - LIVE data (`hydrated`): each sitting's real grades, read from the provider that
+   *    holds it; ONLY sittings whose grades are LOCKED count; subjects are matched across
+   *    sittings by canonical subject key (each sitting has its own assessment rows);
+   *    nothing is ever fabricated.
+   *  - The in-memory DEMO (no database): the legacy provisional view, where only the live
+   *    (May) sitting carries grades and the February baseline is synthesized from it
+   *    (clearly flagged `demo: true`).
+   * The year may be addressed by either id form (`y.id` or the real exam_years id).
    */
   getOverallGrades(yearId: string): OverallGradesModel | null {
-    const year = this.buildYears().find((y) => y.id === yearId);
+    const year = this.buildYears().find((y) => y.id === yearId || y.examYearId === yearId);
     if (!year) return null;
+    return this.hydrated ? this.overallFromSittings(year) : this.overallDemo(year);
+  }
 
+  /** LIVE Overall: the year's locked sittings, real data only. */
+  private overallFromSittings(year: ReturnType<InMemoryDataProvider["buildYears"]>[number]): OverallGradesModel {
+    const infos: OverallSittingInfo[] = [];
+    const counted: (GradesModel | null)[] = [];
+    for (const key of SITTING_ORDER) {
+      const ref = year[key];
+      const label = periodLabel(key);
+      let status: OverallSittingStatus;
+      let grades: GradesModel | null = null;
+      if (!ref.started || !ref.cycleId) status = "not_started";
+      else if (!ref.locked) status = "not_locked";
+      else {
+        grades = this.gradesOf(ref.cycleId);
+        status = grades ? "counted" : this.cycleResolver?.(ref.cycleId) ? "no_data" : "loading";
+      }
+      const note: Record<OverallSittingStatus, string> = {
+        counted: `${label} sitting counted — grades locked`,
+        not_locked: `${label}: not counted yet — grades not locked`,
+        not_started: `${label}: no sitting`,
+        loading: `${label}: loading…`,
+        no_data: `${label}: locked, but it has no grades to count`,
+      };
+      infos.push({
+        key, label, cycleId: ref.cycleId, cycleName: ref.cycleName, started: ref.started,
+        locked: ref.started && ref.locked, status, note: note[status],
+      });
+      counted.push(
+        grades
+          ? canonicalizeSubjects(grades, (a) => subjectKeyOf(a.name))
+          : null,
+      );
+    }
+
+    // Subjects: the union across counted sittings, newest sitting's order first.
+    const assessments: AssessmentRef[] = [];
+    for (const g of [...counted].reverse()) {
+      for (const a of g?.assessments ?? []) if (!assessments.some((x) => x.id === a.id)) assessments.push(a);
+    }
+
+    const perfLevels = this.grading.performanceLevels;
+    const awardLevels = this.grading.awardLevels;
+    const starMap = this.grading.starMap;
+    const rows = rollupOrdered({ sittings: counted, assessments, performanceLevels: perfLevels, awardLevels, starMap });
+
+    const distCounts = new Map<string, number>();
+    for (const r of rows) distCounts.set(r.award, (distCounts.get(r.award) ?? 0) + 1);
+    const distribution = awardLevels.map((level) => ({ level, count: distCounts.get(level) ?? 0 }));
+
+    // "Ready" (final / certifiable) = every period has a sitting and every one is locked.
+    const ready = infos.every((i) => i.started && i.locked);
+    const waiting = infos.filter((i) => i.status === "not_locked" || i.status === "not_started");
+    const note = ready
+      ? "All sittings are signed off — this Overall is final and certificates issue from it."
+      : infos.some((i) => i.status === "counted")
+        ? `Overall counts only sittings whose grades are locked. ${waiting.map((w) => w.note).join(" · ")}.`
+        : `No sitting is locked yet, so nothing is counted. ${waiting.map((w) => w.note).join(" · ")}.`;
+
+    const slot = (i: OverallSittingInfo) => ({ cycleId: i.cycleId, cycleName: i.cycleName });
+    const [first, second] = infos;
+    return {
+      yearId: year.id,
+      yearName: year.name,
+      assessments,
+      rows,
+      distribution,
+      awardLevels,
+      starMap,
+      performanceLevels: perfLevels,
+      february: first ? slot(first) : null,
+      may: second ? slot(second) : null,
+      sittings: infos,
+      ready,
+      locked: ready,
+      demo: false,
+      note,
+    };
+  }
+
+  /** The in-memory DEMO Overall (legacy provisional view with a synthesized baseline). */
+  private overallDemo(year: ReturnType<InMemoryDataProvider["buildYears"]>[number]): OverallGradesModel | null {
     const mayGrades = year.may.cycleId ? this.gradesOf(year.may.cycleId) : null;
     const realFeb = year.february.cycleId ? this.gradesOf(year.february.cycleId) : null;
     // Demo February baseline (only when there's a real May sitting but no real

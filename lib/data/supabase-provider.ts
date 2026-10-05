@@ -723,9 +723,19 @@ export class SupabaseDataProvider implements DataProvider {
       .map((l) => l.id);
   }
 
-  /** Load the sittings an Overall needs: the year's sittings (in this step, all of them). */
+  /**
+   * Load the sittings an Overall needs: the year's LOCKED sittings (only those count
+   * toward it, so an unlocked sitting's data is never fetched for the rollup). Lock state
+   * is read from the directory, so a sitting locked or re-opened a moment ago is already
+   * reflected.
+   */
   async ensureYearLoaded(yearId: string): Promise<void> {
-    await Promise.all(this.cycleIdsOfYear(yearId).map((id) => this.ensureCycleLoaded(id)));
+    const lockedNow = new Set(this.dir.listCycles().filter((c) => c.locked).map((c) => c.id));
+    await Promise.all(
+      this.cycleIdsOfYear(yearId)
+        .filter((id) => lockedNow.has(id))
+        .map((id) => this.ensureCycleLoaded(id)),
+    );
   }
 
   // ── writes (optimistic local + SECURITY DEFINER RPC) ────────────────────

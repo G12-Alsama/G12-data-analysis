@@ -13,8 +13,9 @@
  *
  * Certificates issue from this Overall (see ./overall/documents).
  */
+import { useEffect } from "react";
 import Link from "next/link";
-import { useProviderData } from "@/lib/data/context";
+import { useProvider, useProviderData } from "@/lib/data/context";
 import { H } from "@/lib/ui/tokens";
 import { Shell } from "@/components/shell/Shell";
 import { Button, Card, Badge } from "@/components/ui/primitives";
@@ -22,7 +23,7 @@ import { Icon, Mark } from "@/components/ui/icons";
 import { MiniGradeBars } from "@/components/ui/charts";
 import { StepIntro } from "@/components/ui/StepIntro";
 import { AWARD_SHORT } from "@/lib/data/grading";
-import type { OverallGradeCell } from "@/lib/data/types";
+import type { OverallGradeCell, OverallSittingInfo } from "@/lib/data/types";
 
 /** Plain subject-name column header, matching the Grades screen. */
 function subjectHeader(shortName: string): string {
@@ -119,9 +120,51 @@ function AwardBadge({ award }: { award: string }) {
   );
 }
 
+/**
+ * Which of the year's sittings count toward this Overall. Only sittings whose grades are
+ * LOCKED count; an unlocked one is shown here — with why — instead of silently ignored.
+ */
+function SittingsCounted({ sittings }: { sittings: OverallSittingInfo[] }) {
+  return (
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} aria-label="Sittings counted in this Overall">
+      {sittings.map((s) => {
+        const counted = s.status === "counted";
+        const waiting = s.status === "not_locked";
+        return (
+          <span
+            key={s.key}
+            title={s.cycleName ?? s.label}
+            data-status={s.status}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              padding: "3px 10px",
+              borderRadius: 999,
+              fontSize: 11.5,
+              fontWeight: 600,
+              border: `1px solid ${H.line2}`,
+              background: counted ? H.goodSoft : waiting ? H.warnSoft : H.tint,
+              color: counted ? H.good : waiting ? H.warn : H.ink2,
+            }}
+          >
+            {counted ? <Icon name="lock" size={11} color={H.good} /> : null}
+            {s.note}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function YearOverallPage({ params }: { params: { yearId: string } }) {
+  const provider = useProvider();
   const year = useProviderData((p) => p.getYear(params.yearId), [params.yearId]);
   const model = useProviderData((p) => p.getOverallGrades(params.yearId), [params.yearId]);
+  // Overall counts the year's LOCKED sittings: make sure their data is loaded.
+  useEffect(() => {
+    void provider.ensureYearLoaded(params.yearId);
+  }, [provider, params.yearId]);
 
   if (!year) {
     return (
@@ -172,6 +215,8 @@ export default function YearOverallPage({ params }: { params: { yearId: string }
           )}
         </div>
 
+        {model?.sittings && <SittingsCounted sittings={model.sittings} />}
+
         <div className="hf-sub" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <span>
             Best of two by <strong>award level</strong> (not raw score), per student per subject. The <span style={{ color: H.pink, fontWeight: 700 }}>Feb</span>/<span style={{ color: H.pink, fontWeight: 700 }}>May</span> tag shows which sitting each result came from; the overall award is derived from the best-of-two levels.
@@ -189,10 +234,10 @@ export default function YearOverallPage({ params }: { params: { yearId: string }
           </Card>
         )}
 
-        {!model ? (
+        {!model || model.rows.length === 0 ? (
           <Card style={{ padding: 24, maxWidth: 640 }}>
             <div style={{ fontWeight: 700, fontSize: 15 }}>No results to roll up yet</div>
-            <div className="hf-sub" style={{ marginTop: 8 }}>{year.overall.note}</div>
+            <div className="hf-sub" style={{ marginTop: 8 }}>{model?.note ?? year.overall.note}</div>
           </Card>
         ) : (
           <div className="hf-card" style={{ overflow: "auto", flex: 1, minWidth: 0 }}>
