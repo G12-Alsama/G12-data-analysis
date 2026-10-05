@@ -64,9 +64,11 @@ SupabaseDataProvider
   compute every read-model from a `Seed`. It is constructed with the shared
   `WorkspaceState`, so its workspace reads/writes go to the shared object.
 * Routing lives in `SupabaseDataProvider`: every cycle-scoped call is routed to
-  `slots.get(cycleId).provider`. The 29 `cycleId !== liveCycle.id` guards in the
-  in-memory provider became one `cycleData(cycleId)` lookup (a provider that hosts a
-  cycle answers for it, any other id is "not hosted here").
+  `slots.get(cycleId).provider`. The 31 `cycleId !== liveCycle.id` guards in the
+  in-memory provider became one `hostsCycle(cycleId)` lookup (a provider answers for the
+  one cycle it hosts; any other id is "not hosted here"). An `InMemoryDataProvider` is
+  therefore still *single-cycle by construction* — what changed is that nothing above it
+  assumes there is only one.
 * The **directory** instance hosts no cycle (its `liveCycle` is an empty placeholder
   that never appears in lists). Its `priorCycles` are the light summaries of every
   real cycle (`mock: false`, real lock state, real counts). It answers `listCycles`,
@@ -83,6 +85,10 @@ SupabaseDataProvider
 2. **Cycle load** (`hydrateCycle(cycleId)`): the full per-cycle read that `hydrate()`
    used to do for the newest cycle, unchanged in content (so its integrity guards and
    the 15→6 paging fix still apply), minus the workspace tables.
+   The replay runs inside `replayPersisted`: permission gates are bypassed and no audit
+   entries are written, because loading stored state is not a decision the current user
+   is making. (Replaying through the gated mutators silently dropped every stored
+   decision for a read-only viewer, and wrote phantom audit rows for everyone.)
 3. **Lazy**: a cycle loads only when something asks for it — the cycle layout calls
    `ensureCycleLoaded(cycleId)` on mount, and Overall calls `ensureYearLoaded(yearId)`
    (which loads only the year's **locked** sittings).
@@ -146,3 +152,10 @@ are unchanged and are the remaining two-slot coupling.
   sittings a user actually opens in one session.
 * The directory shares the audit list but not any cycle's decision state; the audit
   page is still session-local (there is no audit read).
+
+## Measured (synthetic, in-process — no network time)
+
+* Sign-in load: **13 queries over 11 small tables**; no fact table.
+* Opening a sitting: **20 queries**; a 37,500-response sitting (250 students × 5 subjects
+  × 30 items) took ≈ 1 s CPU and retained ≈ 3.5 MB (≈ 95 bytes per response).
+* `getGrades` for that sitting: ≈ 175 ms (recomputed on read, as before).
