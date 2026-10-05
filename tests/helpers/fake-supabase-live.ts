@@ -28,6 +28,9 @@ export interface LiveFake {
   clearLog(): void;
   /** Make the named RPC fail with this message. */
   failRpc(name: string, message: string): void;
+  /** Make every read of this table reject (a failed network read), until `mend()`. */
+  breakTable(table: string): void;
+  mend(): void;
   client: unknown;
 }
 
@@ -40,6 +43,7 @@ export function makeLiveFake(db: MockDb, opts: LiveFakeOptions = {}): LiveFake {
   const calls: RpcCall[] = [];
   const log: QueryLogEntry[] = [];
   const failing = new Map<string, string>();
+  const broken = new Set<string>();
   let seq = 0;
 
   db.memberships = [{ user_id: USER, role: opts.role ?? "lead_admin", role_id: null, cycle_id: null }];
@@ -65,7 +69,14 @@ export function makeLiveFake(db: MockDb, opts: LiveFakeOptions = {}): LiveFake {
   };
 
   const client = {
-    from: reads.from,
+    from: (table: string) => {
+      if (!broken.has(table)) return reads.from(table);
+      // A failing read: awaiting it rejects, like a dropped connection.
+      const failed: Record<string, unknown> = {};
+      for (const m of ["select", "eq", "in", "order", "range", "limit", "maybeSingle"]) failed[m] = () => failed;
+      failed.then = (_ok: unknown, bad?: (e: unknown) => unknown) => Promise.reject(new Error(`network: ${table} unreachable`)).catch(bad);
+      return failed;
+    },
     auth: {
       getUser: () => Promise.resolve({ data: { user: { id: USER, email: "tester@example.test", user_metadata: {} } }, error: null }),
       onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
@@ -125,6 +136,8 @@ export function makeLiveFake(db: MockDb, opts: LiveFakeOptions = {}): LiveFake {
     log,
     clearLog: () => void (log.length = 0),
     failRpc: (name, message) => void failing.set(name, message),
+    breakTable: (table) => void broken.add(table),
+    mend: () => void broken.clear(),
     client,
   };
 }

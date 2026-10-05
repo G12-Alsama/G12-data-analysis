@@ -354,3 +354,85 @@ describe("workspace state is shared by every sitting's provider", () => {
     }
   });
 });
+
+describe("failure handling", () => {
+  it("a failed load shows 'error' for that sitting only, and a retry recovers", async () => {
+    const { provider, fake } = await liveProvider(twoSittings());
+    await provider.ensureCycleLoaded(MAY);
+    fake.breakTable("items");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await provider.ensureCycleLoaded(FEB); // swallowed into state, never thrown at the page
+    expect(provider.getCycleLoadState(FEB)).toBe("error");
+    expect(provider.getCycleLoadState(MAY)).toBe("ready"); // the other sitting is unaffected
+    expect(provider.getGrades(MAY)).not.toBeNull();
+
+    fake.mend();
+    await provider.ensureCycleLoaded(FEB); // the Retry button
+    expect(provider.getCycleLoadState(FEB)).toBe("ready");
+    expect(provider.getGrades(FEB)!.rows).toHaveLength(3);
+    vi.restoreAllMocks();
+  });
+
+  it("a failed REFRESH keeps the sitting's previous data instead of blanking it", async () => {
+    const { provider, fake } = await liveProvider(twoSittings());
+    await provider.ensureCycleLoaded(FEB);
+    const before = JSON.stringify(provider.getGrades(FEB));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({}) })));
+    fake.breakTable("items");
+    try {
+      await provider.ingestRawExport(FEB, { name: "f.csv", sizeMB: 1 }, [], { passed: true, checks: [], stats: { rawRows: 0, mcqRows: 0, droppedSurveyRows: 0, droppedNonMcqRows: 0, assessments: 0, participants: 0, items: 0 } } as never);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    }
+    expect(provider.getCycleLoadState(FEB)).toBe("ready");
+    expect(JSON.stringify(provider.getGrades(FEB))).toBe(before);
+  });
+});
+
+describe("workspace-level reads work with no sitting hosted by the directory", () => {
+  it("every directory read is safe — with sittings, and in an empty workspace", async () => {
+    for (const database of [twoSittings(), buildDb([])]) {
+      const { provider } = await liveProvider(database);
+      expect(() => {
+        provider.listYears();
+        provider.listCycles();
+        provider.getConfig();
+        provider.getScoringConfig();
+        provider.getMembers();
+        provider.getNewCycle();
+        provider.getRoles();
+        provider.getRoleActions();
+        provider.getAuditLog(null, "all", "");
+        provider.getAnalyticsTrends();
+        provider.getOverallAnalytics();
+        provider.getGradingDefaults();
+        provider.getElementLabels();
+        provider.getIncidentConfig();
+        provider.listTestCentres();
+      }).not.toThrow();
+    }
+  });
+
+  it("the placeholder directory cycle never appears in the cycle list", async () => {
+    const { provider } = await liveProvider(buildDb([]));
+    expect(provider.listCycles()).toEqual([]);
+    expect(provider.listYears()).toEqual([]);
+    expect(provider.getCycle("")).toBeNull();
+  });
+});
+
+describe("the heavy analytics projection loads on demand, not at sign-in", () => {
+  it("is not read by the initial load, and is read once /analytics asks", async () => {
+    const { provider, fake } = await liveProvider(twoSittings());
+    const heavy = ["grades", "score_runs", "participant_scores"];
+    expect(fake.log.some((q) => heavy.includes(q.table))).toBe(false);
+    provider.getOverallAnalytics();
+    await vi.waitFor(() => expect(fake.log.some((q) => q.table === "grades")).toBe(true));
+    const reads = fake.log.filter((q) => q.table === "grades").length;
+    provider.getOverallAnalytics(); // idempotent — does not refetch
+    await Promise.resolve();
+    expect(fake.log.filter((q) => q.table === "grades").length).toBe(reads);
+  });
+});
