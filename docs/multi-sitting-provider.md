@@ -349,9 +349,43 @@ there is no warning. `sitting_date` is display-only and is not compared.
 
 ## 7. Access (report only — nothing changed)
 
-See the Phase 2 report: `exam_years` read access (`app.is_year_member`) ignores workspace
-(`cycle_id IS NULL`) memberships, memberships do not carry to new sittings, and a viewer
-who is a member of only some sittings sees the others as "Not started".
+Verified against the migrations (latest definition wins) and the client; not run against a
+live database, so live drift (functions edited by hand) is not visible here.
+
+**How read access works.** `exam_cycles` rows are visible to anyone with any membership
+whose enum `role` is set and whose scope is the workspace (`cycle_id IS NULL`) or that cycle
+(`app.is_member`). `exam_years` rows are visible only through `app.is_year_member` (0005,
+never redefined): a membership **on one of the year's sittings**, or having **created** the
+year. A workspace (NULL-scope) membership does not count. Per-sitting fact tables follow
+`is_member(cycle_id)`. `general.view` gates nothing.
+
+**Who sees what when opening a year with several sittings**
+
+| Persona | Years list / Year page | Overall | Sittings |
+| --- | --- | --- | --- |
+| Workspace admin (NULL-scope, Admin) | sees every sitting (`is_member`), but only years they created or sit in carry a year row — others fall back to a name parsed from the cycle name and to the **primary centre**; `expected_periods` is invisible so the year reads as the default | all locked sittings count; ready per the (possibly default) expectation | full access; actions follow the grid |
+| New user, no membership | `/access-denied`; nothing loads (a direct API call can still read centres, workspace settings, roles, null-scope audit rows, and call `create_exam_year`/`create_cycle_with_assessments`) | – | – |
+| Read-only viewer (per-sitting membership in only some) | only years with a visible sitting; **a sitting they cannot see renders "Not started" with a start button**, indistinguishable from a missing one (creating it fails on `unique(year_id, sitting)`) | partial: counts only visible locked sittings, never "ready", yet the certificates link still shows | edit controls follow ONE client-resolved role, which may be wrong per sitting |
+
+**Gaps** (none changed here):
+
+1. `is_year_member` ignores workspace memberships → workspace admins get wrong year labels/
+   centres, and **a year's `expected_periods` is unreadable to anyone who cannot read the year
+   row, so readiness silently falls back to February + May for them** (new with 0051).
+2. Memberships don't carry to a new sitting: only its creator joins; a colleague who created
+   February does not see May unless they hold a workspace membership.
+3. `invite_member`/`set_member_role` write only `role_id`; the enum `role` stays NULL (invitee
+   fails `is_member`, sees nothing) or stale (a demoted lead keeps enum-gated powers).
+   Creators/RUNBOOK admins have no `role_id`, so `can_do` is false while the UI shows admin.
+4. No read-only role is seeded (`viewer` was backfilled to "G12 team member", which can edit).
+5. Several RPCs still gate on the enum while the UI gates on the grid (`save_grade_scheme`,
+   distinction RPCs, incident apply/unapply, `decide_item_exclusion`, …).
+6. `create_exam_year`/`create_cycle_with_assessments` have no role gate; any authenticated user
+   can create years and sittings and attach to any year id they know.
+7. The ingest/recompute routes gate on the enum `lead_admin` (`authorizeCycleAdmin`), not on
+   `upload.ingest`; `awards.generate` is client-only.
+8. `list_members` returns every user's email/role/scope to anyone with any membership.
+9. The Overall can be partial for a user who cannot see every sitting, without saying so.
 
 ## Known limits / deliberate choices (Phase 2)
 

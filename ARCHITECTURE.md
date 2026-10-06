@@ -412,7 +412,10 @@ on first use of `/analytics`, not at sign-in.
 (`lock_grades` flips `grades.locked` only for rows that exist, and the app writes
 none). It is read the same way for every sitting and restored through an ungated
 setter. `lockCycle` sends the RPC only if the in-memory lock was accepted, and
-re-reads the sitting if the server refuses.
+re-reads the sitting if the server refuses. Known gap: nothing **server-side** enforces
+the lock — input-changing RPCs and the ingest route do not check `status`, and an ingest
+into a locked sitting sets it back to `in_review` — so the lock is a UI/provider guard
+today (see the persisted-grades design for the proposed `assert_unlocked` guard).
 
 Hydration is async; until the light load finishes the provider serves an empty
 list, then bumps its version (`useSyncExternalStore`) so screens re-render.
@@ -523,7 +526,10 @@ from the batch-1 and batch-2 design (`design/hf*.jsx`).
   PRIORS" banner + tags), since there's no real cross-cycle history. (This is the
   in-memory *demo*. The live provider's `/analytics` reads the persisted
   multi-cycle projection — loaded on first use, not at sign-in — and is
-  otherwise unchanged; making it use real locked sittings is Phase 2.)
+  otherwise unchanged. It cannot see real sittings yet because the app never writes
+  `grades` rows; the design for persisting a snapshot at lock — and filtering
+  `/analytics` on locked sittings — is in `docs/multi-sitting-provider.md`, Phase 2 §4
+  (design only, not implemented).)
 - **Configuration** (`getConfig` / `getScoringConfig`) — full CRUD, Lead/Admin
   only, with downstream warnings (see "Settings CRUD" below): the item-quality
   thresholds are **editable** (`QualityThresholdsEditor` → `setQualityThresholds`)
@@ -711,8 +717,8 @@ here.
 
 ### Overall rollup — best-of across the year's sittings (`lib/data/overall.ts`)
 
-A year holds a sitting per period (today February + May); each is a full,
-independently signed-off pipeline run. **Overall** is the derived best-of view
+A year holds a sitting per period (today February + May, defined once in the **period
+registry**, `lib/data/periods.ts`); each is a full, independently signed-off pipeline run. **Overall** is the derived best-of view
 used to issue certificates. `rollupOverall` is **comparison / aggregation only** —
 it consumes each sitting's `GradesModel` and never touches scoring, cut scores, or
 the safeguard:
@@ -721,8 +727,10 @@ the safeguard:
    the sittings, by level **rank** (best → lowest), *not* raw score. **Ties go to
    the latest sitting.** A subject present in only one sitting uses that sitting;
    students are matched across sittings by **Student ID** (`qm_participant_id`,
-   the email). Each `OverallGradeCell` records its `source` and both raw
-   per-sitting levels for provenance.
+   the email). Each `OverallGradeCell` records its `source` (the sitting's period) and a
+   `levels` list — every sitting's own level, oldest → newest — for provenance. The
+   rollup takes **any number of sittings** (one per period); the registry's order, not
+   the order they are passed in or created, decides ties.
 2. The **overall award** is derived from the rolled-up per-subject levels via the
    existing `deriveAward` rule (the award rule is **reused, not reinvented**). The
    per-sitting **D3 safeguard is NOT re-run** at the Overall level — each
@@ -738,18 +746,26 @@ sittings`) and its data is never fetched for the rollup.
 **Real data per sitting.** Each sitting is its own cycle with its own assessment
 rows (own uuids), so `getOverallGrades(yearId)` reads each locked sitting's
 `getGrades` from the provider that holds it and re-keys the subjects to a
-canonical key (`canonicalizeSubjects`, `subjectKeyOf`) before rolling up;
-`rollupOrdered` takes the sittings as an ordered list (oldest → newest) so callers
-never name a period. The year resolves by either id form (`y.id` or the real
-`exam_years.id`). `ready` (final / certifiable) means every period has a sitting
-and all are locked.
+canonical key (`canonicalizeSubjects`, `subjectKeyOf`) before rolling up
+(`rollupOverall({ sittings: [{ key, grades }] })`; `rollupOrdered` is the positional
+adapter), so callers never name a period. The year resolves by either id form (`y.id`
+or the real `exam_years.id`). `ready` (final / certifiable) means **every period the
+year expects has a locked sitting**: `exam_years.expected_periods` (migration 0051,
+default `{february,may}`, so existing years behave as before) via
+`setYearExpectedPeriods`; a locked sitting in a non-expected period counts but never
+blocks, and an unlocked one is listed "not counted yet" without blocking.
 
 Provider: `getOverallGrades(yearId)` → `OverallGradesModel` (`/years/[yearId]/
 overall`, reuses the Grades table layout with a source tag per cell);
 `getOverallDocuments(yearId)` → `DocumentsModel` so **certificates issue from
-Overall, not a single sitting** (`/years/[yearId]/overall/documents`). Tests:
+Overall, not a single sitting** (`/years/[yearId]/overall/documents`). Overall-level
+records (document settings, the document-issue audit event) attach to a **real
+sitting** — `recordCycleId`, the latest counted sitting — never to the year id. Tests:
 `tests/overall.rollup.test.ts`, `tests/overall.live.test.ts` (two real locked
-sittings), `tests/overall.ordered.test.ts`, `tests/overall.provider.test.ts` (demo),
+sittings), `tests/overall.n-sittings.test.ts` (three, over a registry with a third
+period), `tests/year-readiness.test.ts`, `tests/overall-documents.cycle.test.ts`,
+`tests/overall.ordered.test.ts`, `tests/overall.provider.test.ts` (demo),
+`tests/demo-mode.unchanged.test.ts`,
 `tests/overall-page.render.test.ts`, `tests/overall-live-page.render.test.ts`.
 Parity is unaffected — **183/183** (aggregation over already-computed awards).
 
@@ -759,11 +775,26 @@ view: only the seeded May sitting carries grades, so `demoFebruaryGrades`
 banner) and unlocked sittings are shown provisionally. The live provider never
 fabricates a sitting and applies the locked-only rule.
 
-**Still tied to two periods (Phase 2):** `SittingKey` (`lib/data/periods.ts`) and
-the `YearSummary` / `YearDetail` `february` / `may` slots; `OverallGradeCell`
-(`source`, `februaryLevel`, `mayLevel`); `rollupOverall`'s two parameters
-(`rollupOrdered` refuses more than two sittings loudly); the `sitting_period`
-database enum.
+**Period registry (`lib/data/periods.ts`).** The single source of truth for sitting
+periods: key, label, short label, month, order, the calendar months an export dated in
+them is attributed to, and whether a year expects it by default. `SittingKey` is derived
+from it, `YearSummary`/`YearDetail` carry `sittings: SittingRef[]` in period order, and
+nothing else in app code spells a period (`tests/periods.registry.test.ts` scans for it
+and checks the registry against the `sitting_period` enum declared by the migrations).
+**Adding a period = one registry entry + one migration extending the enum**
+(`supabase/templates/add-sitting-period.template.sql`, with the `ALTER TYPE … ADD VALUE`
+transaction caveat); existing years keep expecting only their configured periods.
+
+**Still two-slot, deliberately:** the `/analytics` projection (`OACell.february/may`, the
+"Sat Feb → Sat May" sections). It compares the registry's first two periods and skips a
+sitting in any other period rather than mislabelling it; generalising it belongs with
+persisted grades (see `docs/multi-sitting-provider.md`, Phase 2 §4).
+
+**Upload check.** Before an export is ingested, `compareExportToSitting`
+(`lib/ingest/qm/sitting-match.ts`) compares its sitting tag and its result dates
+(`CanonicalModel.dateRange`, when the export has date columns) with the sitting's year and
+period; a mismatch holds the file behind a warning that must be confirmed (never a hard
+block).
 
 ### Element / sub-element results & the unofficial report
 
