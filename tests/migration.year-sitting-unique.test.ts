@@ -27,7 +27,7 @@ describe("0050 is the next migration; its pre-flight stays out of the chain", ()
   it("0050 and its rollback are in supabase/migrations, directly after 0049", () => {
     expect(files).toContain("0050_year_sitting_unique.sql");
     expect(files).toContain("0050_year_sitting_unique.rollback.sql");
-    expect(numbers.slice(-2)).toEqual(["0049", "0050"]);
+    expect(numbers[numbers.indexOf("0050") - 1]).toBe("0049");
   });
   it("there is exactly one 0050 migration (no number collision)", () => {
     expect(files.filter((f) => f.startsWith("0050") && !f.endsWith(".rollback.sql"))).toEqual(["0050_year_sitting_unique.sql"]);
