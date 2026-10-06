@@ -26,6 +26,7 @@ import type { IncidentAdjustmentConfig } from "@/lib/incidents/types";
 import { DEFAULT_ELEMENT_LABELS, type ElementLabelsConfig } from "./element-labels";
 import { defaultGradingConfig, DEFAULT_BORDERLINE_BAND_PCT, type GradingConfig } from "./grading";
 import { defaultMembers, seedAuditEntries } from "./mock-admin";
+import type { SittingKey } from "./periods";
 import type { AuditEntry, BorderlineConfig, CurrentUser, Member, TestCentreSummary } from "./types";
 
 export interface WorkspaceInit {
@@ -61,6 +62,13 @@ export class WorkspaceState {
   /** Session-local audit trail (newest first); entries carry their own cycleId. */
   auditEntries: AuditEntry[] = seedAuditEntries("may-2026");
   auditSeq = 0;
+
+  /**
+   * `exam_years.expected_periods` by exam_years.id — the periods a year must have a LOCKED
+   * sitting in before its Overall is final. A year absent from the map (the demo, or a
+   * database where the column does not exist yet) expects the registry's defaults.
+   */
+  expectedPeriodsByYear = new Map<string, SittingKey[]>();
 
   /** Test centres (top-level scoping dimension). */
   testCentres: TestCentreSummary[];

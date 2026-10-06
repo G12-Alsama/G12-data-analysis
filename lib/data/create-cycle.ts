@@ -2,7 +2,7 @@
  * Pure helpers for creating a sitting (exam_cycle) — kept free of provider/Supabase
  * imports so the RPC contract is unit-testable.
  *
- * A sitting's PERIOD (february | may) and its YEAR are explicit choices made in the
+ * A sitting's PERIOD (a registry key — see ./periods) and its YEAR are explicit choices made in the
  * create form and persisted through `create_cycle_with_assessments(p_sitting,
  * p_year_id, …)`. They are never inferred from the sitting's display name: the name
  * is a free-text label, and guessing a period from it silently stored every UI-created
@@ -46,8 +46,8 @@ export function findPeriodConflict(
 ): { yearName: string; centreName: string; cycleName: string | null } | null {
   const y = years.find((yr) => yr.examYearId === examYearId);
   if (!y) return null;
-  const slot = sitting === "february" ? y.february : y.may;
-  return slot.started
+  const slot = y.sittings.find((s) => s.sitting === sitting);
+  return slot?.started
     ? { yearName: y.name, centreName: y.testCentreName, cycleName: slot.cycleName }
     : null;
 }

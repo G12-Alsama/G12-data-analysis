@@ -44,8 +44,17 @@ const db = (opts: { febStatus?: string; mayStatus?: string } = {}) =>
       } },
   ]);
 
-const row = (m: OverallGradesModel, email: string): OverallGradeRow => m.rows.find((r) => r.studentId === email)!;
-const cell = (m: OverallGradesModel, email: string) => Object.values(row(m, email).grades)[0]!;
+const rawRow = (m: OverallGradesModel, email: string): OverallGradeRow => m.rows.find((r) => r.studentId === email)!;
+// Per-period views of the generic shapes, so the assertions read as the two real sittings.
+const row = (m: OverallGradesModel, email: string) => {
+  const r = rawRow(m, email);
+  return { ...r, inFebruary: r.presentIn.includes("february"), inMay: r.presentIn.includes("may") };
+};
+const cell = (m: OverallGradesModel, email: string) => {
+  const c = Object.values(rawRow(m, email).grades)[0]!;
+  const at = (k: string) => c.levels.find((l) => l.key === k)?.level ?? null;
+  return { ...c, februaryLevel: at("february"), mayLevel: at("may") };
+};
 
 async function overall(opts?: Parameters<typeof db>[0]) {
   const { provider, fake } = await liveProvider(db(opts));
@@ -86,8 +95,8 @@ describe("Overall over two real LOCKED sittings", () => {
     expect(provider.getCycle(FEB)!.assessments[0]!.id).not.toBe(provider.getCycle(MAY)!.assessments[0]!.id);
     // …but ONE Overall subject, with both sittings' levels in the same cell
     expect(model.assessments).toHaveLength(1);
-    expect(cell(model, "amal@s.edu").februaryLevel).not.toBeNull();
-    expect(cell(model, "amal@s.edu").mayLevel).not.toBeNull();
+    expect(cell(model, "amal@s.edu").levels.map((l) => l.key)).toEqual(["february", "may"]);
+    for (const l of cell(model, "amal@s.edu").levels) expect(l.level).not.toBeNull();
   });
 
   it("is final (ready) when every sitting is locked, and nothing is synthetic", async () => {

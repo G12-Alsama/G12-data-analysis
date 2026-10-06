@@ -70,8 +70,10 @@ function model(studentId: string, levels: Record<string, string>, ids = FIVE): G
 
 function rollOne(feb: GradesModel | null, may: GradesModel | null, ids = FIVE) {
   const rows = rollupOverall({
-    february: feb,
-    may,
+    sittings: [
+      { key: "february", grades: feb },
+      { key: "may", grades: may },
+    ],
     assessments: refs(ids),
     performanceLevels: LEVELS,
     awardLevels: AWARDS,
@@ -96,7 +98,10 @@ describe("rollupOverall — best-of-two by award level", () => {
     const feb = model("s1", { M: EXC });
     const may = model("s1", { M: OUT });
     const [r] = rollOne(feb, may);
-    expect(r!.grades.M).toMatchObject({ februaryLevel: EXC, mayLevel: OUT });
+    expect(r!.grades.M!.levels).toEqual([
+      { key: "february", level: EXC },
+      { key: "may", level: OUT },
+    ]);
   });
 
   it("uses the only sitting present when a subject has just one result", () => {
@@ -104,8 +109,10 @@ describe("rollupOverall — best-of-two by award level", () => {
     const feb = model("s1", { M: OUT, S: "", A: "", E: "", L: "" });
     const may = model("s1", { M: "", S: "", A: "", E: EXC, L: "" });
     const [r] = rollOne(feb, may);
-    expect(r!.grades.M).toMatchObject({ level: OUT, source: "february", mayLevel: null });
-    expect(r!.grades.E).toMatchObject({ level: EXC, source: "may", februaryLevel: null });
+    expect(r!.grades.M).toMatchObject({ level: OUT, source: "february" });
+    expect(r!.grades.M!.levels[1]).toEqual({ key: "may", level: null });
+    expect(r!.grades.E).toMatchObject({ level: EXC, source: "may" });
+    expect(r!.grades.E!.levels[0]).toEqual({ key: "february", level: null });
     expect(r!.grades.S).toBeUndefined(); // no result either sitting
   });
 
@@ -114,8 +121,7 @@ describe("rollupOverall — best-of-two by award level", () => {
     const may = model("s1", { M: MEET, S: MEET, A: MEET, E: MEET, L: MEET });
     const rows = rollOne(feb, may);
     const s2 = rows.find((r) => r.studentId === "s2")!;
-    expect(s2.inFebruary).toBe(true);
-    expect(s2.inMay).toBe(false);
+    expect(s2.presentIn).toEqual(["february"]);
     // every cell from February
     for (const id of FIVE) expect(s2.grades[id]!.source).toBe("february");
   });
@@ -150,7 +156,7 @@ describe("rollupOverall — single sitting populated", () => {
   it("equals the May sitting when February has no results", () => {
     const may = model("s1", { M: OUT, S: EXC, A: MEET, E: MEET, L: MEET });
     const [r] = rollOne(null, may);
-    expect(r!.inFebruary).toBe(false);
+    expect(r!.presentIn).toEqual(["may"]);
     for (const id of FIVE) expect(r!.grades[id]!.source).toBe("may");
     // 1 Outstanding + 1 Exceeds (only 2 ≥Exceeds) but 5 ≥Meets → Secondary.
     expect(r!.award).toBe(SECONDARY);

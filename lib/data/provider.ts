@@ -20,6 +20,7 @@ import type { AssembleScoreAnalysisArgs, AssembleItemAnalysisArgs } from "@/lib/
 import type { CleanResponse, ValidationReport } from "@/lib/ingest/types";
 import type { PerItemSource } from "@/lib/data/per-item-source";
 import type { CanonicalModel } from "@/lib/ingest/qm";
+import type { SittingKey } from "@/lib/data/periods";
 
 /**
  * Schema drift report — whether the live DB has the columns/functions the code
@@ -349,6 +350,12 @@ export interface DataProvider {
    * grades. Rejects the returned promise on error so the UI can surface it.
    */
   moveExamYearToCentre(yearId: string, testCentreId: string): Promise<void>;
+  /**
+   * 0051 — set the periods a year must have a LOCKED sitting in before its Overall is
+   * final (`exam_years.expected_periods`). Gated by `general.manage_centres`; rejects on
+   * an empty list, an unknown year, or a year with no database record (the demo's).
+   */
+  setYearExpectedPeriods(yearId: string, periods: SittingKey[]): Promise<void>;
 
   // settings: configuration
   getConfig(): ConfigModel;

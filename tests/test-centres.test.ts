@@ -11,6 +11,7 @@ import { describe, it, expect } from "vitest";
 import { InMemoryDataProvider } from "@/lib/data/in-memory-provider";
 import type { Seed } from "@/lib/data/seed-types";
 import type { CurrentUser } from "@/lib/data/types";
+import { slotOf } from "./helpers/year-slots";
 
 const VIEWER: CurrentUser = { id: "u-viewer", name: "Vera Viewer", initials: "VV", role: "viewer" };
 
@@ -143,7 +144,7 @@ describe("test centres — year reassignment (0013)", () => {
     expect(rawBefore).not.toBeNull();
 
     // The demo year that contains the live sitting.
-    const demoYear = p.listYears().find((y) => y.may.cycleId === liveId || y.february.cycleId === liveId)!;
+    const demoYear = p.listYears().find((y) => slotOf(y, "may").cycleId === liveId || slotOf(y, "february").cycleId === liveId)!;
     p.createTestCentre({ name: "Shatila 2", code: "SHA2" });
     const target = p.listTestCentres().find((c) => c.code === "SHA2")!;
     expect(demoYear.testCentreId).not.toBe(target.id);
@@ -155,7 +156,7 @@ describe("test centres — year reassignment (0013)", () => {
     const moved = p.listYears().find((y) => y.name === demoYear.name && y.testCentreId === target.id);
     expect(moved).toBeDefined();
     expect(moved!.testCentreName).toBe("Shatila 2");
-    expect(moved!.may.cycleId ?? moved!.february.cycleId).toBe(liveId);
+    expect(slotOf(moved!, "may").cycleId ?? slotOf(moved!, "february").cycleId).toBe(liveId);
 
     // Grade-bearing reads are byte-for-byte identical — pure labelling.
     expect(p.getRawData(liveId, assessmentId)).toEqual(rawBefore);

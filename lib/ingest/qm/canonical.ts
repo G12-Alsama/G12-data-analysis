@@ -15,6 +15,7 @@ import {
 import { normalizeResultId } from "./result-id";
 import type { CsvTable } from "./csv";
 import { detectThreeExports, type NamedInput } from "./detect";
+import { periodOfMonth } from "@/lib/data/periods";
 import type {
   CanonicalModel,
   IntegrityReport,
@@ -113,20 +114,8 @@ export function detectResitForms(subjects: readonly QmSubject[]): ResitForm[] {
   return forms;
 }
 
-const MONTH_TO_PERIOD: Record<string, "february" | "may"> = {
-  JAN: "february",
-  FEB: "february",
-  MAR: "february",
-  APR: "february",
-  MAY: "may",
-  JUN: "may",
-  JUL: "may",
-  AUG: "may",
-  SEP: "may",
-  OCT: "may",
-  NOV: "may",
-  DEC: "may",
-};
+/** Three-letter month tokens, January first (index + 1 = calendar month). */
+const MONTH_TOKENS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"] as const;
 
 const MONTH_LABEL: Record<string, string> = {
   JAN: "January", FEB: "February", MAR: "March", APR: "April",
@@ -136,7 +125,8 @@ const MONTH_LABEL: Record<string, string> = {
 
 /**
  * Parse the sitting from a `ResultGroupName` like "Math Shatila 1 MAY2026".
- * Jan–Apr map to the February sitting, the rest to May (mirrors migration 0005).
+ * The month maps to a sitting period through the period registry (`periods.ts`;
+ * February/May today: Jan–Apr → February, the rest → May, mirroring migration 0005).
  */
 export function parseSitting(groupName: string | null | undefined): Sitting | null {
   if (!groupName) return null;
@@ -146,7 +136,7 @@ export function parseSitting(groupName: string | null | undefined): Sitting | nu
   const year = Number(m[2]!);
   return {
     code: `${mon}${year}`,
-    period: MONTH_TO_PERIOD[mon]!,
+    period: periodOfMonth(MONTH_TOKENS.indexOf(mon as (typeof MONTH_TOKENS)[number]) + 1),
     year,
     label: `${MONTH_LABEL[mon]} ${year}`,
   };

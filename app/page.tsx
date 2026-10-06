@@ -22,14 +22,14 @@ type Filter = "all" | "in_progress" | "locked";
 
 /** The started sittings of a Years row, as deletable cycles (real cycle ids). */
 function deletableCyclesOf(y: YearSummary): DeletableCycle[] {
-  return [y.february, y.may]
+  return y.sittings
     .filter((s): s is SittingRef & { cycleId: string } => s.started && !!s.cycleId)
     .map((s) => ({ cycleId: s.cycleId, label: s.label, cycleName: s.cycleName ?? `${y.name} ${s.label}` }));
 }
 
 /** A year is "in progress" while any started sitting is still unlocked. */
-function yearLocked(feb: SittingRef, may: SittingRef): boolean {
-  const started = [feb, may].filter((s) => s.started);
+function yearLocked(y: YearSummary): boolean {
+  const started = y.sittings.filter((s) => s.started);
   return started.length > 0 && started.every((s) => s.locked);
 }
 
@@ -135,7 +135,7 @@ export default function YearsDashboard() {
 
   const rows = years.filter((y) => {
     if (filter === "all") return true;
-    const locked = yearLocked(y.february, y.may);
+    const locked = yearLocked(y);
     return filter === "locked" ? locked : !locked;
   });
 
@@ -202,8 +202,9 @@ export default function YearsDashboard() {
                   </td>
                   <td className="hf-td">
                     <div style={{ display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap" }}>
-                      <SittingPill s={y.february} />
-                      <SittingPill s={y.may} />
+                      {y.sittings.map((s) => (
+                        <SittingPill key={s.sitting} s={s} />
+                      ))}
                     </div>
                   </td>
                   <td className="hf-td hf-mono" style={{ textAlign: "right", fontSize: 13 }}>

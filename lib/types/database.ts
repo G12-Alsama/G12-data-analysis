@@ -6,6 +6,8 @@
  * Supabase type generator and re-apply the `Database` wrapper).
  */
 
+import type { SittingKey } from "@/lib/data/periods";
+
 // --- Enums (mirror the Postgres enums) --------------------------------------
 export type CycleStatus =
   | "draft"
@@ -28,8 +30,10 @@ export type SchemeMethod = "judgemental" | "fixed_pct";
 // 0003
 export type IncidentSource = "incident_log" | "complaint";
 export type AlterationApply = "student" | "subject" | "none";
-// 0005 — a year contains two sittings; each sitting is a full pipeline run.
-export type SittingPeriod = "february" | "may";
+// 0005 — a year contains sittings, one per period; each sitting is a full pipeline run.
+// The values are the period registry's keys (lib/data/periods.ts); the DB enum
+// `sitting_period` must hold exactly those (tests/periods.registry.test.ts).
+export type SittingPeriod = SittingKey;
 
 // --- Reusable JSON shapes ----------------------------------------------------
 export interface GradeBand {
@@ -68,6 +72,11 @@ export interface ExamYearRow {
    * Definer-only: set exclusively by create_exam_year / create_cycle_with_assessments.
    */
   test_centre_id: string;
+  /**
+   * 0051 — the periods this year must have a LOCKED sitting in before its Overall is
+   * final. Default {february,may}. Definer-only: set by set_year_expected_periods.
+   */
+  expected_periods: SittingPeriod[];
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -668,6 +677,8 @@ export interface Database {
         Args: { p_year_id: string; p_test_centre_id: string };
         Returns: ExamYearRow;
       };
+      // 0051 — which periods a year expects (drives "ready").
+      set_year_expected_periods: { Args: { p_year_id: string; p_periods: SittingPeriod[] }; Returns: ExamYearRow };
       set_cycle_status: { Args: { p_cycle: string; p_status: CycleStatus }; Returns: ExamCycleRow };
       set_assessment_status: { Args: { p_assessment: string; p_status: AssessmentStatus }; Returns: undefined };
       decide_item_exclusion: { Args: { p_item: string; p_exclude: boolean; p_reason: string | null; p_notes?: string | null }; Returns: undefined };

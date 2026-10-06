@@ -17,10 +17,11 @@ import { Shell } from "@/components/shell/Shell";
 import { Button, Card, Check, Chip } from "@/components/ui/primitives";
 import { normalizeYearName, sittingLabel } from "@/lib/data/create-cycle";
 import type { SittingKey } from "@/lib/data/types";
+import { SITTING_ORDER } from "@/lib/data/periods";
 
 /** Sentinel for the "new year" choice in the year picker. */
 const NEW_YEAR = "__new__";
-const SITTINGS: SittingKey[] = ["february", "may"];
+const SITTINGS: readonly SittingKey[] = SITTING_ORDER;
 
 export default function NewCyclePage() {
   const router = useRouter();

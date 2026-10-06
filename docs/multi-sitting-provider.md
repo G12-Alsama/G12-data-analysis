@@ -189,7 +189,7 @@ cell (`levels[]`), the QM sitting parser (`parseSitting` → `periodOfMonth`), t
 name fallback, the document generator's source tag, and the DB type alias.
 
 **Adding a period = one `PERIOD_DEFS` entry + one migration** extending the enum
-(`supabase/drafts/add-sitting-period.template.sql`, including the `ALTER TYPE … ADD VALUE`
+(`supabase/templates/add-sitting-period.template.sql`, including the `ALTER TYPE … ADD VALUE`
 transaction caveat). `tests/periods.registry.test.ts` fails if the registry and the
 `sitting_period` enum declared by the migrations disagree, in either direction.
 Only the sitting **slots** are generic; one remaining deliberate two-slot coupling is the

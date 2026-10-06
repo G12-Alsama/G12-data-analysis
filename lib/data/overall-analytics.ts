@@ -27,6 +27,7 @@
  */
 
 import { rollupOverall } from "./overall";
+import { SITTING_ORDER, type SittingKey } from "./periods";
 import type {
   AssessmentRef,
   AwardBand,
@@ -64,6 +65,14 @@ export interface OASitting {
    *  for the single-sitting score stats. */
   scores: Record<string, number[]>;
 }
+
+/**
+ * The analytics projection compares exactly TWO sittings per (centre × year): the
+ * registry's first two periods (its `february` / `may` cell slots). A sitting in any
+ * other period is left out of this projection (see `fetchOverallAnalytics`) rather than
+ * mislabelled; generalising the analytics views is part of the persisted-grades work.
+ */
+export const SLOT_PERIODS = [SITTING_ORDER[0]!, SITTING_ORDER[1]!] as const;
 
 /** One (centre × year) cell: the persisted outputs for its two sittings. */
 export interface OACell {
@@ -218,8 +227,10 @@ export function computeOverallAnalytics(args: ComputeOverallAnalyticsArgs): Over
     const feb = toGradesModel(cell.february, assessments, starMap, performanceLevels, awardLevels);
     const may = toGradesModel(cell.may, assessments, starMap, performanceLevels, awardLevels);
     const overall = rollupOverall({
-      february: feb,
-      may,
+      sittings: [
+        { key: SLOT_PERIODS[0], grades: feb },
+        { key: SLOT_PERIODS[1], grades: may },
+      ],
       assessments,
       performanceLevels,
       awardLevels,
@@ -339,8 +350,8 @@ export function computeOverallAnalytics(args: ComputeOverallAnalyticsArgs): Over
       const anyMay = ds.some((d) => d.cell.may !== null);
 
       perf[key][y] = {
-        feb: anyFeb ? sittingStats(ds, key, "february") : null,
-        may: anyMay ? sittingStats(ds, key, "may") : null,
+        feb: anyFeb ? sittingStats(ds, key, SLOT_PERIODS[0]) : null,
+        may: anyMay ? sittingStats(ds, key, SLOT_PERIODS[1]) : null,
         levels: bestOfTwoLevels(ds, key),
         change: anyFeb && anyMay ? levelChange(ds, key) : null,
       };
@@ -367,12 +378,12 @@ export function computeOverallAnalytics(args: ComputeOverallAnalyticsArgs): Over
   }
 
   /** Single-sitting score stats + per-subject pass for one subject/year. */
-  function sittingStats(ds: CellDerived[], key: string, sitting: "february" | "may"): SittingStats {
+  function sittingStats(ds: CellDerived[], key: string, sitting: SittingKey): SittingStats {
     const scores: number[] = [];
     let passN = 0;
     let passD = 0;
     for (const d of ds) {
-      const s = sitting === "february" ? d.cell.february : d.cell.may;
+      const s = sitting === SLOT_PERIODS[0] ? d.cell.february : d.cell.may;
       if (!s) continue;
       scores.push(...(s.scores[key] ?? []));
       for (const st of s.students) {

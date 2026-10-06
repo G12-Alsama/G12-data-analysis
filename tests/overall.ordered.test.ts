@@ -53,11 +53,11 @@ describe("rollupOrdered", () => {
 
   it("accepts a single sitting, or none, without inventing the other", () => {
     expect(run([old()]).map((r) => r.studentId).sort()).toEqual(["a", "b", "c"]);
-    expect(run([null, recent()]).every((r) => r.inFebruary === false)).toBe(true);
+    expect(run([null, recent()]).every((r) => !r.presentIn.includes("february"))).toBe(true);
     expect(run([null, null])).toEqual([]);
   });
 
-  it("refuses more than two sittings loudly instead of silently dropping one", () => {
-    expect(() => run([old(), recent(), old()])).toThrow(/at most two/);
+  it("refuses more sittings than periods unless each is given a period (never silently drops one)", () => {
+    expect(() => run([old(), recent(), old()])).toThrow(/only 2 periods/);
   });
 });

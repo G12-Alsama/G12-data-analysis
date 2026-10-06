@@ -24,6 +24,7 @@ import {
   normalizeYearName,
 } from "@/lib/data/create-cycle";
 import type { YearSummary } from "@/lib/data/types";
+import { slotOf } from "./helpers/year-slots";
 
 vi.mock("server-only", () => ({}));
 
@@ -132,9 +133,9 @@ describe("create-sitting RPC contract (pure)", () => {
   });
 
   it("findPeriodConflict reports an occupied period only", () => {
-    const slot = (started: boolean, cycleName: string | null) => ({ started, cycleName } as never);
+    const slot = (started: boolean, cycleName: string | null) => ({ started, cycleName });
     const years = [
-      { id: "y", examYearId: YEAR_2026, name: "2026", testCentreName: "Shatila 1", february: slot(false, null), may: slot(true, "May 2026") },
+      { id: "y", examYearId: YEAR_2026, name: "2026", testCentreName: "Shatila 1", sittings: [{ sitting: "february", ...slot(false, null) }, { sitting: "may", ...slot(true, "May 2026") }] },
     ] as unknown as YearSummary[];
     expect(findPeriodConflict(years, YEAR_2026, "may")).toMatchObject({ yearName: "2026", cycleName: "May 2026" });
     expect(findPeriodConflict(years, YEAR_2026, "february")).toBeNull();
@@ -158,10 +159,10 @@ describe("SupabaseDataProvider.createCycle stores the chosen period and year", (
 
     // …and the Years UI slots it as February, with the existing May sitting in May.
     const year = provider.listYears().find((y) => y.examYearId === YEAR_2026)!;
-    expect(year.february.started).toBe(true);
-    expect(year.february.cycleName).toBe("May 2026 catch-up");
-    expect(year.may.started).toBe(true);
-    expect(year.may.cycleName).toBe("May 2026");
+    expect(slotOf(year, "february").started).toBe(true);
+    expect(slotOf(year, "february").cycleName).toBe("May 2026 catch-up");
+    expect(slotOf(year, "may").started).toBe(true);
+    expect(slotOf(year, "may").cycleName).toBe("May 2026");
   });
 
   it("a new year is find-or-created through create_exam_year, then its id is attached", async () => {
@@ -228,8 +229,8 @@ describe("the Years UI reads the stored period and year, not the name", () => {
     ];
     const years = (await yearsFrom(db)).listYears();
     expect(years).toHaveLength(1);
-    expect(years[0]!.february.cycleName).toBe("May 2026 resit");
-    expect(years[0]!.may.cycleName).toBe("February 2026 catch-up");
+    expect(slotOf(years[0]!, "february").cycleName).toBe("May 2026 resit");
+    expect(slotOf(years[0]!, "may").cycleName).toBe("February 2026 catch-up");
   });
 
   it("takes the year label from exam_years.name, not from the sitting name", async () => {
@@ -239,7 +240,7 @@ describe("the Years UI reads the stored period and year, not the name", () => {
     ];
     const y = (await yearsFrom(db)).listYears()[0]!;
     expect(y.name).toBe("2026"); // not "Unknown"
-    expect(y.february.started).toBe(true);
+    expect(slotOf(y, "february").started).toBe(true);
   });
 
   it("legacy fallback: a row with NO stored period still falls back to its name", async () => {
@@ -248,7 +249,7 @@ describe("the Years UI reads the stored period and year, not the name", () => {
       { id: "c1", name: "February 2026", status: "draft", region: "eu-west", year_id: YEAR_2026, sitting: null, created_at: iso(20), updated_at: iso(20) },
     ];
     const y = (await yearsFrom(db)).listYears()[0]!;
-    expect(y.february.cycleName).toBe("February 2026");
+    expect(slotOf(y, "february").cycleName).toBe("February 2026");
   });
 
   it("the create form offers real years with the periods they already have", async () => {

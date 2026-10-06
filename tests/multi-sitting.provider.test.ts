@@ -272,7 +272,9 @@ describe("(e) the Years page does not hydrate every sitting", () => {
     const touched = new Set(fake.log.map((q) => q.table));
     for (const t of FACT_TABLES) expect(touched.has(t), `the initial load read ${t}`).toBe(false);
     // …and the tiles still show real stats for BOTH sittings
-    expect(years[0]).toMatchObject({ february: { participants: 3, assessments: 1 }, may: { participants: 2, assessments: 1 } });
+    expect(years[0]!.sittings.map((s) => s.sitting)).toEqual(["february", "may"]);
+    expect(years[0]!.sittings[0]).toMatchObject({ participants: 3, assessments: 1 });
+    expect(years[0]!.sittings[1]).toMatchObject({ participants: 2, assessments: 1 });
   });
 
   it("opening ONE sitting reads only that sitting's responses", async () => {

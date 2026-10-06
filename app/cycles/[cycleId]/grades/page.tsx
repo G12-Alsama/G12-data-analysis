@@ -38,7 +38,7 @@ export default function GradesPage({ params }: { params: { cycleId: string } }) 
   // sitting's cycle id, never re-derived from the cycle name): this is correct for a
   // non-primary centre, and a null/"Unknown"-named year still resolves and links.
   const overallYearId = useProviderData(
-    (p) => p.listYears().find((y) => y.february.cycleId === cycleId || y.may.cycleId === cycleId)?.id ?? null,
+    (p) => p.listYears().find((y) => y.sittings.some((s) => s.cycleId === cycleId))?.id ?? null,
     [cycleId],
   );
   const overallHref = overallYearId ? `/years/${overallYearId}/overall` : "/";

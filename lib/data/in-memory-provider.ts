@@ -45,7 +45,16 @@ import {
   type Role as RoleModel,
 } from "@/lib/auth/actions";
 import { rollupOverall, rollupOrdered, canonicalizeSubjects, overallAwardsReconcile } from "./overall";
-import { SITTING_ORDER, periodLabel } from "./periods";
+import {
+  DEFAULT_EXPECTED_PERIODS,
+  DEFAULT_NEW_PERIOD,
+  SITTING_ORDER,
+  joinPeriodLabels,
+  monthOfText,
+  periodLabel,
+  periodOfMonth,
+  sortPeriods,
+} from "./periods";
 import {
   computeOverallAnalytics,
   overallAwardBands,
@@ -1229,13 +1238,14 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   /**
-   * LEGACY fallback only: guess a period from a cycle name (Jan–Apr → February,
-   * otherwise May). Used solely for cycles that carry NO stored period — the demo
+   * LEGACY fallback only: guess a period from a month named in a cycle name (via the
+   * period registry; no month → the default period). Used solely for cycles that carry NO stored period — the demo
    * fixtures and un-migrated rows. A sitting created through the app always has an
    * explicit `exam_cycles.sitting`, which `sittingOfCycle` prefers.
    */
   private legacySittingFromName(name: string): SittingKey {
-    return /\b(jan|feb|mar|apr)/i.test(name) ? "february" : "may";
+    const month = monthOfText(name);
+    return month ? periodOfMonth(month) : DEFAULT_NEW_PERIOD;
   }
 
   /** The sitting slot of a cycle: the STORED period, never a guess from its name. */
@@ -1248,10 +1258,10 @@ export class InMemoryDataProvider implements DataProvider {
     return c.yearName ?? this.yearOf(c.name);
   }
 
-  private sittingRefFrom(c: CycleSummary, sitting: SittingKey): SittingRef {
+  private sittingRefFrom(c: CycleSummary, sitting: SittingKey, expected: boolean): SittingRef {
     return {
       sitting,
-      label: sitting === "february" ? "February" : "May",
+      label: periodLabel(sitting),
       testCentreName: c.testCentreName,
       cycleId: c.id,
       cycleName: c.name,
@@ -1265,13 +1275,14 @@ export class InMemoryDataProvider implements DataProvider {
       sittingDate: c.sittingDate,
       live: c.live,
       mock: c.mock,
+      expected,
     };
   }
 
-  private emptySitting(sitting: SittingKey, testCentreName: string): SittingRef {
+  private emptySitting(sitting: SittingKey, testCentreName: string, expected: boolean): SittingRef {
     return {
       sitting,
-      label: sitting === "february" ? "February" : "May",
+      label: periodLabel(sitting),
       testCentreName,
       cycleId: null,
       cycleName: null,
@@ -1284,7 +1295,34 @@ export class InMemoryDataProvider implements DataProvider {
       lastActivity: "—",
       live: false,
       mock: false,
+      expected,
     };
+  }
+
+  /** The periods a year expects (`exam_years.expected_periods`); the registry defaults when unset. */
+  private expectedPeriodsOf(examYearId?: string): SittingKey[] {
+    const stored = examYearId ? this.ws.expectedPeriodsByYear.get(examYearId) : undefined;
+    return sortPeriods(stored && stored.length > 0 ? stored : [...DEFAULT_EXPECTED_PERIODS]);
+  }
+
+  /** A year's sitting for a period, or undefined when the year shows none for it. */
+  private sittingIn(y: { sittings: SittingRef[] }, key: SittingKey): SittingRef | undefined {
+    return y.sittings.find((s) => s.sitting === key);
+  }
+
+  /**
+   * "Ready" (the Overall is final / certifiable): the year has an EXPECTED period list and
+   * every expected period has a started, LOCKED sitting. A sitting in a period the year does
+   * not expect never blocks this, and neither does one that exists but is unlocked.
+   */
+  private yearReady(y: { sittings: SittingRef[]; expectedPeriods: SittingKey[] }): boolean {
+    return (
+      y.expectedPeriods.length > 0 &&
+      y.expectedPeriods.every((k) => {
+        const s = this.sittingIn(y, k);
+        return !!s && s.started && s.locked;
+      })
+    );
   }
 
   /**
@@ -1301,13 +1339,13 @@ export class InMemoryDataProvider implements DataProvider {
     testCentreId: string;
     testCentreName: string;
     examYearId?: string;
-    february: SittingRef;
-    may: SittingRef;
+    sittings: SittingRef[];
+    expectedPeriods: SittingKey[];
   }[] {
     const order: string[] = [];
     const byKey = new Map<
       string,
-      { year: string; centre: TestCentreSummary; examYearId?: string; anchorCycleId?: string; february?: SittingRef; may?: SittingRef }
+      { year: string; centre: TestCentreSummary; examYearId?: string; anchorCycleId?: string; cycles: Map<SittingKey, CycleSummary> }
     >();
     // No cycles → no years; and a workspace with no centres has no "primary" centre to
     // read an id from (a fresh live database), so don't try.
@@ -1330,7 +1368,7 @@ export class InMemoryDataProvider implements DataProvider {
           ? `c:${c.id}`
           : `${centre.id}|${year}`;
       if (!byKey.has(key)) {
-        byKey.set(key, { year, centre, anchorCycleId: c.id || undefined });
+        byKey.set(key, { year, centre, anchorCycleId: c.id || undefined, cycles: new Map() });
         order.push(key);
       }
       const slot = byKey.get(key)!;
@@ -1338,10 +1376,9 @@ export class InMemoryDataProvider implements DataProvider {
       // wins; all sittings of a (centre, year) share the same year row.
       if (!slot.examYearId && c.examYearId) slot.examYearId = c.examYearId;
       if (!slot.anchorCycleId && c.id) slot.anchorCycleId = c.id;
-      const ref = this.sittingRefFrom(c, sitting);
-      // First write wins per slot; listCycles is newest-first and the live run is
+      // First write wins per period; listCycles is newest-first and the live run is
       // first, so the most relevant cycle keeps the slot if names ever collide.
-      if (!slot[sitting]) slot[sitting] = ref;
+      if (!slot.cycles.has(sitting)) slot.cycles.set(sitting, c);
     }
     return order.map((key) => {
       const slot = byKey.get(key)!;
@@ -1356,30 +1393,36 @@ export class InMemoryDataProvider implements DataProvider {
         slot.centre.id === primaryId ? this.yearId(slot.year) : `${this.yearId(slot.year)}--${slot.centre.slug}`;
       const id =
         slot.examYearId ?? (this.hydrated ? (slot.anchorCycleId ?? derivedLabel) : derivedLabel);
+      // The year shows every period it EXPECTS (a missing one is an empty tile) plus any
+      // other period that has a sitting — in period order.
+      const expectedPeriods = this.expectedPeriodsOf(slot.examYearId);
+      const shown = sortPeriods([...new Set<SittingKey>([...expectedPeriods, ...slot.cycles.keys()])]);
+      const sittings = shown.map((k) => {
+        const expected = expectedPeriods.includes(k);
+        const c = slot.cycles.get(k);
+        return c ? this.sittingRefFrom(c, k, expected) : this.emptySitting(k, slot.centre.name, expected);
+      });
       return {
         id,
         name: slot.year,
         testCentreId: slot.centre.id,
         testCentreName: slot.centre.name,
         examYearId: slot.examYearId,
-        february: slot.february ?? this.emptySitting("february", slot.centre.name),
-        may: slot.may ?? this.emptySitting("may", slot.centre.name),
+        sittings,
+        expectedPeriods,
       };
     });
   }
 
   listYears(): YearSummary[] {
     return this.buildYears().map((y) => {
-      const live = y.february.live || y.may.live;
-      const mock =
-        (!y.february.started || y.february.mock) &&
-        (!y.may.started || y.may.mock) &&
-        !live;
+      const live = y.sittings.some((s) => s.live);
+      const mock = y.sittings.every((s) => !s.started || s.mock) && !live;
+      // Newest sitting first: a live run's activity wins, then any started sitting's.
+      const newestFirst = [...y.sittings].reverse();
       const lastActivity =
-        (y.may.live && y.may.lastActivity) ||
-        (y.february.live && y.february.lastActivity) ||
-        (y.may.started && y.may.lastActivity) ||
-        (y.february.started && y.february.lastActivity) ||
+        newestFirst.find((s) => s.live && s.lastActivity)?.lastActivity ||
+        newestFirst.find((s) => s.started && s.lastActivity)?.lastActivity ||
         "—";
       return {
         id: y.id,
@@ -1387,9 +1430,9 @@ export class InMemoryDataProvider implements DataProvider {
         testCentreId: y.testCentreId,
         testCentreName: y.testCentreName,
         examYearId: y.examYearId,
-        february: y.february,
-        may: y.may,
-        participants: Math.max(y.february.participants, y.may.participants),
+        sittings: y.sittings,
+        expectedPeriods: y.expectedPeriods,
+        participants: Math.max(0, ...y.sittings.map((s) => s.participants)),
         lastActivity,
         live,
         mock,
@@ -1398,10 +1441,9 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   /** The Year page's Overall card text for LIVE data: only locked sittings count. */
-  private overallCardNote(y: { february: SittingRef; may: SittingRef }): string {
-    const parts = SITTING_ORDER.map((key) => {
-      const ref = y[key];
-      const label = periodLabel(key);
+  private overallCardNote(y: { sittings: SittingRef[] }): string {
+    const parts = y.sittings.map((ref) => {
+      const label = periodLabel(ref.sitting);
       if (!ref.started) return `${label}: no sitting`;
       return ref.locked ? `${label}: locked — counted` : `${label}: not counted yet — grades not locked`;
     });
@@ -1413,23 +1455,25 @@ export class InMemoryDataProvider implements DataProvider {
     // accepting the legacy derived label-key so any older link still opens.
     const y = this.buildYears().find((yr) => yr.id === yearId || yr.examYearId === yearId);
     if (!y) return null;
-    // Overall is the best-of-two-by-award-level rollup — implemented next prompt.
-    const ready = y.february.started && y.february.locked && y.may.started && y.may.locked;
+    // Overall = the best level per student and subject across the locked sittings.
+    const ready = this.yearReady(y);
+    const two = y.expectedPeriods.length === 2;
+    const expectedLabels = joinPeriodLabels(y.expectedPeriods);
     return {
       id: y.id,
       name: y.name,
       testCentreId: y.testCentreId,
       testCentreName: y.testCentreName,
       examYearId: y.examYearId,
-      february: y.february,
-      may: y.may,
+      sittings: y.sittings,
+      expectedPeriods: y.expectedPeriods,
       overall: {
         ready,
         note: this.hydrated
           ? this.overallCardNote(y)
           : ready
-            ? "Both sittings are locked — the Overall best-of-two rollup runs here."
-            : "Overall becomes available once both the February and May sittings are locked.",
+            ? `${two ? "Both" : "All"} sittings are locked — the Overall ${two ? "best-of-two " : ""}rollup runs here.`
+            : `Overall becomes available once ${two ? "both " : ""}the ${expectedLabels} ${y.expectedPeriods.length === 1 ? "sitting is" : "sittings are"} locked.`,
       },
     };
   }
@@ -2710,8 +2754,8 @@ export class InMemoryDataProvider implements DataProvider {
   private overallFromSittings(year: ReturnType<InMemoryDataProvider["buildYears"]>[number]): OverallGradesModel {
     const infos: OverallSittingInfo[] = [];
     const counted: (GradesModel | null)[] = [];
-    for (const key of SITTING_ORDER) {
-      const ref = year[key];
+    for (const ref of year.sittings) {
+      const key = ref.sitting;
       const label = periodLabel(key);
       let status: OverallSittingStatus;
       let grades: GradesModel | null = null;
@@ -2730,7 +2774,7 @@ export class InMemoryDataProvider implements DataProvider {
       };
       infos.push({
         key, label, cycleId: ref.cycleId, cycleName: ref.cycleName, started: ref.started,
-        locked: ref.started && ref.locked, status, note: note[status],
+        locked: ref.started && ref.locked, expected: ref.expected, status, note: note[status],
       });
       counted.push(
         grades
@@ -2748,14 +2792,20 @@ export class InMemoryDataProvider implements DataProvider {
     const perfLevels = this.grading.performanceLevels;
     const awardLevels = this.grading.awardLevels;
     const starMap = this.grading.starMap;
-    const rows = rollupOrdered({ sittings: counted, assessments, performanceLevels: perfLevels, awardLevels, starMap });
+    const rows = rollupOverall({
+      sittings: infos.map((i, k) => ({ key: i.key, grades: counted[k] ?? null })),
+      assessments,
+      performanceLevels: perfLevels,
+      awardLevels,
+      starMap,
+    });
 
     const distCounts = new Map<string, number>();
     for (const r of rows) distCounts.set(r.award, (distCounts.get(r.award) ?? 0) + 1);
     const distribution = awardLevels.map((level) => ({ level, count: distCounts.get(level) ?? 0 }));
 
-    // "Ready" (final / certifiable) = every period has a sitting and every one is locked.
-    const ready = infos.every((i) => i.started && i.locked);
+    // "Ready" (final / certifiable) = every period the year EXPECTS has a locked sitting.
+    const ready = this.yearReady(year);
     const waiting = infos.filter((i) => i.status === "not_locked" || i.status === "not_started");
     const note = ready
       ? "All sittings are signed off — this Overall is final and certificates issue from it."
@@ -2763,8 +2813,12 @@ export class InMemoryDataProvider implements DataProvider {
         ? `Overall counts only sittings whose grades are locked. ${waiting.map((w) => w.note).join(" · ")}.`
         : `No sitting is locked yet, so nothing is counted. ${waiting.map((w) => w.note).join(" · ")}.`;
 
-    const slot = (i: OverallSittingInfo) => ({ cycleId: i.cycleId, cycleName: i.cycleName });
-    const [first, second] = infos;
+    // Overall-level records (document settings, issue log) attach to a REAL sitting: the
+    // latest counted one, else the latest started one.
+    const recordCycleId =
+      [...infos].reverse().find((i) => i.status === "counted")?.cycleId ??
+      [...infos].reverse().find((i) => i.started)?.cycleId ??
+      null;
     return {
       yearId: year.id,
       yearName: year.name,
@@ -2774,8 +2828,7 @@ export class InMemoryDataProvider implements DataProvider {
       awardLevels,
       starMap,
       performanceLevels: perfLevels,
-      february: first ? slot(first) : null,
-      may: second ? slot(second) : null,
+      recordCycleId,
       sittings: infos,
       ready,
       locked: ready,
@@ -2786,10 +2839,16 @@ export class InMemoryDataProvider implements DataProvider {
 
   /** The in-memory DEMO Overall (legacy provisional view with a synthesized baseline). */
   private overallDemo(year: ReturnType<InMemoryDataProvider["buildYears"]>[number]): OverallGradesModel | null {
-    const mayGrades = year.may.cycleId ? this.gradesOf(year.may.cycleId) : null;
-    const realFeb = year.february.cycleId ? this.gradesOf(year.february.cycleId) : null;
-    // Demo February baseline (only when there's a real May sitting but no real
-    // February grades to compare against).
+    // The demo compares exactly two sittings: the registry's OLDEST period (whose baseline
+    // is synthesized when it has no real grades) and its NEWEST (the live run).
+    const oldestKey = SITTING_ORDER[0]!;
+    const newestKey = SITTING_ORDER[SITTING_ORDER.length - 1]!;
+    const newestRef = this.sittingIn(year, newestKey);
+    const oldestRef = this.sittingIn(year, oldestKey);
+    const mayGrades = newestRef?.cycleId ? this.gradesOf(newestRef.cycleId) : null;
+    const realFeb = oldestRef?.cycleId ? this.gradesOf(oldestRef.cycleId) : null;
+    // Demo baseline for the oldest period (only when there's a real newest sitting but no
+    // real grades for the oldest one to compare against).
     const febGrades = realFeb ?? (mayGrades ? this.demoFebruaryGrades(mayGrades) : null);
     const demo = realFeb === null && febGrades !== null;
 
@@ -2801,8 +2860,10 @@ export class InMemoryDataProvider implements DataProvider {
     const assessments = (mayGrades ?? febGrades)!.assessments;
 
     const rows = rollupOverall({
-      february: febGrades,
-      may: mayGrades,
+      sittings: [
+        { key: oldestKey, grades: febGrades },
+        ...(newestKey !== oldestKey ? [{ key: newestKey, grades: mayGrades }] : []),
+      ],
       assessments,
       performanceLevels: perfLevels,
       awardLevels,
@@ -2813,10 +2874,11 @@ export class InMemoryDataProvider implements DataProvider {
     for (const r of rows) distCounts.set(r.award, (distCounts.get(r.award) ?? 0) + 1);
     const distribution = awardLevels.map((level) => ({ level, count: distCounts.get(level) ?? 0 }));
 
-    const ready = year.february.started && year.february.locked && year.may.started && year.may.locked;
+    const ready = this.yearReady(year);
+    const two = year.expectedPeriods.length === 2;
     const note = ready
-      ? "Both sittings are signed off — this Overall is final and certificates issue from it."
-      : "Overall is provisional until both the February and May sittings are locked; figures shown are the current best-of-two.";
+      ? `${two ? "Both" : "All"} sittings are signed off — this Overall is final and certificates issue from it.`
+      : `Overall is provisional until ${two ? "both " : ""}the ${joinPeriodLabels(year.expectedPeriods)} sittings are locked; figures shown are the current best-of-two.`;
 
     return {
       yearId: year.id,
@@ -2827,8 +2889,7 @@ export class InMemoryDataProvider implements DataProvider {
       awardLevels,
       starMap,
       performanceLevels: perfLevels,
-      february: { cycleId: year.february.cycleId, cycleName: year.february.cycleName },
-      may: { cycleId: year.may.cycleId, cycleName: year.may.cycleName },
+      recordCycleId: newestRef?.cycleId ?? oldestRef?.cycleId ?? null,
       ready,
       locked: ready,
       demo,
@@ -3004,7 +3065,7 @@ export class InMemoryDataProvider implements DataProvider {
     ];
     const subjectOrder = slotDefs.map((d) => ({ slot: d.slot, assessment: resolve(d.re)?.name ?? d.slot }));
 
-    const base = this.docSettings(overall.may?.cycleId ?? yearId);
+    const base = this.docSettings(overall.recordCycleId ?? yearId);
     const settings: DocSettings = { ...base, cycleName: `${overall.yearName} · Overall` };
 
     // Students are populated whether or not the Overall is locked, so draft proofs
@@ -6327,7 +6388,7 @@ export class InMemoryDataProvider implements DataProvider {
       // 0010 — the sitting (and its year) is created under a chosen test centre.
       testCentres: active.map((c) => ({ ...c })),
       defaultTestCentreId: active[0]?.id ?? null,
-      defaultSitting: "may",
+      defaultSitting: DEFAULT_NEW_PERIOD,
       // Existing REAL exam years (a year row exists only on live data) the new
       // sitting can attach to, with the periods each already has.
       // (A workspace with no centres has no years either — and no primary centre to
@@ -6338,9 +6399,7 @@ export class InMemoryDataProvider implements DataProvider {
           examYearId: y.examYearId!,
           name: y.name,
           testCentreId: y.testCentreId,
-          takenSittings: ([y.february, y.may] as const)
-            .filter((slot) => slot.started)
-            .map((slot) => slot.sitting),
+          takenSittings: y.sittings.filter((slot) => slot.started).map((slot) => slot.sitting),
         })),
     };
   }
@@ -6433,6 +6492,24 @@ export class InMemoryDataProvider implements DataProvider {
       }
     }
     this.audit("config", "Moved exam year to centre", `${year.name} → ${target.name}`, null);
+    this.bump();
+    return Promise.resolve();
+  }
+
+  /**
+   * Set the periods a year expects (0051). The in-memory demo has no database year rows, so
+   * only a year that carries a real `examYearId` can be configured; the demo's years always
+   * expect the registry defaults. Same gate as moving a year between centres.
+   */
+  setYearExpectedPeriods(yearId: string, periods: SittingKey[]): Promise<void> {
+    if (!this.permitted("general.manage_centres")) return Promise.resolve();
+    const year = this.buildYears().find((y) => y.id === yearId || y.examYearId === yearId);
+    if (!year) return Promise.reject(new Error("Exam year not found."));
+    if (!year.examYearId) return Promise.reject(new Error("This year can't be configured — it has no database record yet."));
+    const keys = sortPeriods([...new Set(periods)]);
+    if (keys.length === 0) return Promise.reject(new Error("A year must expect at least one period."));
+    this.ws.expectedPeriodsByYear.set(year.examYearId, keys);
+    this.audit("config", "Set expected periods", `${year.name}: ${joinPeriodLabels(keys)}`, null);
     this.bump();
     return Promise.resolve();
   }

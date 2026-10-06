@@ -78,7 +78,7 @@ import {
   awardLabels,
   type QualityRating,
 } from "@/lib/engine";
-import { subjectKeyOf, type OACell, type OASitting, type OASittingStudent } from "./overall-analytics";
+import { SLOT_PERIODS, subjectKeyOf, type OACell, type OASitting, type OASittingStudent } from "./overall-analytics";
 import { buildAssessmentDiagnostics, cleanDiagResponses, type DiagResponse } from "@/lib/diagnostics";
 import type { EssayUploadRow, IncidentInput, IncidentDecisionInput } from "./provider";
 import type { ExamIncidentRecord, ExamIncidentMatchStatus } from "@/lib/incidents/exam-incident-match";
@@ -1194,13 +1194,16 @@ export async function fetchOverallAnalytics(supabase: DB): Promise<OverallAnalyt
       const yearNum = Number(y.name.match(/(19|20)\d{2}/)?.[0] ?? y.name);
       if (!Number.isFinite(yearNum)) continue;
       const centre = centreNameById.get(y.test_centre_id) ?? "Unassigned";
-      const sitting = c.sitting === "february" ? "february" : "may";
+      // The analytics projection compares two periods; a sitting in any other period is
+      // left out of it (never mislabelled as one of the two).
+      const slotIndex = SLOT_PERIODS.indexOf(c.sitting as (typeof SLOT_PERIODS)[number]);
+      if (slotIndex < 0) continue;
       const sit = buildSitting(c.id);
       if (!sit) continue;
       const key = `${centre}|${yearNum}`;
       const cell = cellByKey.get(key) ?? { centre, year: yearNum, february: null, may: null };
       // First non-empty sitting wins per slot (a re-run cycle shouldn't double it).
-      if (sitting === "february") cell.february ??= sit;
+      if (slotIndex === 0) cell.february ??= sit;
       else cell.may ??= sit;
       cellByKey.set(key, cell);
       yearsPresent.add(yearNum);

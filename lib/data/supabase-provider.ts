@@ -30,7 +30,8 @@
  * `getAccessStatus()` (not part of DataProvider) lets the shell render the sign-in /
  * access-denied states for the invite-only model. See docs/multi-sitting-provider.md.
  */
-import type { Database } from "@/lib/types/database";
+import type { Database, ExamYearRow } from "@/lib/types/database";
+import { isSittingKey, sortPeriods, type SittingKey } from "./periods";
 import type { ActionDef, ActionKey, Role } from "@/lib/auth/actions";
 import { buildMembersModel, parseMemberKey, type MemberDirRow } from "./member-directory";
 import type { SupabaseBrowserClient } from "@/lib/supabase/client";
@@ -301,6 +302,7 @@ export class SupabaseDataProvider implements DataProvider {
     // the "Start a sitting" picker must offer real centre UUIDs (never a mock slug).
     this.workspace.testCentres = ws.testCentres.map((c) => ({ ...c }));
     this.ctx = { years: ws.years, testCentres: ws.testCentres };
+    this.applyYearExpectedPeriods(ws.years);
     this.applyWorkspaceDecisions(ws.decisions);
     this.setLights(ws.cycles);
     await this.fetchMembers();
@@ -317,9 +319,26 @@ export class SupabaseDataProvider implements DataProvider {
     const ws = await loadWorkspace(this.supabase);
     this.workspace.testCentres = ws.testCentres.map((c) => ({ ...c }));
     this.ctx = { years: ws.years, testCentres: ws.testCentres };
+    this.applyYearExpectedPeriods(ws.years);
     this.setLights(ws.cycles);
     this.status = this.lights.size === 0 ? "no-cycle" : "ok";
     this.bump();
+  }
+
+  /**
+   * Publish each year's `expected_periods` to the shared workspace. A year whose column is
+   * absent (a database that has not applied 0051 yet) or holds nothing usable is left out of
+   * the map, so it expects the registry defaults — exactly the old February + May behaviour.
+   */
+  private applyYearExpectedPeriods(years: ExamYearRow[]): void {
+    const map = new Map<string, SittingKey[]>();
+    for (const y of years) {
+      const raw = (y as { expected_periods?: unknown }).expected_periods;
+      if (!Array.isArray(raw)) continue;
+      const keys = sortPeriods([...new Set(raw.filter(isSittingKey))]);
+      if (keys.length > 0) map.set(y.id, keys);
+    }
+    this.workspace.expectedPeriodsByYear = map;
   }
 
   private setLights(cycles: LightCycle[]): void {
@@ -1288,6 +1307,21 @@ export class SupabaseDataProvider implements DataProvider {
     });
     if (error) throw new Error(error.message);
     await this.refreshWorkspace();
+  }
+  // Which periods a year must have a LOCKED sitting in before its Overall is final
+  // (0051). Server-authoritative like the centre move: the RPC owns the gate and the
+  // validation, so call it first and surface its message, then re-read the workspace.
+  async setYearExpectedPeriods(yearId: string, periods: SittingKey[]): Promise<void> {
+    const year = this.dir.listYears().find((y) => y.id === yearId || y.examYearId === yearId);
+    const realYearId = year?.examYearId;
+    if (!realYearId) throw new Error("This year can't be configured — it has no database record yet.");
+    if (periods.length === 0) throw new Error("A year must expect at least one period.");
+    const { error } = await this.rpcFn("set_year_expected_periods", {
+      p_year_id: realYearId,
+      p_periods: sortPeriods([...new Set(periods)]),
+    });
+    if (error) throw new Error(error.message);
+    await this.refreshCycleList();
   }
   setSafeguardConfig(patch: { topDifficultyDemand?: string }): void {
     this.dir.setSafeguardConfig(patch);

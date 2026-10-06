@@ -122,6 +122,15 @@ export function makeLiveFake(db: MockDb, opts: LiveFakeOptions = {}): LiveFake {
           if (c) c.status = "draft";
           return { data: n, error: null };
         }
+        // 0051 — the real RPC de-duplicates, refuses an empty list and returns the year row.
+        case "set_year_expected_periods": {
+          const y = rows("exam_years").find((r) => r.id === args.p_year_id);
+          if (!y) return { data: null, error: { message: "exam year not found" } };
+          const list = [...new Set((args.p_periods as string[]) ?? [])];
+          if (list.length < 1) return { data: null, error: { message: "a year must expect at least one period" } };
+          y.expected_periods = list;
+          return { data: y, error: null };
+        }
         case "list_members":
           return { data: [], error: null };
         default:

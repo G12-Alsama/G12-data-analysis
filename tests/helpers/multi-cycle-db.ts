@@ -19,7 +19,7 @@ export interface SittingSpec {
   id: string;
   name: string;
   /** Stored period. */
-  sitting: "february" | "may";
+  sitting: string;
   /** exam_cycles.status (default "in_review"). 'locked' = grades locked. */
   status?: string;
   /** created_at offset in minutes — larger = newer. */

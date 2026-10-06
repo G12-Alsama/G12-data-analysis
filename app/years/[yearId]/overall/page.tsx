@@ -1,12 +1,12 @@
 "use client";
 
 /**
- * Overall (best-of-two) view.
+ * Overall view.
  *
  * Per the year model, Overall takes — for every student and every subject — the
- * HIGHER award level across the February and May sittings (best-of-two by level
- * RANK, not raw score). Each cell is tagged with the sitting it came from
- * (Feb / May) for provenance, and the overall award is DERIVED from the rolled-up
+ * BEST performance level across the year's locked sittings (by level RANK, not raw
+ * score; a tie goes to the latest sitting). Each cell is tagged with the sitting it
+ * came from (its short period label) for provenance, and the overall award is DERIVED from the rolled-up
  * per-subject levels using the existing award-derivation rule. It is a derived
  * aggregation, not a pipeline run — no scoring/engine/safeguard work runs here;
  * each sitting's award is already its own signed-off, safeguard-checked result.
@@ -23,7 +23,8 @@ import { Icon, Mark } from "@/components/ui/icons";
 import { MiniGradeBars } from "@/components/ui/charts";
 import { StepIntro } from "@/components/ui/StepIntro";
 import { AWARD_SHORT } from "@/lib/data/grading";
-import type { OverallGradeCell, OverallSittingInfo } from "@/lib/data/types";
+import { SITTING_ORDER, periodLabel, periodRank, periodShortLabel } from "@/lib/data/periods";
+import type { OverallGradeCell, OverallGradeRow, OverallSittingInfo } from "@/lib/data/types";
 
 /** Plain subject-name column header, matching the Grades screen. */
 function subjectHeader(shortName: string): string {
@@ -35,12 +36,13 @@ function subjectHeader(shortName: string): string {
   return shortName.split(" ")[0] ?? shortName;
 }
 
-/** A small Feb / May provenance tag for one Overall cell. */
+/** A small provenance tag (the sitting's short period label) for one Overall cell. */
 function SourceTag({ source }: { source: OverallGradeCell["source"] }) {
-  const isFeb = source === "february";
+  // The year's first period reads as the neutral tag, later ones as the accent.
+  const isFirst = periodRank(source) === 0;
   return (
     <span
-      title={`Best result came from the ${isFeb ? "February" : "May"} sitting`}
+      title={`Best result came from the ${periodLabel(source)} sitting`}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -51,24 +53,23 @@ function SourceTag({ source }: { source: OverallGradeCell["source"] }) {
         fontWeight: 700,
         letterSpacing: 0.3,
         textTransform: "uppercase",
-        background: isFeb ? H.tint2 : H.pinkSoft,
-        color: isFeb ? H.ink2 : H.pink,
+        background: isFirst ? H.tint2 : H.pinkSoft,
+        color: isFirst ? H.ink2 : H.pink,
       }}
     >
-      {isFeb ? "Feb" : "May"}
+      {periodShortLabel(source)}
     </span>
   );
 }
 
-/** Per-subject Overall cell: stars + the Feb/May provenance tag (best-of-two). */
+/** Per-subject Overall cell: stars + the provenance tag (best level across the sittings). */
 function OverallCell({ cell, starMap }: { cell?: OverallGradeCell; starMap: Record<string, string> }) {
   if (!cell) {
     return <span className="hf-mono" style={{ color: H.ink3 }}>·</span>;
   }
   const tooltip =
-    `Best of two — chosen ${cell.level} (${cell.source === "february" ? "February" : "May"})` +
-    `\nFebruary: ${cell.februaryLevel ?? "no result"}` +
-    `\nMay: ${cell.mayLevel ?? "no result"}`;
+    `${cell.levels.length === 2 ? "Best of two" : `Best of ${cell.levels.length}`} — chosen ${cell.level} (${periodLabel(cell.source)})` +
+    cell.levels.map((l) => `\n${periodLabel(l.key)}: ${l.level ?? "no result"}`).join("");
   return (
     <span title={tooltip} style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
       <span
@@ -121,6 +122,19 @@ function AwardBadge({ award }: { award: string }) {
 }
 
 /**
+ * A "only in …" note for a student missing from some of the sittings rolled up, or null.
+ * `total` is how many sittings the rollup covers (the year's listed sittings).
+ */
+function presenceNote(r: OverallGradeRow, total: number): { text: string; title: string } | null {
+  if (r.presentIn.length === 0 || r.presentIn.length >= total) return null;
+  const missing = SITTING_ORDER.filter((k) => !r.presentIn.includes(k));
+  return {
+    text: `${r.presentIn.map(periodShortLabel).join(" + ")} only`,
+    title: `No result in the ${missing.map(periodLabel).join(" / ")} sitting${missing.length === 1 ? "" : "s"} — ${r.presentIn.map(periodLabel).join(" / ")} stand${r.presentIn.length === 1 ? "s" : ""}`,
+  };
+}
+
+/**
  * Which of the year's sittings count toward this Overall. Only sittings whose grades are
  * LOCKED count; an unlocked one is shown here — with why — instead of silently ignored.
  */
@@ -161,6 +175,15 @@ export default function YearOverallPage({ params }: { params: { yearId: string }
   const provider = useProvider();
   const year = useProviderData((p) => p.getYear(params.yearId), [params.yearId]);
   const model = useProviderData((p) => p.getOverallGrades(params.yearId), [params.yearId]);
+  // Demo copy names the sitting that carries the real grades.
+  const recordCycleName = useProviderData(
+    (p) => {
+      const id = p.getOverallGrades(params.yearId)?.recordCycleId;
+      return id ? p.getCycle(id)?.name : undefined;
+    },
+    [params.yearId],
+  );
+  const sittingCount = model?.sittings?.length ?? SITTING_ORDER.length;
   // Overall counts the year's LOCKED sittings: make sure their data is loaded.
   useEffect(() => {
     void provider.ensureYearLoaded(params.yearId);
@@ -219,17 +242,24 @@ export default function YearOverallPage({ params }: { params: { yearId: string }
 
         <div className="hf-sub" style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <span>
-            Best of two by <strong>award level</strong> (not raw score), per student per subject. The <span style={{ color: H.pink, fontWeight: 700 }}>Feb</span>/<span style={{ color: H.pink, fontWeight: 700 }}>May</span> tag shows which sitting each result came from; the overall award is derived from the best-of-two levels.
+            {sittingCount === 2 ? "Best of two" : "Best of the sittings"} by <strong>award level</strong> (not raw score), per student per subject. The{" "}
+            {SITTING_ORDER.map((k, i) => (
+              <span key={k}>
+                {i > 0 && "/"}
+                <span style={{ color: H.pink, fontWeight: 700 }}>{periodShortLabel(k)}</span>
+              </span>
+            ))}{" "}
+            tag shows which sitting each result came from; the overall award is derived from the {sittingCount === 2 ? "best-of-two" : "best"} levels.
           </span>
           {model?.demo && (
-            <Badge tone="warn">Demo February sitting</Badge>
+            <Badge tone="warn">Demo {periodLabel(SITTING_ORDER[0]!)} sitting</Badge>
           )}
         </div>
         {model?.demo && (
           <Card style={{ padding: "10px 14px", background: H.warnSoft, display: "flex", gap: 10, alignItems: "flex-start" }}>
             <Mark kind="warn" size={15} />
             <span className="hf-sub" style={{ fontSize: 11.5 }}>
-              Live Supabase is unreachable in this environment and the seed carries real grades only for the {model.may?.cycleName ?? "May"} sitting, so the February baseline shown here is <strong>generated from the May cohort</strong> to demonstrate the best-of-two rollup. With real two-sitting data the same view reads both sittings’ signed-off grades.
+              Live Supabase is unreachable in this environment and the seed carries real grades only for the {recordCycleName ?? periodLabel(SITTING_ORDER[SITTING_ORDER.length - 1]!)} sitting, so the {periodLabel(SITTING_ORDER[0]!)} baseline shown here is <strong>generated from the {periodLabel(SITTING_ORDER[SITTING_ORDER.length - 1]!)} cohort</strong> to demonstrate the best-of-two rollup. With real two-sitting data the same view reads both sittings’ signed-off grades.
             </span>
           </Card>
         )}
@@ -259,8 +289,10 @@ export default function YearOverallPage({ params }: { params: { yearId: string }
                         <div style={{ fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.label}>{r.label}</div>
                         <div className="hf-mono" style={{ fontSize: 10.5, color: H.ink3, marginTop: 1, display: "flex", gap: 6, alignItems: "center" }}>
                           <span title="Student ID">{r.studentId}</span>
-                          {!r.inMay && <span title="Did not retake in May — February stands" style={{ color: H.ink2 }}>Feb only</span>}
-                          {!r.inFebruary && <span title="No February result — May stands" style={{ color: H.ink2 }}>May only</span>}
+                          {(() => {
+                            const note = presenceNote(r, model.sittings?.length ?? SITTING_ORDER.length);
+                            return note ? <span title={note.title} style={{ color: H.ink2 }}>{note.text}</span> : null;
+                          })()}
                         </div>
                       </div>
                     </td>
