@@ -22,6 +22,18 @@ export interface Sitting {
   label: string;
 }
 
+/**
+ * The span of dates the export's graded results carry (`ResultStartLocal` /
+ * `ResultFinishedLocal`), as ISO `yyyy-mm-dd`. Only present when the export has parsable
+ * date columns — they are optional in a QM export.
+ */
+export interface ResultDateRange {
+  from: string;
+  to: string;
+  /** How many graded results contributed a date. */
+  datedResults: number;
+}
+
 /** A participant, keyed by the resolved unique identity — every personal field
  *  retained (GDPR: live only). */
 export interface QmParticipant {
@@ -183,6 +195,8 @@ export interface CanonicalModel {
   resitForms: ResitForm[];
   /** Distinct raw assessment names dropped as surveys/UX. */
   excludedSurveys: string[];
+  /** Dates carried by the graded results, or null when the export has none (optional columns). */
+  dateRange: ResultDateRange | null;
   stats: {
     assessmentRows: number;
     itemRows: number;
