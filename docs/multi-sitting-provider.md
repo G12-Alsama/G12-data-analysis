@@ -1,6 +1,9 @@
-# Multi-sitting provider — design note (Phase 1)
+# Multi-sitting provider — design note (Phase 1 + Phase 2)
 
-Status: implemented on `G12_App_Improvement`. This note records the design the code
+Phase 1 status: implemented and live. Phase 2 (below, from "Phase 2 —") records the
+period registry, N-sitting Overall, expected periods and the persisted-grades design.
+
+Phase 1 status: implemented on `G12_App_Improvement`. This note records the design the code
 follows; where the code and this note disagree, the code wins and this note is a bug.
 
 ## Problem
@@ -159,3 +162,199 @@ are unchanged and are the remaining two-slot coupling.
 * Opening a sitting: **20 queries**; a 37,500-response sitting (250 students × 5 subjects
   × 30 items) took ≈ 1 s CPU and retained ≈ 3.5 MB (≈ 95 bytes per response).
 * `getGrades` for that sitting: ≈ 175 ms (recomputed on read, as before).
+
+---
+
+# Phase 2 — periods, N-sitting Overall, readiness, persisted grades
+
+Status: steps 1–3, 5, 6, 8 implemented; step 4 (persisted grades) is **design only** and
+step 7 (access) is a **report only** — nothing in either was changed. Where the code and
+this note disagree, the code wins and this note is a bug.
+
+Decisions taken as given: Overall = best performance level per student and subject across
+**locked** sittings; ties go to the latest sitting by **period order** within the year (not
+`sitting_date`); students match on `qm_participant_id` (email); demo mode is untouched; one
+sitting per period per year per centre; only February and May exist today but any month may
+be added later.
+
+## 1. Period registry (`lib/data/periods.ts`)
+
+One table, `PERIOD_DEFS`: `key`, `label`, `shortLabel`, `month`, `order`, `covers` (the
+calendar months an export dated in them is attributed to the period), `expectedByDefault`.
+`SittingKey` is derived from it; the validator rejects duplicate keys/orders and any month
+covered by zero or two periods. Everything that used to spell `"february" | "may"` now asks
+the registry: the Years/Year/Overall/New-sitting pages, `YearSummary`/`YearDetail`
+(`sittings: SittingRef[]` in period order instead of `february`/`may` fields), the Overall
+cell (`levels[]`), the QM sitting parser (`parseSitting` → `periodOfMonth`), the legacy
+name fallback, the document generator's source tag, and the DB type alias.
+
+**Adding a period = one `PERIOD_DEFS` entry + one migration** extending the enum
+(`supabase/drafts/add-sitting-period.template.sql`, including the `ALTER TYPE … ADD VALUE`
+transaction caveat). `tests/periods.registry.test.ts` fails if the registry and the
+`sitting_period` enum declared by the migrations disagree, in either direction.
+Only the sitting **slots** are generic; one remaining deliberate two-slot coupling is the
+`/analytics` projection (`OACell.february/may`, "Sat Feb → Sat May" sections): it compares
+the registry's first two periods and now **skips** a sitting in any other period instead of
+mislabelling it. Generalising it belongs with persisted grades (step 4).
+
+## 2. N-sitting rollup (`lib/data/overall.ts`)
+
+`rollupOverall({ sittings: [{key, grades}], … })` takes any number of sittings, one per
+period. It orders them by the registry, walks oldest → newest and lets a later sitting take
+the cell on `<=`, so a tie goes to the latest and an older sitting wins only when strictly
+better. A sitting with `grades: null` (not counted) contributes nothing but still appears in
+each cell's `levels`. An unknown or duplicate period throws (a wrong input must not be
+guessed). `OverallGradeCell` is `{ level, stars, source, levels: [{key, level|null}] }`;
+`OverallGradeRow` carries `presentIn` (periods) instead of `inFebruary`/`inMay`.
+`rollupOrdered` is the positional adapter (entry *i* = registry period *i*, or explicit
+`keys`) and no longer refuses more than two.
+
+## 3. Expected periods ("ready")
+
+`exam_years.expected_periods sitting_period[] not null default '{february,may}'`
+(migration 0051). A year is **ready** when it has an expected list and every expected period
+has a started, locked sitting. A locked sitting in a non-expected period is counted but never
+blocks; an unlocked one is listed "not counted yet" and does not block readiness either.
+Years show a tile for every expected period plus any period that has a sitting. With the
+default list the behaviour is identical to the old hard-coded pair (tests pin this).
+The default for an unconfigured year comes from the registry (`expectedByDefault`), so adding
+a period does **not** make every old year "not ready". The client reads `select *` from
+`exam_years` and treats a missing column as "defaults", so the code can ship before the
+migration is applied. Setting a year's list is `set_year_expected_periods(p_year_id,
+p_periods)` (same gate as moving a year between centres).
+
+## 4. Persisted grades — DESIGN ONLY (nothing implemented)
+
+### What exists today (verified)
+
+* `grades(cycle_id, participant_id, scope, grade_label, score, locked, signed_off_*)`,
+  `unique(cycle_id, participant_id, scope)`; `scope` = assessment id or `'overall'`. The app
+  never writes it. `lock_grades(p_cycle)` (0041, gate `general.signoff`) flips `grades.locked`
+  for rows that exist (none) and sets `exam_cycles.status='locked'`; it computes and checks
+  nothing. `unlock_grades` sets `status='graded'` (reason required).
+* Grades are computed **only in client TypeScript** (`InMemoryDataProvider.getGrades`, from
+  hydrated state). The only server-side engine is `recomputeAndWrite` (raw scores into
+  `score_runs`/`participant_scores`); it computes **no** cut points, levels, awards, D3 cap,
+  adjustments-as-grades. `participant_scores` are **pre-adjustment** (alterations/manual
+  adjustments, essay and incident effects, item/row exclusions live outside them).
+* Only reader: `fetchOverallAnalytics` (unfiltered: no `locked`, no status, no sample flag).
+  Real sittings have no rows, so `/analytics` shows only the 0043 synthetic seed
+  (`△ Sample …` centres, 12 sittings, `engine_version='seed-synthetic'`).
+* **No server-side lock enforcement exists**: no RPC or route checks `status`. Ingest sets
+  `in_review` and `clear_cycle_ingest` deletes `grades`; so re-ingesting a locked sitting
+  silently unlocks it and drops its rows. `clear_sitting_data` sets `draft`.
+
+### Options
+
+| | A. Client-computed snapshot sent at lock | B. Server recompute at lock (recommended) | C. Port grading to SQL |
+| --- | --- | --- | --- |
+| Who computes | the browser (`getGrades`), POSTed | a Node route re-runs the same TS code on persisted state | plpgsql |
+| Matches what the signer saw | exactly | yes, if their decisions are persisted; enforced by a digest check | no guarantee |
+| Trust | server must validate a client-supplied payload; a user holding `general.signoff` could post any numbers | none placed in the client | none |
+| Code | smallest | medium: reuse `hydrateCycle` + `InMemoryDataProvider` server-side (no second implementation) | large; duplicates a parity-locked engine (183/183 vs `reconcile.py`) |
+| Drift risk | none | none (same code) | high |
+
+### Recommendation: B, with the signer's view as a precondition
+
+1. UI "Lock grades" sends `POST /api/cycles/:id/lock { viewDigest }` where `viewDigest` is a
+   hash of the grades the user is looking at.
+2. The route authenticates the user, checks `app.can_do(cycle,'general.signoff')` with the
+   user's own client, then builds the sitting server-side with the **same** code
+   (`hydrateCycle` → `InMemoryDataProvider` → `getGrades`) using the service client. If its
+   digest ≠ `viewDigest` it refuses ("this sitting changed since you reviewed it — reload").
+3. It calls `lock_grades_snapshot(p_cycle, p_actor, p_header, p_rows)` — **service_role
+   only** — which, in one transaction, re-checks the actor's gate, writes the snapshot,
+   `grades` rows and flips `status`. `lock_grades` is revoked from `authenticated` so a
+   client cannot lock without a snapshot. A failure anywhere leaves the sitting unlocked.
+
+Fallback if server hydration proves too heavy: option A with server validation (levels ∈
+vocabulary, exactly one row per cohort participant matching `participants`, counts agree).
+
+### Snapshot schema
+
+* Header `grade_snapshots(id, cycle_id, state ('active'|'stale'|'superseded'), source
+  ('lock'|'backfill'|'seed'), locked_at, locked_by, engine_version, inputs_digest,
+  participant_count, config jsonb)`; `config` freezes the grading vocabulary, per-assessment
+  cuts, borderline/safeguard settings and the *effects* applied (counts and ids of item
+  exclusions, clean removals, cohort exclusions, manual adjustments, incident alterations, D3
+  overrides) so an auditor can see what produced the numbers.
+* Rows: keep using `grades` (so `fetchOverallAnalytics` keeps working) with `snapshot_id`,
+  `student_key` (the `qm_participant_id`), `grade_label`, `score` (**post-adjustment** pct),
+  and a `detail jsonb` (raw, max, stars, marginal, D3 cap, award, adjusted flag). One active
+  snapshot per cycle. Values come from the computed `GradesModel`, **never** from
+  `participant_scores`, so adjustments, exclusions and incident effects are included.
+
+### Lifecycle
+
+* **Unlock:** `unlock_grades` marks the header `stale` (same transaction); rows stay for
+  comparison but every reader filters on `status='locked'` **and** `state='active'`.
+* **Re-lock:** replaces the rows, supersedes the old header.
+* **Re-ingest / re-score of a locked sitting:** today these silently unlock/delete. Proposed:
+  refuse server-side while `status='locked'` ("unlock first"), via one `app.assert_unlocked`
+  guard added to the input-changing RPCs and the ingest/recompute routes. Until that exists
+  the snapshot would silently diverge; the header's `inputs_digest` lets a reader detect it.
+* **Workspace config change after lock:** the snapshot is the frozen truth; the live
+  recompute may differ — surface "config changed since lock" by comparing `config` digests.
+
+### Backfill (the existing locked production sitting)
+
+A one-off, idempotent admin route runs the same compute path for every `locked` cycle with
+no active snapshot and writes `source='backfill'`, `locked_by` = null, `locked_at` =
+`exam_cycles.updated_at`. It reflects **current** inputs, not necessarily those at lock time —
+hence the flag and a dry-run mode that prints a diff against what the UI shows; the lead
+admin confirms before writing.
+
+### `/analytics`
+
+`fetchOverallAnalytics` joins `exam_cycles.status='locked'` and `grade_snapshots.state='active'`.
+Unlocked/stale/superseded sittings never appear. Its two-slot cell structure is generalised
+with the registry at the same time.
+
+### Sample data stays labelled
+
+Add `test_centres.is_sample boolean not null default false` (backfilled for the 0043
+centres) and give the 0043 rows a header with `source='seed'`, so they keep matching the new
+filter. Cells carry `synthetic: true` (already in `OACell`); the page tags them "Sample" and
+excludes them from real aggregates by default.
+
+### Test plan
+
+SQL/real-PG: lock writes snapshot + status atomically and rolls back on error; `lock_grades`
+not callable by `authenticated`; unlock stales; re-lock supersedes; guard refuses input
+changes while locked; 0043 rows keep showing, labelled. Unit: snapshot includes a manual
+adjustment, an item exclusion and an incident effect (golden: snapshot pct == `getGrades`, ≠
+`participant_scores`); digest mismatch refuses; analytics excludes unlocked/stale; backfill is
+idempotent and flags `source`; sample centres are tagged.
+
+## 5. Overall documents
+
+`getOverallDocuments` used to return `cycleId: yearId`, and the documents page sent that to
+`record_documents(p_cycle)` — which checks `app.is_member(p_cycle)` on a **year** id, so the
+event was refused and lost. The model now carries `recordCycleId` (the latest counted sitting,
+else the latest started one) and `yearId`; the document-issue audit event is recorded against
+that real cycle with the year named in the detail. No migration: the audit row belongs to a
+real sitting. `getOverallGrades`/`getOverallDocuments`/`getYear` all resolve a year by either
+`y.id` or the real `exam_years.id`.
+
+## 6. Upload mismatch warning
+
+All parsing happens in the browser before anything is sent, so the check sits between
+`ingestThreeExports` and `ingestRawExport`. The canonical model now also carries the export's
+result date range (`ResultStartLocal`/`ResultFinishedLocal`, when present). A pure function
+compares the export's tagged year/period (from `ResultGroupName`) and its dates (year and
+registry period of the date range) with the sitting's year and period. Any difference shows a
+warning that must be confirmed ("Upload anyway" / "Cancel"); it never hard-blocks. An export
+with no date columns, or no group-name tag, compares only what it has; with nothing to compare
+there is no warning. `sitting_date` is display-only and is not compared.
+
+## 7. Access (report only — nothing changed)
+
+See the Phase 2 report: `exam_years` read access (`app.is_year_member`) ignores workspace
+(`cycle_id IS NULL`) memberships, memberships do not carry to new sittings, and a viewer
+who is a member of only some sittings sees the others as "Not started".
+
+## Known limits / deliberate choices (Phase 2)
+
+* The `/analytics` projection stays two-slot (see §1).
+* Loaded sittings are still not evicted.
+* Demo mode is unchanged (its copy is generated from the registry but reads identically).
