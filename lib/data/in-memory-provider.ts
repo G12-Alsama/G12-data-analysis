@@ -3089,7 +3089,7 @@ export class InMemoryDataProvider implements DataProvider {
       }),
     }));
 
-    return { cycleId: yearId, locked, students, settings, subjectOrder, signOff, readiness };
+    return { cycleId: overall.recordCycleId ?? "", yearId: overall.yearId, locked, students, settings, subjectOrder, signOff, readiness };
   }
 
   /**
@@ -6469,7 +6469,7 @@ export class InMemoryDataProvider implements DataProvider {
   moveExamYearToCentre(yearId: string, testCentreId: string): Promise<void> {
     if (!this.permitted("general.manage_centres")) return Promise.resolve();
     const years = this.buildYears();
-    const year = years.find((y) => y.id === yearId);
+    const year = years.find((y) => y.id === yearId || y.examYearId === yearId);
     if (!year) return Promise.reject(new Error("Exam year not found."));
     const target = this.testCentres.find((c) => c.id === testCentreId);
     if (!target) return Promise.reject(new Error("Test centre not found."));

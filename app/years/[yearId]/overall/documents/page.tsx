@@ -119,7 +119,8 @@ export default function OverallDocumentsPage({ params }: { params: { yearId: str
       }
       const total = Object.values(res.kinds).reduce((s, k) => s + (k?.complete ?? 0), 0);
       const tag = draft ? "DRAFT proof" : "OFFICIAL issue (all pre-issue gates passed)";
-      provider.recordDocuments(model.cycleId, `${tag}: ${total} Overall .pptx across ${kinds.join(" + ")} (zip)`);
+      // Recorded against a REAL sitting of the year (the model's `cycleId`), never the year id.
+      if (model.cycleId) provider.recordDocuments(model.cycleId, `${tag}: ${total} Overall .pptx across ${kinds.join(" + ")} (zip)`);
     } catch (e) {
       setError((e as Error).message);
       setStep("config");

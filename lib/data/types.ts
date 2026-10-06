@@ -1558,7 +1558,14 @@ export interface IssuanceReadiness {
 }
 
 export interface DocumentsModel {
+  /**
+   * The REAL sitting (exam_cycles id) that document settings and the document-issue log
+   * attach to. For the Overall documents model it is the year's latest counted sitting
+   * (else its latest started one) — never a year id; "" only when the year has no sitting.
+   */
   cycleId: string;
+  /** The year this model is for (Overall documents model only). */
+  yearId?: string;
   /**
    * True once all contributing sittings are locked/signed off. Note: `students`
    * is populated regardless (provisional or final) so draft proofs and the

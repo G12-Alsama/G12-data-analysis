@@ -1296,7 +1296,7 @@ export class SupabaseDataProvider implements DataProvider {
   // The move is pure labelling: no scoring/grade data is read or recomputed, so no
   // sitting is reloaded — only the workspace + list are re-read.
   async moveExamYearToCentre(yearId: string, testCentreId: string): Promise<void> {
-    const year = this.dir.listYears().find((y) => y.id === yearId);
+    const year = this.dir.listYears().find((y) => y.id === yearId || y.examYearId === yearId);
     const realYearId = year?.examYearId;
     if (!realYearId) {
       throw new Error("This year can't be reassigned — it has no database record yet.");
@@ -1430,7 +1430,12 @@ export class SupabaseDataProvider implements DataProvider {
     this.rpc("record_export", { p_cycle: cycleId, p_kind: detail });
   }
   recordDocuments(cycleId: string, detail: string): void {
-    if (!this.write(cycleId, (p) => p.recordDocuments(cycleId, detail))) return;
+    // The event belongs to a REAL sitting. The Overall documents page records against the
+    // year's latest counted sitting, which may not be loaded (an unlocked one is never
+    // loaded for the Overall) — the audit RPC needs only the id, so fire it for any sitting
+    // the directory knows. An id that is not a sitting (e.g. a year id) records nothing.
+    const loaded = this.write(cycleId, (p) => p.recordDocuments(cycleId, detail));
+    if (!loaded && !this.lights.has(cycleId)) return;
     this.rpc("record_documents", { p_cycle: cycleId, p_detail: detail });
   }
 
