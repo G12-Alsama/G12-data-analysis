@@ -11,7 +11,7 @@
  * Admin-only (hidden for everyone else). Type-to-confirm naming the cycle and the
  * existing `delete_cycle` cascade (all cycle_id rows, audit-logged); an admin may
  * delete every cycle, leaving an empty workspace. After a delete the list
- * re-renders itself — the provider bumps subscribers on rehydrate — so the row
+ * re-renders itself — the provider bumps subscribers when the sitting list refreshes — so the row
  * disappears immediately without navigating away.
  */
 import { useCallback, useEffect, useRef, useState } from "react";

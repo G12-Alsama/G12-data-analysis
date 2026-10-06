@@ -15,6 +15,7 @@ import {
 import { normalizeResultId } from "./result-id";
 import type { CsvTable } from "./csv";
 import { detectThreeExports, type NamedInput } from "./detect";
+import { periodOfMonth } from "@/lib/data/periods";
 import type {
   CanonicalModel,
   IntegrityReport,
@@ -113,20 +114,8 @@ export function detectResitForms(subjects: readonly QmSubject[]): ResitForm[] {
   return forms;
 }
 
-const MONTH_TO_PERIOD: Record<string, "february" | "may"> = {
-  JAN: "february",
-  FEB: "february",
-  MAR: "february",
-  APR: "february",
-  MAY: "may",
-  JUN: "may",
-  JUL: "may",
-  AUG: "may",
-  SEP: "may",
-  OCT: "may",
-  NOV: "may",
-  DEC: "may",
-};
+/** Three-letter month tokens, January first (index + 1 = calendar month). */
+const MONTH_TOKENS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"] as const;
 
 const MONTH_LABEL: Record<string, string> = {
   JAN: "January", FEB: "February", MAR: "March", APR: "April",
@@ -136,7 +125,8 @@ const MONTH_LABEL: Record<string, string> = {
 
 /**
  * Parse the sitting from a `ResultGroupName` like "Math Shatila 1 MAY2026".
- * Jan–Apr map to the February sitting, the rest to May (mirrors migration 0005).
+ * The month maps to a sitting period through the period registry (`periods.ts`;
+ * February/May today: Jan–Apr → February, the rest → May, mirroring migration 0005).
  */
 export function parseSitting(groupName: string | null | undefined): Sitting | null {
   if (!groupName) return null;
@@ -146,10 +136,25 @@ export function parseSitting(groupName: string | null | undefined): Sitting | nu
   const year = Number(m[2]!);
   return {
     code: `${mon}${year}`,
-    period: MONTH_TO_PERIOD[mon]!,
+    period: periodOfMonth(MONTH_TOKENS.indexOf(mon as (typeof MONTH_TOKENS)[number]) + 1),
     year,
     label: `${MONTH_LABEL[mon]} ${year}`,
   };
+}
+
+/**
+ * The calendar date of a QM local timestamp ("2026-05-12 11:32:23"), as ISO `yyyy-mm-dd`;
+ * null for a blank, `<Not defined>` or unparsable value (a real date only: month 1–12,
+ * day 1–31, year 1990–2100).
+ */
+export function isoDateOf(raw: string | null | undefined): string | null {
+  const m = (raw ?? "").trim().match(/^((?:19|20)\d{2})-(\d{2})-(\d{2})(?:[ T]|$)/);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  if (year < 1990 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return `${m[1]}-${m[2]}-${m[3]}`;
 }
 
 interface RowsByResult {
@@ -217,6 +222,9 @@ export function buildCanonicalModelFromTables(
   const results: QmResult[] = [];
   const excludedSurveys = new Set<string>();
   let surveyResults = 0;
+  let minDate: string | null = null;
+  let maxDate: string | null = null;
+  let datedResults = 0;
   const sittingTally = new Map<string, { sitting: Sitting; count: number }>();
   /** The lowercased identity key used to group participants + join result/topic
    *  rows back to them (case-folded so the join is stable). */
@@ -235,6 +243,14 @@ export function buildCanonicalModelFromTables(
     if (!resultId) continue;
 
     const subject = normalizeSubjectName(rawName);
+    for (const col of ["ResultStartLocal", "ResultFinishedLocal"]) {
+      const d = isoDateOf(row[col]);
+      if (d) {
+        if (minDate === null || d < minDate) minDate = d;
+        if (maxDate === null || d > maxDate) maxDate = d;
+        if (col === "ResultStartLocal") datedResults += 1;
+      }
+    }
     const groupName = text(row["ResultGroupName"]);
     const sitting = parseSitting(groupName);
     if (sitting) {
@@ -420,6 +436,7 @@ export function buildCanonicalModelFromTables(
     integrity,
     resitForms,
     excludedSurveys: [...excludedSurveys],
+    dateRange: minDate !== null && maxDate !== null ? { from: minDate, to: maxDate, datedResults } : null,
     stats: {
       assessmentRows: assessments.rows.length,
       itemRows: items.rows.length,

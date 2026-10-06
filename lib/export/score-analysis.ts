@@ -14,15 +14,18 @@
  * are computed over exactly the items that counted toward their score.
  */
 
+import { XLSX, styleCell, roundOrNull } from "./sheet-utils";
 import {
-  XLSX,
-  HEADER_STYLE,
-  TITLE_STYLE,
-  META_STYLE,
-  GUIDE_STYLE,
-  styleCell,
-  roundOrNull,
-} from "./sheet-utils";
+  SA_TITLE_STYLE,
+  SA_SUBTITLE_STYLE,
+  SA_BANNER_STYLE,
+  SA_HEADER_STYLE,
+  applyAlsamaTheme,
+  fullWidthMerge,
+  computeColWidths,
+  buildRowHeights,
+  applyAutoFilter,
+} from "./score-analysis-theme";
 import type {
   AssembleScoreAnalysisArgs,
   ScoreAnalysisInput,
@@ -141,7 +144,7 @@ const ASSESSMENT_SUMMARY_HEADER = [
 ];
 
 function styleHeaderRow(ws: XLSX.WorkSheet, row: number, ncols: number): void {
-  for (let c = 0; c < ncols; c++) styleCell(ws, row, c, HEADER_STYLE);
+  for (let c = 0; c < ncols; c++) styleCell(ws, row, c, SA_HEADER_STYLE);
 }
 
 function buildSummarySheet(input: ScoreAnalysisInput): XLSX.WorkSheet {
@@ -199,6 +202,7 @@ function buildSummarySheet(input: ScoreAnalysisInput): XLSX.WorkSheet {
   aoa[8] = ["MCQ score summary of all participants for each assessment"];
   aoa[9] = [...ASSESSMENT_SUMMARY_HEADER];
 
+  const assessmentHeaderRow = 9;
   let row = 10;
   for (const a of assessments) {
     const byP = perAssessment.get(a.id);
@@ -213,30 +217,62 @@ function buildSummarySheet(input: ScoreAnalysisInput): XLSX.WorkSheet {
       scores.length ? Math.max(...scores) : null,
     ];
   }
+  const assessmentDataEnd = row - 1;
 
   // Major-element summary block.
   row += 1;
+  const majorBannerRow = row;
   aoa[row++] = ["MCQ score summary of all participants for each major element"];
   const majorHeaderRow = row;
   aoa[row++] = ["QuestionMajorElement", "TotalScore", "NumberOfParticipants", "AverageOfParticipantScores", "LowestParticipantScore", "HighestParticipantScore"];
   row = appendGroupSummary(aoa, row, scoredResponses, (r) => r.majorElement);
+  const majorDataEnd = row - 1;
 
   // Demand-level summary block.
   row += 1;
+  const demandBannerRow = row;
   aoa[row++] = ["MCQ score summary of all participants for each demand level"];
   const demandHeaderRow = row;
   aoa[row++] = ["DemandLevel", "TotalScore", "NumberOfParticipants", "AverageOfParticipantScores", "LowestParticipantScore", "HighestParticipantScore"];
-  appendGroupSummary(aoa, row, scoredResponses, (r) => r.demandLevel);
+  row = appendGroupSummary(aoa, row, scoredResponses, (r) => r.demandLevel);
+  const demandDataEnd = row - 1;
 
   void nameById;
+  const ncols = ASSESSMENT_SUMMARY_HEADER.length;
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  styleCell(ws, 0, 0, TITLE_STYLE);
-  styleCell(ws, 2, 0, META_STYLE);
-  styleCell(ws, 8, 0, GUIDE_STYLE);
-  styleHeaderRow(ws, 9, ASSESSMENT_SUMMARY_HEADER.length);
-  styleHeaderRow(ws, majorHeaderRow, 6);
-  styleHeaderRow(ws, demandHeaderRow, 6);
-  ws["!cols"] = [{ wch: 28 }, { wch: 18 }, { wch: 18 }, { wch: 22 }, { wch: 18 }, { wch: 18 }];
+  styleCell(ws, 0, 0, SA_TITLE_STYLE);
+  styleCell(ws, 2, 0, SA_SUBTITLE_STYLE);
+  styleCell(ws, majorBannerRow, 0, SA_BANNER_STYLE);
+  styleCell(ws, demandBannerRow, 0, SA_BANNER_STYLE);
+  styleCell(ws, assessmentHeaderRow - 1, 0, SA_BANNER_STYLE); // "...for each assessment" banner
+  styleHeaderRow(ws, assessmentHeaderRow, ncols);
+  styleHeaderRow(ws, majorHeaderRow, ncols);
+  styleHeaderRow(ws, demandHeaderRow, ncols);
+
+  ws["!merges"] = [
+    fullWidthMerge(0, ncols),
+    fullWidthMerge(2, ncols),
+    fullWidthMerge(assessmentHeaderRow - 1, ncols),
+    fullWidthMerge(majorBannerRow, ncols),
+    fullWidthMerge(demandBannerRow, ncols),
+  ];
+  ws["!rows"] = buildRowHeights({
+    0: 24,
+    [assessmentHeaderRow - 1]: 20,
+    [majorBannerRow]: 20,
+    [demandBannerRow]: 20,
+  });
+
+  // Only the Assessment Summary block gets AutoFilter — Excel supports one
+  // AutoFilter region per worksheet, and this is the sheet's primary table
+  // (see score-analysis-theme.ts for why we can't give every block a Table).
+  applyAutoFilter(ws, assessmentHeaderRow, assessmentDataEnd, ncols);
+
+  ws["!cols"] = computeColWidths(ASSESSMENT_SUMMARY_HEADER, [
+    ...aoa.slice(10, assessmentDataEnd + 1),
+    ...aoa.slice(majorHeaderRow + 1, majorDataEnd + 1),
+    ...aoa.slice(demandHeaderRow + 1, demandDataEnd + 1),
+  ] as (string | number | null)[][]);
   return ws;
 }
 
@@ -332,12 +368,18 @@ function buildBreakdownSheet(input: ScoreAnalysisInput, spec: BreakdownSpec): XL
     aoa[r++] = base;
   }
 
+  const ncols = spec.header.length;
+  const lastDataRow = r - 1;
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  styleCell(ws, 0, 0, TITLE_STYLE);
-  styleCell(ws, 2, 0, META_STYLE);
-  styleCell(ws, 3, 0, GUIDE_STYLE);
-  styleHeaderRow(ws, 5, spec.header.length);
-  ws["!cols"] = spec.header.map((h) => ({ wch: h.length > 18 ? 26 : 18 }));
+  styleCell(ws, 0, 0, SA_TITLE_STYLE);
+  styleCell(ws, 2, 0, SA_SUBTITLE_STYLE);
+  styleCell(ws, 3, 0, SA_SUBTITLE_STYLE);
+  styleHeaderRow(ws, 5, ncols);
+
+  ws["!merges"] = [fullWidthMerge(0, ncols), fullWidthMerge(2, ncols), fullWidthMerge(3, ncols)];
+  ws["!rows"] = buildRowHeights({ 0: 24 });
+  applyAutoFilter(ws, 5, lastDataRow, ncols);
+  ws["!cols"] = computeColWidths(spec.header, aoa.slice(6, lastDataRow + 1) as (string | number | null)[][]);
   return ws;
 }
 
@@ -365,22 +407,29 @@ function buildAnalysisSheet(input: ScoreAnalysisInput): XLSX.WorkSheet {
       s?.participants.size ?? 0,
     ];
   }
+  const ncols = ANALYSIS_HEADER.length;
+  const lastDataRow = row - 1;
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  styleCell(ws, 0, 0, TITLE_STYLE);
-  styleHeaderRow(ws, 2, ANALYSIS_HEADER.length);
-  ws["!cols"] = [{ wch: 28 }, { wch: 24 }, { wch: 22 }, { wch: 24 }];
+  styleCell(ws, 0, 0, SA_TITLE_STYLE);
+  styleHeaderRow(ws, 2, ncols);
+
+  ws["!merges"] = [fullWidthMerge(0, ncols)];
+  ws["!rows"] = buildRowHeights({ 0: 24 });
+  applyAutoFilter(ws, 2, lastDataRow, ncols);
+  ws["!cols"] = computeColWidths(ANALYSIS_HEADER, aoa.slice(3, lastDataRow + 1) as (string | number | null)[][]);
   return ws;
 }
 
 export function buildScoreAnalysisWorkbook(input: ScoreAnalysisInput): XLSX.WorkBook {
   const wb = XLSX.utils.book_new();
+  applyAlsamaTheme(wb);
   XLSX.utils.book_append_sheet(wb, buildSummarySheet(input), SCORE_ANALYSIS_SHEETS[0]);
   XLSX.utils.book_append_sheet(
     wb,
     buildBreakdownSheet(input, {
       title: "MCQ Overall Scores - Assessment Level",
       description: "This sheet contains the MCQ overall score for all students per assessments.",
-      note: "Note: Use the slicers to filter by students or assessments",
+      note: "Note: use the column filter dropdowns (AutoFilter) to filter by students or assessments.",
       header: BY_ASSESSMENT_HEADER,
       keyOf: () => "all",
     }),
@@ -391,7 +440,7 @@ export function buildScoreAnalysisWorkbook(input: ScoreAnalysisInput): XLSX.Work
     buildBreakdownSheet(input, {
       title: "MCQ Overall Scores - Major Element Level",
       description: "This sheet contains the MCQ overall score for all students per major element.",
-      note: "Note: Use the slicers to filter by students, assessments or major elements.",
+      note: "Note: use the column filter dropdowns (AutoFilter) to filter by students, assessments or major elements.",
       header: BY_MAJOR_HEADER,
       keyOf: (r) => r.majorElement,
     }),
@@ -402,7 +451,7 @@ export function buildScoreAnalysisWorkbook(input: ScoreAnalysisInput): XLSX.Work
     buildBreakdownSheet(input, {
       title: "MCQ Overall Scores - Demand Level",
       description: "This sheet contains the MCQ overall score for all students per demand level.",
-      note: "Note: Use the slicers to filter by students, assessments or demand level.",
+      note: "Note: use the column filter dropdowns (AutoFilter) to filter by students, assessments or demand level.",
       header: BY_DEMAND_HEADER,
       keyOf: (r) => r.demandLevel,
     }),

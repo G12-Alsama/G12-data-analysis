@@ -55,6 +55,14 @@ describe("Reliability UI renders without crashing", () => {
       note: "n/a — too few items (need at least 2)",
       lowItems: true,
       smallSample: true,
+      totalParticipants: 0,
+      itemResponses: 0,
+      spearmanBrown: null,
+      sbMultiplier80: null,
+      sbMultiplier90: null,
+      avgInterItemCorrelation: null,
+      status: "Not Available",
+      interpretation: "Alpha could not be computed for this group — see note.",
     });
     const overall: ReliabilityRow = { ...naRow("overall", "overall"), assessmentId: null, assessmentName: null };
     const subject = naRow("subject", "subject|subj-1");

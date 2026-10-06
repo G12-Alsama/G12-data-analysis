@@ -6,6 +6,7 @@
 import type {
   ItemMeta,
   ItemStat,
+  QualityThresholds,
   ResponseRecord,
 } from "@/lib/engine";
 
@@ -83,6 +84,11 @@ export interface ItemAnalysisBlock {
 export interface ItemAnalysisInput {
   cycleName: string;
   blocks: ItemAnalysisBlock[];
+  /** The Good/Review/Flag thresholds actually used to rate these stats — carried
+   *  through so the README's methodology table documents the REAL thresholds
+   *  rather than a value retyped by hand (falls back to the engine default when
+   *  a caller doesn't supply one, e.g. older test fixtures). */
+  qualityThresholds: QualityThresholds;
 }
 
 /** Convenience inputs for the assembler that builds `ItemAnalysisInput`. */
@@ -92,6 +98,15 @@ export interface AssembleItemAnalysisArgs {
   stats: ItemStat[];
   facts: ItemResponseFact[];
   reviews?: Record<string, ItemReviewDecision>;
+  qualityThresholds?: QualityThresholds;
+  /**
+   * Item metadata, used ONLY to exclude maxScore:0 stimulus/instruction items
+   * (see `isScoredItem` in lib/clean/flags.ts) from every row and aggregate
+   * before assembly — never to re-derive anything the engine already computed.
+   * Optional: a caller that omits it (e.g. an existing fixture with no
+   * stimulus items) gets the previous, unfiltered behaviour.
+   */
+  items?: ItemMeta[];
 }
 
 // --- Overall score analysis (canonical layout) ------------------------------

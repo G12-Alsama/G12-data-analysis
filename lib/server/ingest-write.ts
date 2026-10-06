@@ -189,6 +189,8 @@ export async function ingestCleanResponses(
       assessment_id: assessmentId.get(r.assessmentName),
       qm_question_id: r.qmQuestionId,
       wording: r.wording,
+      // 0048: QuestionDescription (per-question constant), null when blank.
+      description: r.description,
       major_element: r.majorElement,
       sub_element: r.subElement,
       demand_level: r.demandLevel,
@@ -271,6 +273,8 @@ export async function ingestCleanResponses(
       item_id: iId, // engine-feed surrogate
       assessment_id: assessmentId.get(r.assessmentName),
       answer_given: r.answerGiven,
+      answer_given_choice_number: r.answerGivenChoiceNumber,
+      question_presented_number: r.questionPresentedNumber,
       answer_score: r.answerScore,
       response_time: r.responseTime,
       result_status: r.resultStatus,

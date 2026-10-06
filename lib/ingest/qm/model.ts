@@ -1,3 +1,5 @@
+import type { SittingKey } from "@/lib/data/periods";
+
 /**
  * Canonical data model for the Questionmark 3-export ingest.
  *
@@ -13,11 +15,23 @@
 export interface Sitting {
   /** Raw token, e.g. "MAY2026". */
   code: string;
-  /** Normalised period (matches the DB `sitting_period` enum). */
-  period: "february" | "may";
+  /** Normalised period (a period-registry key; matches the DB `sitting_period` enum). */
+  period: SittingKey;
   year: number;
   /** Display label, e.g. "May 2026". */
   label: string;
+}
+
+/**
+ * The span of dates the export's graded results carry (`ResultStartLocal` /
+ * `ResultFinishedLocal`), as ISO `yyyy-mm-dd`. Only present when the export has parsable
+ * date columns — they are optional in a QM export.
+ */
+export interface ResultDateRange {
+  from: string;
+  to: string;
+  /** How many graded results contributed a date. */
+  datedResults: number;
 }
 
 /** A participant, keyed by the resolved unique identity — every personal field
@@ -181,6 +195,8 @@ export interface CanonicalModel {
   resitForms: ResitForm[];
   /** Distinct raw assessment names dropped as surveys/UX. */
   excludedSurveys: string[];
+  /** Dates carried by the graded results, or null when the export has none (optional columns). */
+  dateRange: ResultDateRange | null;
   stats: {
     assessmentRows: number;
     itemRows: number;

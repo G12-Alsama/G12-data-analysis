@@ -48,7 +48,10 @@ async function sel<T>(p: PromiseLike<{ data: unknown; error: unknown }>): Promis
 interface LooseWrite {
   insert(rows: unknown): Promise<{ error: { message: string } | null; data: unknown }>;
   upsert(rows: unknown, opts?: { onConflict?: string }): Promise<{ error: { message: string } | null; data: unknown }>;
-  delete(): { eq(col: string, val: string): Promise<{ error: { message: string } | null }> };
+  delete(): {
+    eq(col: string, val: string): Promise<{ error: { message: string } | null }>;
+    in(col: string, vals: string[]): Promise<{ error: { message: string } | null }>;
+  };
 }
 function table(admin: Admin, name: string): LooseWrite {
   return (admin.from as unknown as (n: string) => LooseWrite)(name);
@@ -193,7 +196,19 @@ export async function recomputeAndWrite(admin: Admin, cycleId: string): Promise<
   });
 
   // Replace prior runs for a clean snapshot, then one score_run per assessment.
-  await table(admin, "participant_scores").delete(); // no-op safety; FK cascade handles runs
+  //
+  // Scope EVERYTHING to this cycle. participant_scores has no cycle_id of its own;
+  // it belongs to a cycle through its score_run, so we clear exactly the rows that
+  // hang off THIS cycle's runs. An unscoped delete here would wipe every sitting's
+  // scores on each recompute (and Overall analytics reads across sittings).
+  const priorRuns = await sel<{ id: string }>(
+    admin.from("score_runs").select("id").eq("cycle_id", cycleId),
+  );
+  const priorRunIds = priorRuns.map((r) => r.id);
+  if (priorRunIds.length > 0) {
+    const { error } = await table(admin, "participant_scores").delete().in("score_run_id", priorRunIds);
+    if (error) throw new Error(`clear participant_scores: ${error.message}`);
+  }
   await table(admin, "score_runs").delete().eq("cycle_id", cycleId);
 
   let scoreCount = 0;

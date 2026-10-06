@@ -13,29 +13,31 @@ Every measure runs through `cleanDiagResponses` first, so it keys on **P-A's sta
 
 ## Reproduced vs app (Applicable Math, demo sitting)
 
-Each cell shows **reproduced** (an independent implementation of the notebook formulae — see `scripts/diagnostics-reproduce.mts`) then **app** (this engine's output). They match to 4 dp for every figure. Cohort keyed on P-A's unique id; the demo sitting has 17 students × 41 MCQ items × 697 presentations.
+Each cell shows **reproduced** (an independent implementation of the notebook formulae — see `scripts/diagnostics-reproduce.mts`) then **app** (this engine's output). They match to 4 dp for every figure. Cohort keyed on P-A's unique id; the demo sitting has 17 students × 41 MCQ items presented, of which **40 are scored** (`maxScore ≥ 1`) — the 41st is a `maxScore: 0` stimulus/instruction page, excluded from every diagnostics measure below the same way the Raw Scores denominator excludes it: 680 presentations of the 40 scored items.
 
 ### Speededness / omission / completion
 
 | Group | Items | Presentations | Omission (repro / app) | Speededness index (repro / app) | Early acc. (repro / app) | Late acc. (repro / app) |
 |---|---|---|---|---|---|---|
-| Whole assessment | 41 | 697 | 0.0% / 0.0% | 0.0269 / 0.0269 | 33.73% / 33.73% | 28.34% / 28.34% |
-| D1 · foundational | 16 | 272 | 0.0% / 0.0% | 0.0000 / 0.0000 | 36.76% / 36.76% | 36.76% / 36.76% |
-| D2 · intermediate | 16 | 272 | 0.0% / 0.0% | 0.0221 / 0.0221 | 32.35% / 32.35% | 27.94% / 27.94% |
-| D3 · top-difficulty | 9 | 153 | 0.0% / 0.0% | 0.0490 / 0.0490 | 29.41% / 29.41% | 19.61% / 19.61% |
+| Whole assessment | 40 | 680 | 3.53% / 3.53% | 0.0498 / 0.0498 | 36.79% / 36.79% | 26.83% / 26.83% |
+| D1 · foundational | 15 | 255 | 5.49% / 5.49% | 0.0250 / 0.0250 | 42.13% / 42.13% | 39.68% / 39.68% |
+| D2 · intermediate | 16 | 272 | 1.84% / 1.84% | 0.0477 / 0.0477 | 32.35% / 32.35% | 30.16% / 30.16% |
+| D3 · top-difficulty | 9 | 153 | 3.27% / 3.27% | 0.0566 / 0.0566 | 30.93% / 30.93% | 19.61% / 19.61% |
 
-Omission is 0% across the paper (no blank answers in this sitting), so the whole-assessment speededness index is driven entirely by the late accuracy drop, which climbs with difficulty (D1 flat → D3 the steepest early→late fall). Item sets present: *Large storeroom*, *Pollution in the air*, *Solar-powered irrigation projects*.
+Item sets present: *Large storeroom*, *Pollution in the air*, *Solar-powered irrigation projects*.
 
 ### Timing ↔ performance (median item time ↔ score %)
 
 | Group | Students | Pearson r (repro / app) | Spearman ρ (repro / app) | Strength |
 |---|---|---|---|---|
-| Whole assessment | 17 | −0.2057 / −0.2057 | −0.1432 / −0.1432 | Weak negative |
-| D1 · foundational | 17 | −0.2718 / −0.2718 | −0.2288 / −0.2288 | Weak negative |
+| Whole assessment | 17 | −0.1940 / −0.1940 | −0.0775 / −0.0775 | Weak negative |
+| D1 · foundational | 17 | −0.2545 / −0.2545 | −0.2463 / −0.2463 | Weak negative |
 | D2 · intermediate | 17 | 0.1790 / 0.1790 | 0.1636 / 0.1636 | Weak positive |
 | D3 · top-difficulty | 17 | 0.5298 / 0.5298 | 0.5849 / 0.5849 | Strong positive |
 
 On the hardest tier (D3) students who spent longer scored **higher** (strong positive) — time on the demanding items paid off — while on the easiest tier (D1) longer times weakly tracked lower scores. Undefined correlations render **blank (—)**, never 0.
+
+Timing draws its per-student median from **every scored response, answered or not** — QM logs dwell time on a question even when the student leaves it blank, and the ground-truth methodology takes the median over all of them with no answered-only filter. `speededness()`'s omission/completion figures above are the one place `answered` still gates the calculation: an unanswered item genuinely is an omission there. (Fix note: `timingPerformance()` briefly carried an `if (!r.answered) continue;` filter meant only for a different, unrelated `answered`-flag bug; it wrongly dropped unanswered-but-timed responses from the median too, understating Pearson/Spearman. See `tests/diagnostics-answered-timing.test.ts`.)
 
 ## Verification
 

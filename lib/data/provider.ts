@@ -18,7 +18,9 @@
 
 import type { AssembleScoreAnalysisArgs, AssembleItemAnalysisArgs } from "@/lib/export/types";
 import type { CleanResponse, ValidationReport } from "@/lib/ingest/types";
+import type { PerItemSource } from "@/lib/data/per-item-source";
 import type { CanonicalModel } from "@/lib/ingest/qm";
+import type { SittingKey } from "@/lib/data/periods";
 
 /**
  * Schema drift report — whether the live DB has the columns/functions the code
@@ -44,6 +46,7 @@ import type {
   CreateCycleInput,
   CurrentUser,
   CycleDetail,
+  CycleLoadState,
   CycleSummary,
   TestCentreSummary,
   YearSummary,
@@ -230,6 +233,16 @@ export interface DataProvider {
   getYear(yearId: string): YearDetail | null;
   listCycles(): CycleSummary[];
   getCycle(cycleId: string): CycleDetail | null;
+  /**
+   * Lazy loading. The live provider holds each sitting's detailed data separately and
+   * loads it only when the sitting is opened. `getCycleLoadState` says whether a
+   * sitting's pipeline reads are ready; `ensureCycleLoaded` loads it (idempotent,
+   * concurrent callers share one load); `ensureYearLoaded` loads the sittings an
+   * Overall needs (the year's LOCKED ones). The in-memory demo is always "ready".
+   */
+  getCycleLoadState(cycleId: string): CycleLoadState;
+  ensureCycleLoaded(cycleId: string): Promise<void>;
+  ensureYearLoaded(yearId: string): Promise<void>;
   getIngest(cycleId: string): IngestModel | null;
   /**
    * The authoritative per-sitting ingest roster (migration 0026 `sittings`): which
@@ -337,6 +350,12 @@ export interface DataProvider {
    * grades. Rejects the returned promise on error so the UI can surface it.
    */
   moveExamYearToCentre(yearId: string, testCentreId: string): Promise<void>;
+  /**
+   * 0051 — set the periods a year must have a LOCKED sitting in before its Overall is
+   * final (`exam_years.expected_periods`). Gated by `general.manage_centres`; rejects on
+   * an empty list, an unknown year, or a year with no database record (the demo's).
+   */
+  setYearExpectedPeriods(yearId: string, periods: SittingKey[]): Promise<void>;
 
   // settings: configuration
   getConfig(): ConfigModel;
@@ -515,6 +534,12 @@ export interface DataProvider {
   getDiagnostics(cycleId: string): DiagnosticsModel | null;
   /** Cronbach's-α reliability at every construct grouping (read-only, additive). */
   getReliability(cycleId: string): ReliabilityModel | null;
+  /**
+   * Raw per-item source (items + responses + participant drop-set per assessment)
+   * for the Per-Item Speededness / Omission / Completion export. Read-only and
+   * additive — see lib/data/per-item-source.ts. Null for a non-live cycle.
+   */
+  getPerItemSource(cycleId: string): PerItemSource | null;
 
   // distinction safeguard (grading stage)
   confirmDistinctionCaps(cycleId: string): void;

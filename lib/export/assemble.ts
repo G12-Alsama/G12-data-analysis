@@ -6,7 +6,9 @@
  */
 
 import type { ItemStat } from "@/lib/engine";
-import { discriminationGroupSize } from "@/lib/engine";
+import { DEFAULT_SCORING_CONFIG, discriminationGroupSize } from "@/lib/engine";
+import { canonicalSubjectLabel } from "@/lib/data/subject-catalog";
+import { isScoredItem } from "@/lib/clean/flags";
 import { roundOrNull } from "./sheet-utils";
 import type {
   AssembleItemAnalysisArgs,
@@ -24,11 +26,21 @@ interface ItemFactAgg {
 }
 
 export function assembleItemAnalysis(args: AssembleItemAnalysisArgs): ItemAnalysisInput {
-  const { cycleName, assessments, stats, facts, reviews } = args;
+  const { cycleName, assessments, stats, facts, reviews, items } = args;
 
-  // Group stats and facts by assessment.
+  // A maxScore:0 item is a stimulus/instruction page, not a real question
+  // (STIMULUS_ITEM — see lib/clean/flags.ts). Excluded HERE, before anything
+  // downstream (a row, a count, a median, a group size) ever sees it. Only
+  // items we positively KNOW are unscored are excluded — a caller that
+  // supplies no item metadata at all gets the previous, unfiltered behaviour.
+  const unscoredItemIds = new Set(
+    (items ?? []).filter((it) => !isScoredItem({ maxScore: it.maxScore ?? 1 })).map((it) => it.itemId),
+  );
+
+  // Group stats and facts by assessment, dropping unscored items first.
   const statsByAssessment = new Map<string, ItemStat[]>();
   for (const s of stats) {
+    if (unscoredItemIds.has(s.itemId)) continue;
     const bucket = statsByAssessment.get(s.assessmentId) ?? [];
     bucket.push(s);
     statsByAssessment.set(s.assessmentId, bucket);
@@ -36,6 +48,7 @@ export function assembleItemAnalysis(args: AssembleItemAnalysisArgs): ItemAnalys
 
   const factsByAssessment = new Map<string, ItemResponseFact[]>();
   for (const f of facts) {
+    if (unscoredItemIds.has(f.itemId)) continue;
     const bucket = factsByAssessment.get(f.assessmentId) ?? [];
     bucket.push(f);
     factsByAssessment.set(f.assessmentId, bucket);
@@ -86,7 +99,10 @@ export function assembleItemAnalysis(args: AssembleItemAnalysisArgs): ItemAnalys
     const participantCount = participants.size;
     blocks.push({
       id: assessment.id,
-      name: assessment.name,
+      // Sheet titles/tabs must always read from the canonical English subject
+      // label, never a raw or local-script name straight off the QM export
+      // (e.g. an Arabic-script assessment name) — see canonicalSubjectLabel.
+      name: canonicalSubjectLabel(assessment.name),
       participants: participantCount,
       rowsAnalysed: aFacts.length,
       groupSize: discriminationGroupSize(participantCount),
@@ -94,5 +110,9 @@ export function assembleItemAnalysis(args: AssembleItemAnalysisArgs): ItemAnalys
     });
   }
 
-  return { cycleName, blocks };
+  return {
+    cycleName,
+    blocks,
+    qualityThresholds: args.qualityThresholds ?? DEFAULT_SCORING_CONFIG.quality,
+  };
 }

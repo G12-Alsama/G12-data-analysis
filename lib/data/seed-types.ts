@@ -11,7 +11,7 @@
 import type { QualityRating } from "@/lib/engine";
 import type { AssessmentDiagnostics } from "@/lib/diagnostics";
 import type { ValidationReport } from "@/lib/ingest/types";
-import type { TestCentreSummary } from "./types";
+import type { SittingKey, TestCentreSummary } from "./types";
 
 /** One multiple-choice answer option for a question (from the QM export). */
 export interface SeedAnswerOption {
@@ -25,18 +25,33 @@ export interface SeedAnswerOption {
 
 export interface SeedItem {
   id: string;
+  /**
+   * QM's own `QuestionId` (e.g. 100002805825). Equals `id` on the live-ingest path
+   * (items are keyed by it there) but NOT on the DB-hydrate path, where `id` is the
+   * `items` row UUID and the QM id lives in `items.qm_question_id`. Optional — the
+   * demo seed leaves it absent (its `id` already is the QM id).
+   */
+  qmQuestionId?: string | null;
   wording: string | null;
   /**
    * The item's `QuestionDescription` (an internal code/label) and its
    * `QuestionParentQuestionWording` (the stimulus/parent passage shown above the
-   * question). Optional — only the generated demo seed carries these; live/DB-
-   * hydrated items leave them absent (same precedent as `options`).
+   * question). Optional. `description` is now also carried by live ingest and
+   * DB hydrate (migration 0048); `parentWording` is still demo-seed-only, like
+   * `options`. Existing cycles have no description until re-ingested.
    */
   description?: string | null;
   parentWording?: string | null;
   major: string | null;
   sub: string | null;
   demand: string | null;
+  /**
+   * Item-set / shared-stimulus name (a passage/prompt shared by several items), or
+   * null when ungrouped. Carried so Assessment Health diagnostics can be recomputed
+   * live from `SeedAssessment.items`/`responses` (see `getDiagnostics`) instead of
+   * only from the ingest-time snapshot.
+   */
+  itemSet?: string | null;
   maxScore: number;
   /**
    * The question's multiple-choice answer options, from the QM export
@@ -73,6 +88,26 @@ export interface SeedResponse {
    * display-only "% of D3 questions answered" per-student metric.
    */
   a?: boolean;
+  /**
+   * The raw `AnswerGivenChoiceNumber` (blank normalised to null upstream). The
+   * authoritative "was this presented item actually answered?" signal — unlike the
+   * raw `AnswerGiven` text (which carries QM's "<Not defined>" sentinel for an
+   * unanswered item), this is genuinely blank/null with no sentinel ambiguity.
+   */
+  answerGivenChoiceNumber?: string | null;
+  /**
+   * The raw `QuestionPresentedNumber` — QM's real per-sitting item order. VARIES
+   * per participant even for the same item (confirmed against the 700435
+   * fixture), so this must be carried per-response rather than on `SeedItem`.
+   * The authoritative "presentation order" for Assessment Health (Speededness
+   * Index, omission-by-position, timing correlations); undefined/null falls back
+   * to first-appearance order (see `build-live-cycle.ts`/`supabase-hydrate.ts`).
+   */
+  questionPresentedNumber?: number | null;
+  /** The QM `AnswerGiven` value (raw answer text/choice), for the cleaned export. */
+  answerGiven?: string | null;
+  /** The QM response time in seconds, for the cleaned export. */
+  responseTime?: number | null;
 }
 
 /** A participant whose sitting of this assessment finished with a technical-fault status. */
@@ -142,6 +177,10 @@ export interface SeedLiveCycle {
    *  Absent in the demo seed (no database year rows); carried so the Years list
    *  can target the year-reassignment RPC. */
   yearId?: string;
+  /** 0005 — the stored period (exam_cycles.sitting). Absent for demo fixtures. */
+  sitting?: SittingKey;
+  /** The stored exam_years.name for `yearId` (live data only). */
+  yearName?: string;
   startedAt: string;
   lastActivity: string;
   stageIndex: number;
@@ -190,13 +229,20 @@ export interface SeedPriorCycle {
   testCentreId?: string;
   /** 0013 — the real exam_years.id this sitting groups under (live data only). */
   yearId?: string;
+  /** 0005 — the stored period (exam_cycles.sitting). Absent for demo fixtures. */
+  sitting?: SittingKey;
+  /** The stored exam_years.name for `yearId` (live data only). */
+  yearName?: string;
+  /** ISO date the sitting was held (exam_cycles.sitting_date); display only. */
+  sittingDate?: string;
   stageIndex: number;
   stepsDone: number;
   participants: number;
   assessments: number;
   lastActivity: string;
   locked: boolean;
-  /** Always true — prior cycles have no real data source yet. */
+  /** True only for the demo's illustrative priors (no real data source). Live
+   *  summaries (the cycle list from the database) are always `false`. */
   mock: boolean;
 }
 

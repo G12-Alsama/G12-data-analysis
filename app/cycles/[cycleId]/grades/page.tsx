@@ -15,7 +15,7 @@ import { CycleShell, AlertStack, type Notice } from "@/components/shell/CycleShe
 import { useProvisionalNotice } from "@/components/shell/ProvisionalBanner";
 import { Button } from "@/components/ui/primitives";
 import { ExportButtons } from "@/components/ui/ExportButtons";
-import { downloadCsv, downloadWorkbook } from "@/lib/ui/export";
+import { downloadCsv, downloadWorkbook, downloadXlsxBuffer } from "@/lib/ui/export";
 import { Icon, Mark } from "@/components/ui/icons";
 import { MiniGradeBars } from "@/components/ui/charts";
 import { useTableZoom, ZoomControl } from "@/lib/ui/tableZoom";
@@ -38,7 +38,7 @@ export default function GradesPage({ params }: { params: { cycleId: string } }) 
   // sitting's cycle id, never re-derived from the cycle name): this is correct for a
   // non-primary centre, and a null/"Unknown"-named year still resolves and links.
   const overallYearId = useProviderData(
-    (p) => p.listYears().find((y) => y.february.cycleId === cycleId || y.may.cycleId === cycleId)?.id ?? null,
+    (p) => p.listYears().find((y) => y.sittings.some((s) => s.cycleId === cycleId))?.id ?? null,
     [cycleId],
   );
   const overallHref = overallYearId ? `/years/${overallYearId}/overall` : "/";
@@ -748,10 +748,10 @@ async function exportExcel(provider: DataProvider, cycleId: string, model: Grade
     entityId: e.cycleId ?? "",
   }));
 
-  const wb = exp.buildPerformanceReportWorkbook({
+  const buf = await exp.buildPerformanceReportWorkbook({
     ...report,
     alterations,
     audit: auditEntries,
   });
-  await downloadWorkbook("students_performance_report_may_2026.xlsx", wb);
+  downloadXlsxBuffer("students_performance_report_may_2026.xlsx", buf);
 }

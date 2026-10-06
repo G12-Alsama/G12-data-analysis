@@ -29,16 +29,23 @@ const recs = byName.get(name)!;
 // runs on the full sample cohort. Point `excluded` at real ids only if reproducing a
 // live cohort's figures locally.
 const excluded = new Set<string>();
+// Max Score = 0 items (instructions/stimuli) were never scored — exclude their
+// responses here too, mirroring buildLiveCycleData's diagSourceRecs filter.
+const diagSourceRecs = recs.filter((r) => (r.maxScore ?? 1) >= 1);
 const itemOrder = new Map<string, number>();
-for (const r of recs) if (!itemOrder.has(r.qmQuestionId)) itemOrder.set(r.qmQuestionId, itemOrder.size);
+for (const r of diagSourceRecs) if (!itemOrder.has(r.qmQuestionId)) itemOrder.set(r.qmQuestionId, itemOrder.size);
 const records: DiagResponse[] = cleanDiagResponses(
-  recs.map((r) => ({
+  diagSourceRecs.map((r) => ({
     participantId: r.participantPseudonym,
     itemId: r.qmQuestionId,
     demandLevel: r.demandLevel,
     itemSet: r.itemSet,
+    majorElement: r.majorElement,
     order: itemOrder.get(r.qmQuestionId)!,
-    answered: !!r.answerGiven,
+    // AnswerGiven carries QM's "<Not defined>" sentinel for an unanswered item
+    // (truthy), so omission/speededness/timing key off AnswerGivenChoiceNumber,
+    // which is genuinely blank instead.
+    answered: !!r.answerGivenChoiceNumber,
     correct: r.answerScore === 1,
     responseTime: r.responseTime,
   })),
@@ -76,6 +83,11 @@ const refSpeeded = (rs: DiagResponse[]) => {
 };
 const refTiming = (rs: DiagResponse[]) => {
   const by = new Map<string, { c: number; p: number; t: number[] }>();
+  // Every presented (scored) item contributes its responseTime, answered or
+  // not — QM logs dwell time even on a blank answer, and the ground-truth
+  // methodology takes the median over all of them, no answered-only filter
+  // (mirrors timingPerformance()). Only a genuinely missing/non-finite
+  // responseTime is excluded.
   for (const r of rs) { const s = by.get(r.participantId) ?? { c: 0, p: 0, t: [] }; s.p++; if (r.correct) s.c++; if (r.responseTime != null && Number.isFinite(r.responseTime)) s.t.push(r.responseTime); by.set(r.participantId, s); }
   const sp: number[] = [], mt: number[] = []; for (const s of by.values()) { if (!s.p || !s.t.length) continue; sp.push((s.c / s.p) * 100); mt.push(median(s.t)); }
   const p = pearson(mt, sp), s = spearman(mt, sp);

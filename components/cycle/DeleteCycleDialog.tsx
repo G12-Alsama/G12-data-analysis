@@ -15,7 +15,7 @@
  *   - false (default): navigate to Years (`/`) — for surfaces INSIDE the deleted
  *     cycle/year, where staying would land on a now-dead route.
  *   - true: just close — for the Years LIST, which is already the right place and
- *     re-renders itself (the provider bumps subscribers on rehydrate), so the row
+ *     re-renders itself (the provider bumps subscribers when the sitting list refreshes), so the row
  *     simply disappears.
  */
 import { useState } from "react";

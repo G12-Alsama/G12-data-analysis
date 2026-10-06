@@ -145,16 +145,24 @@ function main() {
     // Speededness & timing diagnostics over the RAW sitting (all responses).
     // Presentation order = first appearance of each item in the export rows.
     // CONFIRM: there is no explicit presented-order column; export order is the
-    // proxy. correct = full mark (dichotomous items).
+    // proxy. correct = full mark (dichotomous items). Max Score = 0 items
+    // (instructions/stimuli) were never scored — exclude their responses here too,
+    // so they don't inflate omission/completion/correlation inputs (mirrors
+    // buildLiveCycleData's diagSourceRecs filter).
+    const diagSourceRecs = recs.filter((r) => (r.maxScore ?? 1) >= 1);
     const itemOrder = new Map<string, number>();
-    for (const r of recs) if (!itemOrder.has(r.qmQuestionId)) itemOrder.set(r.qmQuestionId, itemOrder.size);
-    const diagRecs: DiagResponse[] = recs.map((r) => ({
+    for (const r of diagSourceRecs) if (!itemOrder.has(r.qmQuestionId)) itemOrder.set(r.qmQuestionId, itemOrder.size);
+    const diagRecs: DiagResponse[] = diagSourceRecs.map((r) => ({
       participantId: r.participantPseudonym,
       itemId: r.qmQuestionId,
       demandLevel: r.demandLevel,
       itemSet: r.itemSet,
+      majorElement: r.majorElement,
       order: itemOrder.get(r.qmQuestionId)!,
-      answered: !!r.answerGiven,
+      // AnswerGiven carries QM's "<Not defined>" sentinel for an unanswered item
+      // (truthy), so omission/speededness/timing key off AnswerGivenChoiceNumber,
+      // which is genuinely blank instead.
+      answered: !!r.answerGivenChoiceNumber,
       correct: r.answerScore === 1,
       responseTime: r.responseTime,
     }));
@@ -181,6 +189,13 @@ function main() {
       }
     }
     const itemMetas = [...itemMetaMap.values()];
+
+    // Item-set (shared-stimulus) tag per item (first occurrence), kept off ItemMeta
+    // (an engine type) since it's display/diagnostics-only.
+    const itemSetMap = new Map<string, string | null>();
+    for (const r of recs) {
+      if (!itemSetMap.has(r.qmQuestionId)) itemSetMap.set(r.qmQuestionId, r.itemSet ?? null);
+    }
 
     const responses: ResponseRecord[] = recs.map((r) => ({
       participantId: r.participantPseudonym,
@@ -217,6 +232,7 @@ function main() {
         major: m.majorElement ?? null,
         sub: m.subElement ?? null,
         demand: m.demandLevel ?? null,
+        itemSet: itemSetMap.get(m.itemId) ?? null,
         maxScore: m.maxScore ?? 1,
         options: optionsByQid.get(m.itemId) ?? null,
         participantsAnswered: a?.answered ?? s.n,
@@ -238,8 +254,17 @@ function main() {
     // Build responses straight from the cleaned rows so the answered flag rides
     // along (answered unless explicitly blank) — feeds the display-only D3% metric.
     const seedResponses: SeedResponse[] = recs.map((r) => {
-      const resp: SeedResponse = { p: r.participantPseudonym, i: r.qmQuestionId, s: r.answerScore };
-      if (!r.answerGiven) resp.a = false;
+      const resp: SeedResponse = {
+        p: r.participantPseudonym,
+        i: r.qmQuestionId,
+        s: r.answerScore,
+        answerGiven: r.answerGiven,
+        answerGivenChoiceNumber: r.answerGivenChoiceNumber,
+        responseTime: r.responseTime,
+      };
+      // Answered iff AnswerGivenChoiceNumber is present — AnswerGiven carries QM's
+      // "<Not defined>" sentinel for an unanswered item, so it is never used here.
+      if (!r.answerGivenChoiceNumber) resp.a = false;
       return resp;
     });
 

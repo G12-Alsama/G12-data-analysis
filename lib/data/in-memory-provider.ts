@@ -7,7 +7,6 @@
 
 import {
   getEngine,
-  defaultScoringConfig,
   deriveAward,
   qualifiesForDistinctionByLevels,
   d3MajorityThreshold,
@@ -37,8 +36,6 @@ import {
   can,
   ACTIONS,
   ACTION_KEYS,
-  defaultRoles,
-  defaultRoleActions,
   resolveRoleActions,
   MANAGE_ROLES_ACTION,
   MANAGE_USERS_ACTION,
@@ -47,7 +44,17 @@ import {
   type ResolvedRoleActions,
   type Role as RoleModel,
 } from "@/lib/auth/actions";
-import { rollupOverall, overallAwardsReconcile } from "./overall";
+import { rollupOverall, rollupOrdered, canonicalizeSubjects, overallAwardsReconcile } from "./overall";
+import {
+  DEFAULT_EXPECTED_PERIODS,
+  DEFAULT_NEW_PERIOD,
+  SITTING_ORDER,
+  joinPeriodLabels,
+  monthOfText,
+  periodLabel,
+  periodOfMonth,
+  sortPeriods,
+} from "./periods";
 import {
   computeOverallAnalytics,
   overallAwardBands,
@@ -58,11 +65,26 @@ import {
   type OASittingStudent,
 } from "./overall-analytics";
 import { buildLiveCycleData } from "./build-live-cycle";
+import {
+  buildAssessmentDiagnostics,
+  cleanDiagResponses,
+  type DiagResponse,
+  // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER)
+  __setTempDebugTimingLabel,
+} from "@/lib/diagnostics";
+// TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER): the target assessment
+// confirmed in the production DB. Matched by id OR name so this also fires
+// against local/demo data during testing.
+const __TEMP_DEBUG_TARGET_ASSESSMENT_ID = "56629397-a027-4159-97f9-2bcf2cd38890";
+function __tempDebugIsTargetAssessment(a: { id: string; name: string }): boolean {
+  return a.id === __TEMP_DEBUG_TARGET_ASSESSMENT_ID || a.name.includes("Applicable Math");
+}
 import { doNextForStage } from "./pipeline-route";
 import type { CleanResponse } from "@/lib/ingest/types";
+import type { PerItemSource } from "@/lib/data/per-item-source";
 import type { ValidationReport } from "@/lib/ingest/types";
 import type { CanonicalModel } from "@/lib/ingest/qm";
-import { SUBJECT_CATALOG, isSurveyAssessment } from "./subject-catalog";
+import { SUBJECT_CATALOG, isSurveyAssessment, canonicalSubjectName } from "./subject-catalog";
 import { isTechnicalIncidentStatus } from "./result-status";
 import { isEssaySubject, reservedEssayMax, ESSAY_ITEM_MAX } from "./essays";
 import type {
@@ -71,7 +93,9 @@ import type {
   ItemResponseFact,
   ItemReviewDecision,
 } from "@/lib/export/types";
-import type { Seed, SeedAssessment, SeedItem } from "./seed-types";
+import type { Seed, SeedAssessment, SeedItem, SeedPriorCycle } from "./seed-types";
+import { sittingLabel } from "./create-cycle";
+import { WorkspaceState } from "./workspace-state";
 import type {
   DataProvider,
   SetBoundaryInput,
@@ -193,9 +217,11 @@ import {
   type IncidentConfigModel,
   type IncidentReviewModel,
   type IncidentReviewStudent,
+  type CycleLoadState,
+  type OverallSittingInfo,
+  type OverallSittingStatus,
 } from "./types";
 import {
-  defaultIncidentConfig,
   validateIncidentCode,
   validatePerStudentCap,
   normalizeIncidentCode,
@@ -223,7 +249,6 @@ import {
   type CleanedDataColumn,
 } from "./cleaned-schema";
 import {
-  DEFAULT_ELEMENT_LABELS,
   validateElementLabels,
   labelMapForSubject,
   resolveEssayWritingLabel,
@@ -232,20 +257,16 @@ import {
 } from "./element-labels";
 import {
   classify,
-  defaultGradingConfig,
   starsFor,
   type GradingConfig,
   DEFAULT_PERFORMANCE_TARGETS,
   DEFAULT_AWARD_TARGETS,
-  DEFAULT_BORDERLINE_BAND_PCT,
   clampBorderlineBand,
 } from "./grading";
 import {
   ANALYTICS_CYCLE_LABELS,
   ANALYTICS_CYCLE_NAMES,
-  defaultMembers,
   mockPriors,
-  seedAuditEntries,
 } from "./mock-admin";
 
 /** Default seed (the bundled demo cycle). A different seed can be injected via
@@ -375,22 +396,47 @@ export class InMemoryDataProvider implements DataProvider {
   private participantExclusions = new Map<string, Map<string, string>>(); // cycle -> pid -> reason
   private boundaries = new Map<string, BoundaryState>(); // cycle:scope -> state
   private locked = new Set<string>();
-  private grading: GradingConfig = defaultGradingConfig();
-  // Item-quality Good/Review/Flag thresholds — the configurable half of the
-  // engine's ScoringConfig (the level/award vocabulary is `this.grading`). The
-  // Settings editor that mutates these arrives in the next prompt; for now the
-  // default reproduces the engine's published ratings exactly.
-  private quality: QualityThresholds = defaultScoringConfig().quality;
   private docSettingsByCycle = new Map<string, DocSettings>();
 
-  // Dynamic roles × granular actions (migration 0040): the add/deletable role rows
-  // + each role's granted actions, seeded from the defaults. The
-  // SupabaseDataProvider overwrites both from the DB on hydrate. `resolvedActions`
-  // is the derived (role_id → granted action set) view every gate reads via
-  // `can()`; it is recomputed whenever `roles`/`roleActions` change.
-  private roles: RoleModel[] = defaultRoles();
-  private roleActions: Record<string, ActionKey[]> = defaultRoleActions();
-  private resolvedActions: ResolvedRoleActions = resolveRoleActions(this.roles, this.roleActions);
+  // ── WORKSPACE-LEVEL state (grading, quality, roles + action grid, safeguard,
+  // borderline, incident config, element labels, members, audit, test centres, the
+  // signed-in user) lives on a WorkspaceState that every provider instance in a
+  // tree shares BY REFERENCE (see workspace-state.ts / docs/multi-sitting-provider.md).
+  // These accessors keep every `this.grading` / `this.roles` / … read and write in
+  // this class working unchanged while routing to the shared object, so an edit made
+  // through one instance is immediately seen by all of them. Cycle-keyed decision
+  // state stays on the instance (below).
+  private readonly ws: WorkspaceState;
+  private get grading(): GradingConfig { return this.ws.grading; }
+  private set grading(v: GradingConfig) { this.ws.grading = v; }
+  private get quality(): QualityThresholds { return this.ws.quality; }
+  private set quality(v: QualityThresholds) { this.ws.quality = v; }
+  private get roles(): RoleModel[] { return this.ws.roles; }
+  private set roles(v: RoleModel[]) { this.ws.roles = v; }
+  private get roleActions(): Record<string, ActionKey[]> { return this.ws.roleActions; }
+  private set roleActions(v: Record<string, ActionKey[]>) { this.ws.roleActions = v; }
+  private get resolvedActions(): ResolvedRoleActions { return this.ws.resolvedActions; }
+  private set resolvedActions(v: ResolvedRoleActions) { this.ws.resolvedActions = v; }
+  private get safeguard(): { topDifficultyDemand: string } { return this.ws.safeguard; }
+  private set safeguard(v: { topDifficultyDemand: string }) { this.ws.safeguard = v; }
+  private get borderline(): BorderlineConfig { return this.ws.borderline; }
+  private set borderline(v: BorderlineConfig) { this.ws.borderline = v; }
+  private get incidentConfig(): IncidentAdjustmentConfig { return this.ws.incidentConfig; }
+  private set incidentConfig(v: IncidentAdjustmentConfig) { this.ws.incidentConfig = v; }
+  private get elementLabels(): ElementLabelsConfig { return this.ws.elementLabels; }
+  private set elementLabels(v: ElementLabelsConfig) { this.ws.elementLabels = v; }
+  private get members(): Member[] { return this.ws.members; }
+  private set members(v: Member[]) { this.ws.members = v; }
+  private get auditEntries(): AuditEntry[] { return this.ws.auditEntries; }
+  private set auditEntries(v: AuditEntry[]) { this.ws.auditEntries = v; }
+  private get auditSeq(): number { return this.ws.auditSeq; }
+  private set auditSeq(v: number) { this.ws.auditSeq = v; }
+  private get testCentres(): TestCentreSummary[] { return this.ws.testCentres; }
+  private set testCentres(v: TestCentreSummary[]) { this.ws.testCentres = v; }
+  private get seq(): number { return this.ws.seq; }
+  private set seq(v: number) { this.ws.seq = v; }
+  private get user(): CurrentUser { return this.ws.user; }
+  private set user(v: CurrentUser) { this.ws.user = v; }
 
   // incident log (Adjustments) + distinction safeguard
   private technicalErrors = new Map<string, { uploaded: boolean; sample: boolean; fileName: string | null; incidents: TechnicalIncident[] }>();
@@ -446,18 +492,6 @@ export class InMemoryDataProvider implements DataProvider {
   >();
   private distinctionOverrides = new Map<string, Map<string, { reason: string; by: string }>>();
   private distinctionConfirmed = new Set<string>();
-  // safeguard config; empty topDifficultyDemand → resolve to the highest demand present.
-  private safeguard: { topDifficultyDemand: string } = {
-    topDifficultyDemand: "",
-  };
-  // Borderline (marginal) flagging band, in percentage points. Grade-bearing
-  // input the grade recompute reads (see marginalInfo); editable via Settings.
-  // Default is the ±2% placeholder pending G12's policy value.
-  private borderline: BorderlineConfig = { bandPct: DEFAULT_BORDERLINE_BAND_PCT };
-
-  // Incident Adjustments configuration registry (codes/formulae/caps + import
-  // column mapping). Admin-owned; lower roles read-only. Mirrors migration 0016.
-  private incidentConfig: IncidentAdjustmentConfig = defaultIncidentConfig();
 
   // Incident Adjustments — apply/review state (02b). Parsed+resolved incident
   // rows per cycle (mirrors `incident_rows`), and the admin commit flag per cycle
@@ -468,37 +502,15 @@ export class InMemoryDataProvider implements DataProvider {
   private incidentSource = new Map<string, { fileName: string; sample: boolean }>();
   private incidentApplied = new Map<string, { by: string; at: string }>();
 
-  // Per-subject A–E element labels (configurable in Settings). Seeded from the
-  // confirmed G12++ defaults; the Supabase provider replays the persisted set.
-  private elementLabels: ElementLabelsConfig = JSON.parse(JSON.stringify(DEFAULT_ELEMENT_LABELS));
-
-  // admin / audit / config state (all MOCK — see lib/data/mock-admin.ts)
-  private members: Member[] = defaultMembers();
-  private auditEntries: AuditEntry[] = seedAuditEntries("may-2026");
-  private auditSeq = 0;
-
-  // 0010 — test centres (top-level scoping dimension). The demo seeds a single
-  // active centre that every derived year belongs to (the live Supabase provider
-  // hydrates the real list from the test_centres table via the seed). Populated
-  // in the constructor (after `seed` is bound) and managed by the CRUD methods
-  // below, which mirror the SECURITY DEFINER RPCs in migration 0010.
-  private testCentres: TestCentreSummary[] = [];
-  private seq = 0;
+  // 0010 — test centres live on the shared WorkspaceState (accessor above). The demo
+  // seeds a single active centre that every derived year belongs to (the live
+  // Supabase provider hydrates the real list from the test_centres table). Managed by
+  // the CRUD methods below, which mirror the SECURITY DEFINER RPCs in migration 0010.
   // 0013 — year reassignments: cycleId → overridden centre id. Held as mutable
   // decision state (like exclusions/locks) rather than written back onto `seed`,
   // so the SHARED demo seed module is never mutated (keeps test isolation) and a
   // reassignment is pure labelling — no result/grade/seed data is rewritten.
   private cycleCentreOverride = new Map<string, string>();
-
-  private user: CurrentUser = {
-    id: "demo-admin",
-    // Neutral demo user (an admin) for the in-memory demo so role-gated controls
-    // (Lock, admin) are exercised. The SupabaseDataProvider injects the real
-    // session-derived user via the constructor — this is never the live identity.
-    name: "Workspace Admin",
-    initials: "WA",
-    role: "lead_admin",
-  };
 
   // Who set the current effective state of each grade-bearing decision, so an
   // override can name the prior actor AND gate on the strictly-higher `canOverride`
@@ -521,8 +533,23 @@ export class InMemoryDataProvider implements DataProvider {
   // keeps its stable `year-<year>` fixture key.
   private readonly hydrated: boolean;
 
-  constructor(seed?: Seed, user?: CurrentUser, hydrated = false) {
+  /**
+   * @param workspace Optional SHARED workspace state. The SupabaseDataProvider passes
+   *   one WorkspaceState to the directory and to every per-sitting instance so they
+   *   see the same grading config, roles, labels, centres, members, audit and user.
+   *   Omitted (demo, tests, scripts) → this instance owns a fresh one.
+   */
+  constructor(seed?: Seed, user?: CurrentUser, hydrated = false, workspace?: WorkspaceState) {
     if (seed) this.seed = seed;
+    this.ws =
+      workspace ??
+      new WorkspaceState({
+        // Neutral demo user (an admin) for the in-memory demo so role-gated controls
+        // (Lock, admin) are exercised. The SupabaseDataProvider injects the real
+        // session-derived user — this is never the live identity.
+        user: { id: "demo-admin", name: "Workspace Admin", initials: "WA", role: "lead_admin" },
+        testCentres: [],
+      });
     if (user) this.user = user;
     this.hydrated = hydrated;
     // 0010 — bind the test-centre list now that `seed` is final. Live runs carry
@@ -533,10 +560,17 @@ export class InMemoryDataProvider implements DataProvider {
     // workspace correctly shows "create a centre first" rather than a mock. Only the
     // demo seed (field absent → undefined) falls back to a single labelling centre so
     // the home/year screens always have a centre to display.
-    this.testCentres =
-      this.seed.testCentres !== undefined
-        ? this.seed.testCentres.map((c) => ({ ...c }))
-        : [{ id: "tc-shatila-1", name: "Shatila 1", code: "SHA1", slug: "shatila-1", active: true }];
+    if (!workspace) {
+      this.testCentres =
+        this.seed.testCentres !== undefined
+          ? this.seed.testCentres.map((c) => ({ ...c }))
+          : [{ id: "tc-shatila-1", name: "Shatila 1", code: "SHA1", slug: "shatila-1", active: true }];
+    }
+  }
+
+  /** The shared workspace state — handed to child providers so they share it. */
+  getWorkspaceState(): WorkspaceState {
+    return this.ws;
   }
 
   /** The centre new work defaults to: the first ACTIVE centre, else the first. */
@@ -553,6 +587,63 @@ export class InMemoryDataProvider implements DataProvider {
    *  else the centre stored on the seed cycle. */
   private effectiveCentreId(cycleId: string, seedCentreId?: string): string | undefined {
     return this.cycleCentreOverride.get(cycleId) ?? seedCentreId;
+  }
+
+  /**
+   * Does THIS provider host `cycleId`'s detailed data?
+   *
+   * A provider hosts exactly the one cycle in its seed (`seed.liveCycle`). Routing — the
+   * decision of WHICH provider answers for a given cycle id — happens one level up, in
+   * the SupabaseDataProvider, which builds one provider per opened sitting and sends each
+   * cycle-scoped call to the right one. This is the single place that says "yes, mine /
+   * not mine", replacing the `cycleId !== this.seed.liveCycle.id` guard that used to be
+   * repeated in every read and write. The empty placeholder cycle (id "") that a
+   * directory provider carries hosts nothing.
+   */
+  private hostsCycle(cycleId: string): boolean {
+    return cycleId !== "" && cycleId === this.seed.liveCycle.id;
+  }
+
+  /**
+   * DIRECTORY use: how to reach the provider that hosts another cycle. The live provider
+   * sets this on its directory so year-level reads (Overall) can read each sitting's
+   * grades from the provider that holds that sitting's data.
+   */
+  private cycleResolver: ((cycleId: string) => InMemoryDataProvider | null) | null = null;
+  setCycleResolver(resolver: ((cycleId: string) => InMemoryDataProvider | null) | null): void {
+    this.cycleResolver = resolver;
+  }
+  /** A cycle's grades from whichever provider hosts it (this one, or via the resolver). */
+  private gradesOf(cycleId: string): GradesModel | null {
+    if (this.hostsCycle(cycleId)) return this.getGrades(cycleId);
+    return this.cycleResolver?.(cycleId)?.getGrades(cycleId) ?? null;
+  }
+
+  /** True only inside `replayPersisted` — database truth is being loaded. */
+  private replaying = false;
+
+  /** Is the current user allowed `action`? (Always, while replaying persisted state.) */
+  private permitted(action: ActionKey): boolean {
+    return this.replaying || can(this.user, action, this.resolvedActions);
+  }
+
+  /**
+   * Run `fn` as persisted state being LOADED, not as a decision the current user is
+   * making now. While it runs, permission gates are bypassed and no audit entries are
+   * written. The live provider replays a sitting's stored decisions (exclusions, cuts,
+   * clean removals, distinction, …) through the ordinary mutators; without this a
+   * read-only viewer's replay silently dropped every one of them (so they saw different
+   * grades — and a different Overall — than an admin), and each replay wrote phantom
+   * "Excluded item" audit rows attributed to whoever happened to open the sitting.
+   */
+  replayPersisted<T>(fn: () => T): T {
+    const prev = this.replaying;
+    this.replaying = true;
+    try {
+      return fn();
+    } finally {
+      this.replaying = prev;
+    }
   }
 
   // ── subscription ──────────────────────────────────────────────────────────
@@ -590,6 +681,7 @@ export class InMemoryDataProvider implements DataProvider {
     cycleId: string | null,
     extra?: { isOverride?: boolean; priorActor?: string | null; reason?: string | null },
   ): void {
+    if (this.replaying) return; // loading stored state is not a user action — no audit row
     const me = this.members.find((m) => m.id === this.user.id);
     this.auditSeq += 1;
     this.auditEntries.unshift({
@@ -688,6 +780,81 @@ export class InMemoryDataProvider implements DataProvider {
     }));
   }
   /**
+   * Raw diagnostics records for one assessment's CURRENT `items`/`responses` —
+   * unfiltered by participant (the drop-set is applied by the caller via
+   * `cleanDiagResponses`, matching the ingest-time build in `buildLiveCycleData`/
+   * `hydrate`). Only items with `maxScore >= 1` are included — the same filter
+   * those two build paths apply (unscored stimulus/instruction items must not
+   * inflate omission/completion/correlation inputs; see
+   * tests/diagnostics-maxscore-zero.test.ts). Presentation order uses QM's real
+   * per-sitting `questionPresentedNumber` carried on each response — confirmed
+   * against the 700435 fixture to VARY per participant even for the same item, so
+   * it is read per response, never shared globally by item. Falls back to the
+   * item's position in the already-ordered `a.items` array (ingest-time first-
+   * appearance order) ONLY when `questionPresentedNumber` is null/missing for a
+   * given response (defensive; should not fire on real data — logged below so a
+   * fallback firing stays visible). "answered" reads the same `r.a !== false`
+   * signal the rest of the provider uses (itself keyed off AnswerGivenChoiceNumber
+   * upstream).
+   */
+  private diagResponsesFor(a: SeedAssessment): DiagResponse[] {
+    // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER)
+    const __tempDebug = __tempDebugIsTargetAssessment(a);
+    if (__tempDebug) {
+      console.log(`[TEMP-DEBUG] diagResponsesFor(${a.name}): a.items.length=${a.items.length}`);
+      console.log(`[TEMP-DEBUG] diagResponsesFor(${a.name}): a.responses.length=${a.responses.length}`);
+    }
+    const itemMeta = new Map<string, { demand: string | null; itemSet: string | null; major: string | null; fallbackOrder: number }>();
+    let fallbackOrder = 0;
+    const __tempDebugExcludedItemIds: string[] = []; // TEMP-DEBUG
+    for (const it of a.items) {
+      if ((it.maxScore ?? 1) < 1) {
+        if (__tempDebug) __tempDebugExcludedItemIds.push(it.id); // TEMP-DEBUG
+        continue;
+      }
+      itemMeta.set(it.id, { demand: it.demand, itemSet: it.itemSet ?? null, major: it.major ?? null, fallbackOrder: fallbackOrder++ });
+    }
+    if (__tempDebug) {
+      console.log(
+        `[TEMP-DEBUG] diagResponsesFor(${a.name}): excluded ${__tempDebugExcludedItemIds.length} item(s) ` +
+          `by (maxScore ?? 1) < 1: [${__tempDebugExcludedItemIds.join(", ")}]`,
+      );
+    }
+    const out: DiagResponse[] = [];
+    let fallbackOrderCount = 0;
+    for (const r of a.responses) {
+      const meta = itemMeta.get(r.i);
+      if (!meta) continue;
+      let order = r.questionPresentedNumber ?? null;
+      if (order == null) {
+        order = meta.fallbackOrder;
+        fallbackOrderCount += 1;
+      }
+      out.push({
+        participantId: r.p,
+        itemId: r.i,
+        demandLevel: meta.demand,
+        itemSet: meta.itemSet,
+        majorElement: meta.major,
+        order,
+        answered: r.a !== false,
+        correct: r.s === 1,
+        responseTime: r.responseTime ?? null,
+      });
+    }
+    if (fallbackOrderCount > 0) {
+      console.warn(
+        `diagResponsesFor: ${a.name} — ${fallbackOrderCount} response(s) had no questionPresentedNumber; ` +
+          `fell back to item-array-position proxy for presentation order.`,
+      );
+    }
+    // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER)
+    if (__tempDebug) {
+      console.log(`[TEMP-DEBUG] diagResponsesFor(${a.name}): returned DiagResponse[].length=${out.length}`);
+    }
+    return out;
+  }
+  /**
    * participantId -> full subject score for one assessment, composed from the
    * three components (retained MCQ + essay + alterations). The map values are the
    * engine's ParticipantScore, so callers can read the total (`raw`), `max`,
@@ -743,6 +910,7 @@ export class InMemoryDataProvider implements DataProvider {
     return a.items.map((it) => ({
       itemId: it.id,
       assessmentId: a.id,
+      wording: it.wording,
       majorElement: it.major,
       subElement: it.sub,
       demandLevel: it.demand,
@@ -892,8 +1060,11 @@ export class InMemoryDataProvider implements DataProvider {
   // ── cycles ────────────────────────────────────────────────────────────────
   listCycles(): CycleSummary[] {
     const live = this.seed.liveCycle;
-    const liveCentre = this.centreFor(this.effectiveCentreId(live.id, live.testCentreId));
-    const liveSummary: CycleSummary = {
+    // A directory provider hosts no cycle: its liveCycle is an empty placeholder (id "")
+    // that must never appear in a list — the cycle list is its priorCycles.
+    const hosted = live.id !== "";
+    const liveCentre = hosted ? this.centreFor(this.effectiveCentreId(live.id, live.testCentreId)) : undefined;
+    const liveSummary: CycleSummary | null = !hosted || !liveCentre ? null : {
       id: live.id,
       name: live.name,
       stageIndex: live.stageIndex,
@@ -908,6 +1079,8 @@ export class InMemoryDataProvider implements DataProvider {
       testCentreId: liveCentre.id,
       testCentreName: liveCentre.name,
       examYearId: live.yearId,
+      sitting: live.sitting,
+      yearName: live.yearName,
     };
     const priors: CycleSummary[] = this.seed.priorCycles.map((p) => {
       const centre = this.centreFor(this.effectiveCentreId(p.id, p.testCentreId));
@@ -915,25 +1088,74 @@ export class InMemoryDataProvider implements DataProvider {
         id: p.id,
         name: p.name,
         stageIndex: p.stageIndex,
-        stageLabel: "Locked & exported",
+        // A locked (or illustrative demo) summary reads "Locked & exported"; a live
+        // summary that is still open reads its real pipeline stage.
+        stageLabel: p.locked || p.mock ? "Locked & exported" : PIPELINE[p.stageIndex] ?? "Draft",
         stepsDone: p.stepsDone,
         participants: p.participants,
         assessments: p.assessments,
         lastActivity: p.lastActivity,
         locked: p.locked,
         live: false,
-        mock: true,
+        // Real summaries from the database are NOT mock; only the demo's illustrative
+        // priors are (see SeedPriorCycle.mock).
+        mock: p.mock,
         testCentreId: centre.id,
         testCentreName: centre.name,
         examYearId: p.yearId,
+        sitting: p.sitting,
+        yearName: p.yearName,
+        sittingDate: p.sittingDate,
       };
     });
-    return [liveSummary, ...priors];
+    return liveSummary ? [liveSummary, ...priors] : priors;
+  }
+
+  /**
+   * DIRECTORY use (the live provider): replace the list of cycle summaries this
+   * provider carries — every real sitting, as the light load reports them. A directory
+   * hosts no cycle's detailed data; its `liveCycle` is an empty placeholder.
+   */
+  setCycleDirectory(entries: SeedPriorCycle[]): void {
+    this.seed = { ...this.seed, priorCycles: entries.map((e) => ({ ...e })) };
+    this.bump();
+  }
+
+  /** Is this cycle's grade lock set? (false for a cycle this provider doesn't host.) */
+  isCycleLocked(cycleId: string): boolean {
+    return this.locked.has(cycleId);
+  }
+
+  /**
+   * Restore a cycle's persisted lock during hydration. UNGATED on purpose: the
+   * interactive `lockCycle` requires the `general.signoff` permission, so replaying a
+   * stored lock through it silently dropped the lock for any read-only viewer. A lock
+   * is database truth (exam_cycles.status), not a decision this user is making now.
+   */
+  hydrateLocked(cycleId: string, locked: boolean): void {
+    if (!this.hostsCycle(cycleId)) return;
+    if (locked) this.locked.add(cycleId);
+    else this.locked.delete(cycleId);
+  }
+
+  /** Lazy-load state of a cycle. The in-memory demo has everything loaded already. */
+  getCycleLoadState(cycleId: string): CycleLoadState {
+    return this.hostsCycle(cycleId) || this.seed.priorCycles.some((p) => p.id === cycleId) ? "ready" : "missing";
+  }
+  /** Nothing to load in memory. */
+  ensureCycleLoaded(cycleId: string): Promise<void> {
+    void cycleId;
+    return Promise.resolve();
+  }
+  /** Nothing to load in memory. */
+  ensureYearLoaded(yearId: string): Promise<void> {
+    void yearId;
+    return Promise.resolve();
   }
 
   getCycle(cycleId: string): CycleDetail | null {
     const live = this.seed.liveCycle;
-    if (cycleId === live.id) {
+    if (this.hostsCycle(cycleId)) {
       const refs = this.assessmentRefs(cycleId);
       return {
         id: live.id,
@@ -944,6 +1166,7 @@ export class InMemoryDataProvider implements DataProvider {
         stageIndex: this.locked.has(live.id) ? PIPELINE.length - 1 : live.stageIndex,
         locked: this.locked.has(live.id),
         mock: false,
+        loaded: true,
         testCentreName: this.centreFor(this.effectiveCentreId(live.id, live.testCentreId)).name,
         // Land on the cycle's FIRST INCOMPLETE step — never skip ahead to a
         // screen (Review/Boundaries/…) whose data doesn't exist yet. A locked
@@ -957,17 +1180,40 @@ export class InMemoryDataProvider implements DataProvider {
     }
     const prior = this.seed.priorCycles.find((p) => p.id === cycleId);
     if (prior) {
+      const testCentreName = this.centreFor(this.effectiveCentreId(prior.id, prior.testCentreId)).name;
+      if (prior.mock) {
+        // The demo's illustrative priors: a locked, detail-less record.
+        return {
+          id: prior.id,
+          name: prior.name,
+          participants: prior.participants,
+          assessmentCount: prior.assessments,
+          startedAt: prior.lastActivity,
+          stageIndex: prior.stageIndex,
+          locked: true,
+          mock: true,
+          loaded: false,
+          testCentreName,
+          doNext: { title: "Locked cycle", body: "This is a mock prior cycle with no detailed data in this build.", href: "/", cta: "Back to cycles" },
+          assessments: [],
+        };
+      }
+      // A REAL sitting whose detailed data this provider does not hold (yet): the
+      // summary the cycle list carries — real lock state, real counts, its real next
+      // step — with `loaded: false` and no subject refs until the cycle is opened.
+      const stageIndex = prior.locked ? PIPELINE.length - 1 : prior.stageIndex;
       return {
         id: prior.id,
         name: prior.name,
         participants: prior.participants,
         assessmentCount: prior.assessments,
         startedAt: prior.lastActivity,
-        stageIndex: prior.stageIndex,
-        locked: true,
-        mock: true,
-        testCentreName: this.centreFor(this.effectiveCentreId(prior.id, prior.testCentreId)).name,
-        doNext: { title: "Locked cycle", body: "This is a mock prior cycle with no detailed data in this build.", href: "/", cta: "Back to cycles" },
+        stageIndex,
+        locked: prior.locked,
+        mock: false,
+        loaded: false,
+        testCentreName,
+        doNext: doNextForStage(prior.id, stageIndex),
         assessments: [],
       };
     }
@@ -991,15 +1237,31 @@ export class InMemoryDataProvider implements DataProvider {
     return m ? m[0] : "Unknown";
   }
 
-  /** Map a cycle name to its sitting: Jan–Apr → February, otherwise May. */
-  private sittingOf(name: string): SittingKey {
-    return /\b(jan|feb|mar|apr)/i.test(name) ? "february" : "may";
+  /**
+   * LEGACY fallback only: guess a period from a month named in a cycle name (via the
+   * period registry; no month → the default period). Used solely for cycles that carry NO stored period — the demo
+   * fixtures and un-migrated rows. A sitting created through the app always has an
+   * explicit `exam_cycles.sitting`, which `sittingOfCycle` prefers.
+   */
+  private legacySittingFromName(name: string): SittingKey {
+    const month = monthOfText(name);
+    return month ? periodOfMonth(month) : DEFAULT_NEW_PERIOD;
   }
 
-  private sittingRefFrom(c: CycleSummary, sitting: SittingKey): SittingRef {
+  /** The sitting slot of a cycle: the STORED period, never a guess from its name. */
+  private sittingOfCycle(c: CycleSummary): SittingKey {
+    return c.sitting ?? this.legacySittingFromName(c.name);
+  }
+
+  /** The year label of a cycle: the stored exam_years.name, else the name's 4-digit year. */
+  private yearLabelOf(c: CycleSummary): string {
+    return c.yearName ?? this.yearOf(c.name);
+  }
+
+  private sittingRefFrom(c: CycleSummary, sitting: SittingKey, expected: boolean): SittingRef {
     return {
       sitting,
-      label: sitting === "february" ? "February" : "May",
+      label: periodLabel(sitting),
       testCentreName: c.testCentreName,
       cycleId: c.id,
       cycleName: c.name,
@@ -1010,15 +1272,17 @@ export class InMemoryDataProvider implements DataProvider {
       participants: c.participants,
       assessments: c.assessments,
       lastActivity: c.lastActivity,
+      sittingDate: c.sittingDate,
       live: c.live,
       mock: c.mock,
+      expected,
     };
   }
 
-  private emptySitting(sitting: SittingKey, testCentreName: string): SittingRef {
+  private emptySitting(sitting: SittingKey, testCentreName: string, expected: boolean): SittingRef {
     return {
       sitting,
-      label: sitting === "february" ? "February" : "May",
+      label: periodLabel(sitting),
       testCentreName,
       cycleId: null,
       cycleName: null,
@@ -1031,7 +1295,34 @@ export class InMemoryDataProvider implements DataProvider {
       lastActivity: "—",
       live: false,
       mock: false,
+      expected,
     };
+  }
+
+  /** The periods a year expects (`exam_years.expected_periods`); the registry defaults when unset. */
+  private expectedPeriodsOf(examYearId?: string): SittingKey[] {
+    const stored = examYearId ? this.ws.expectedPeriodsByYear.get(examYearId) : undefined;
+    return sortPeriods(stored && stored.length > 0 ? stored : [...DEFAULT_EXPECTED_PERIODS]);
+  }
+
+  /** A year's sitting for a period, or undefined when the year shows none for it. */
+  private sittingIn(y: { sittings: SittingRef[] }, key: SittingKey): SittingRef | undefined {
+    return y.sittings.find((s) => s.sitting === key);
+  }
+
+  /**
+   * "Ready" (the Overall is final / certifiable): the year has an EXPECTED period list and
+   * every expected period has a started, LOCKED sitting. A sitting in a period the year does
+   * not expect never blocks this, and neither does one that exists but is unlocked.
+   */
+  private yearReady(y: { sittings: SittingRef[]; expectedPeriods: SittingKey[] }): boolean {
+    return (
+      y.expectedPeriods.length > 0 &&
+      y.expectedPeriods.every((k) => {
+        const s = this.sittingIn(y, k);
+        return !!s && s.started && s.locked;
+      })
+    );
   }
 
   /**
@@ -1048,18 +1339,21 @@ export class InMemoryDataProvider implements DataProvider {
     testCentreId: string;
     testCentreName: string;
     examYearId?: string;
-    february: SittingRef;
-    may: SittingRef;
+    sittings: SittingRef[];
+    expectedPeriods: SittingKey[];
   }[] {
     const order: string[] = [];
     const byKey = new Map<
       string,
-      { year: string; centre: TestCentreSummary; examYearId?: string; anchorCycleId?: string; february?: SittingRef; may?: SittingRef }
+      { year: string; centre: TestCentreSummary; examYearId?: string; anchorCycleId?: string; cycles: Map<SittingKey, CycleSummary> }
     >();
+    // No cycles → no years; and a workspace with no centres has no "primary" centre to
+    // read an id from (a fresh live database), so don't try.
+    if (this.listCycles().length === 0 || this.testCentres.length === 0) return [];
     const primaryId = this.primaryTestCentre().id;
     for (const c of this.listCycles()) {
-      const year = this.yearOf(c.name);
-      const sitting = this.sittingOf(c.name);
+      const year = this.yearLabelOf(c);
+      const sitting = this.sittingOfCycle(c);
       const centre = this.centreFor(c.testCentreId);
       // GROUPING KEY — always id-anchored for live data so a route param is never a
       // name label:
@@ -1074,7 +1368,7 @@ export class InMemoryDataProvider implements DataProvider {
           ? `c:${c.id}`
           : `${centre.id}|${year}`;
       if (!byKey.has(key)) {
-        byKey.set(key, { year, centre, anchorCycleId: c.id || undefined });
+        byKey.set(key, { year, centre, anchorCycleId: c.id || undefined, cycles: new Map() });
         order.push(key);
       }
       const slot = byKey.get(key)!;
@@ -1082,10 +1376,9 @@ export class InMemoryDataProvider implements DataProvider {
       // wins; all sittings of a (centre, year) share the same year row.
       if (!slot.examYearId && c.examYearId) slot.examYearId = c.examYearId;
       if (!slot.anchorCycleId && c.id) slot.anchorCycleId = c.id;
-      const ref = this.sittingRefFrom(c, sitting);
-      // First write wins per slot; listCycles is newest-first and the live run is
+      // First write wins per period; listCycles is newest-first and the live run is
       // first, so the most relevant cycle keeps the slot if names ever collide.
-      if (!slot[sitting]) slot[sitting] = ref;
+      if (!slot.cycles.has(sitting)) slot.cycles.set(sitting, c);
     }
     return order.map((key) => {
       const slot = byKey.get(key)!;
@@ -1100,30 +1393,36 @@ export class InMemoryDataProvider implements DataProvider {
         slot.centre.id === primaryId ? this.yearId(slot.year) : `${this.yearId(slot.year)}--${slot.centre.slug}`;
       const id =
         slot.examYearId ?? (this.hydrated ? (slot.anchorCycleId ?? derivedLabel) : derivedLabel);
+      // The year shows every period it EXPECTS (a missing one is an empty tile) plus any
+      // other period that has a sitting — in period order.
+      const expectedPeriods = this.expectedPeriodsOf(slot.examYearId);
+      const shown = sortPeriods([...new Set<SittingKey>([...expectedPeriods, ...slot.cycles.keys()])]);
+      const sittings = shown.map((k) => {
+        const expected = expectedPeriods.includes(k);
+        const c = slot.cycles.get(k);
+        return c ? this.sittingRefFrom(c, k, expected) : this.emptySitting(k, slot.centre.name, expected);
+      });
       return {
         id,
         name: slot.year,
         testCentreId: slot.centre.id,
         testCentreName: slot.centre.name,
         examYearId: slot.examYearId,
-        february: slot.february ?? this.emptySitting("february", slot.centre.name),
-        may: slot.may ?? this.emptySitting("may", slot.centre.name),
+        sittings,
+        expectedPeriods,
       };
     });
   }
 
   listYears(): YearSummary[] {
     return this.buildYears().map((y) => {
-      const live = y.february.live || y.may.live;
-      const mock =
-        (!y.february.started || y.february.mock) &&
-        (!y.may.started || y.may.mock) &&
-        !live;
+      const live = y.sittings.some((s) => s.live);
+      const mock = y.sittings.every((s) => !s.started || s.mock) && !live;
+      // Newest sitting first: a live run's activity wins, then any started sitting's.
+      const newestFirst = [...y.sittings].reverse();
       const lastActivity =
-        (y.may.live && y.may.lastActivity) ||
-        (y.february.live && y.february.lastActivity) ||
-        (y.may.started && y.may.lastActivity) ||
-        (y.february.started && y.february.lastActivity) ||
+        newestFirst.find((s) => s.live && s.lastActivity)?.lastActivity ||
+        newestFirst.find((s) => s.started && s.lastActivity)?.lastActivity ||
         "—";
       return {
         id: y.id,
@@ -1131,9 +1430,9 @@ export class InMemoryDataProvider implements DataProvider {
         testCentreId: y.testCentreId,
         testCentreName: y.testCentreName,
         examYearId: y.examYearId,
-        february: y.february,
-        may: y.may,
-        participants: Math.max(y.february.participants, y.may.participants),
+        sittings: y.sittings,
+        expectedPeriods: y.expectedPeriods,
+        participants: Math.max(0, ...y.sittings.map((s) => s.participants)),
         lastActivity,
         live,
         mock,
@@ -1141,26 +1440,40 @@ export class InMemoryDataProvider implements DataProvider {
     });
   }
 
+  /** The Year page's Overall card text for LIVE data: only locked sittings count. */
+  private overallCardNote(y: { sittings: SittingRef[] }): string {
+    const parts = y.sittings.map((ref) => {
+      const label = periodLabel(ref.sitting);
+      if (!ref.started) return `${label}: no sitting`;
+      return ref.locked ? `${label}: locked — counted` : `${label}: not counted yet — grades not locked`;
+    });
+    return `Overall counts only sittings whose grades are locked. ${parts.join(" · ")}.`;
+  }
+
   getYear(yearId: string): YearDetail | null {
     // Resolve on the canonical id (the real exam_years.id for live data), also
     // accepting the legacy derived label-key so any older link still opens.
     const y = this.buildYears().find((yr) => yr.id === yearId || yr.examYearId === yearId);
     if (!y) return null;
-    // Overall is the best-of-two-by-award-level rollup — implemented next prompt.
-    const ready = y.february.started && y.february.locked && y.may.started && y.may.locked;
+    // Overall = the best level per student and subject across the locked sittings.
+    const ready = this.yearReady(y);
+    const two = y.expectedPeriods.length === 2;
+    const expectedLabels = joinPeriodLabels(y.expectedPeriods);
     return {
       id: y.id,
       name: y.name,
       testCentreId: y.testCentreId,
       testCentreName: y.testCentreName,
       examYearId: y.examYearId,
-      february: y.february,
-      may: y.may,
+      sittings: y.sittings,
+      expectedPeriods: y.expectedPeriods,
       overall: {
         ready,
-        note: ready
-          ? "Both sittings are locked — the Overall best-of-two rollup runs here."
-          : "Overall becomes available once both the February and May sittings are locked.",
+        note: this.hydrated
+          ? this.overallCardNote(y)
+          : ready
+            ? `${two ? "Both" : "All"} sittings are locked — the Overall ${two ? "best-of-two " : ""}rollup runs here.`
+            : `Overall becomes available once ${two ? "both " : ""}the ${expectedLabels} ${y.expectedPeriods.length === 1 ? "sitting is" : "sittings are"} locked.`,
       },
     };
   }
@@ -1168,7 +1481,7 @@ export class InMemoryDataProvider implements DataProvider {
   // ── ingest & validate ─────────────────────────────────────────────────────
   getIngest(cycleId: string): IngestModel | null {
     const live = this.seed.liveCycle;
-    if (cycleId !== live.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     // A raw export has actually been ingested only once some subject has
     // responses. A freshly-created (empty) cycle has none — the Import screen
     // shows its upload prompt instead of an all-zero "validation report".
@@ -1205,7 +1518,7 @@ export class InMemoryDataProvider implements DataProvider {
    */
   getSittingRoster(cycleId: string): SittingRoster | null {
     const live = this.seed.liveCycle;
-    if (cycleId !== live.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const emailOf = new Map(live.participants.map((p) => [p.id, p.studentId ?? p.id]));
     const byAssessment = new Map<string, Map<string, string>>();
 
@@ -1286,7 +1599,7 @@ export class InMemoryDataProvider implements DataProvider {
 
   getCombinedSplit(cycleId: string): CombinedSplitModel | null {
     const live = this.seed.liveCycle;
-    if (cycleId !== live.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     // The split panel summarises a raw export AFTER it's been ingested. With no
     // upload yet (empty cycle) there is nothing to split — return null so the
     // Import screen shows its upload prompt, not "Detected 0-item subjects".
@@ -1328,7 +1641,7 @@ export class InMemoryDataProvider implements DataProvider {
 
   getRawData(cycleId: string, assessmentId: string): RawDataModel | null {
     const a = this.assessment(assessmentId);
-    if (cycleId !== this.seed.liveCycle.id || !a) return null;
+    if (!this.hostsCycle(cycleId) || !a) return null;
     const refs = this.assessmentRefs(cycleId);
     const labels = this.elementLabelMap(a);
     const byElement: RawElementBreak[] = this.majorsOf(a).map((major) => {
@@ -1357,7 +1670,7 @@ export class InMemoryDataProvider implements DataProvider {
 
   getDataCleaning(cycleId: string, assessmentId: string): DataCleaningModel | null {
     const a = this.assessment(assessmentId);
-    if (cycleId !== this.seed.liveCycle.id || !a) return null;
+    if (!this.hostsCycle(cycleId) || !a) return null;
     const refs = this.assessmentRefs(cycleId);
     // Surface the REAL validation report as cleaning checks; warnings vs must-fix
     // are distinguished by status. The sample data is clean, so blockers only
@@ -1422,7 +1735,7 @@ export class InMemoryDataProvider implements DataProvider {
    */
   getCleanedData(cycleId: string, assessmentId: string): CleanedDataModel | null {
     const a = this.assessment(assessmentId);
-    if (cycleId !== this.seed.liveCycle.id || !a) return null;
+    if (!this.hostsCycle(cycleId) || !a) return null;
     const refs = this.assessmentRefs(cycleId);
     const remRows = this.cleanRows.get(`${cycleId}:${assessmentId}`);
     const remCols = this.cleanCols.get(`${cycleId}:${assessmentId}`);
@@ -1438,8 +1751,21 @@ export class InMemoryDataProvider implements DataProvider {
 
     const scoreByKey = new Map<string, number>();
     for (const r of a.responses) scoreByKey.set(`${r.p} ${r.i}`, r.s);
+    const choiceNumberByKey = new Map<string, string | null>();
+    for (const r of a.responses) choiceNumberByKey.set(`${r.p} ${r.i}`, r.answerGivenChoiceNumber ?? null);
+    const presentedNumberByKey = new Map<string, number | null>();
+    for (const r of a.responses) presentedNumberByKey.set(`${r.p} ${r.i}`, r.questionPresentedNumber ?? null);
+    const answerGivenByKey = new Map<string, string>();
+    const responseTimeByKey = new Map<string, number>();
+    for (const r of a.responses) {
+      if (r.answerGiven != null) answerGivenByKey.set(`${r.p} ${r.i}`, r.answerGiven);
+      if (r.responseTime != null) responseTimeByKey.set(`${r.p} ${r.i}`, r.responseTime);
+    }
     const incident = new Map<string, string>();
     for (const ti of a.technicalIncidents ?? []) incident.set(ti.p, ti.status);
+    // Max-0 items (instruction/stimulus pages) are never real responses — excluded
+    // from both the score totals and the exported rows below, so a passage intro
+    // doesn't show up as a full row in the Clean step's export.
     const scored = items.filter((it) => (it.maxScore ?? 1) >= 1);
     const maxTotal = scored.reduce((n, it) => n + (it.maxScore ?? 1), 0);
 
@@ -1450,7 +1776,7 @@ export class InMemoryDataProvider implements DataProvider {
       for (const it of scored) total += scoreByKey.get(`${p.id} ${it.id}`) ?? 0;
       const pct = maxTotal ? Math.round((total / maxTotal) * 1000) / 10 : 0;
       const resultStatus = incident.get(p.id) ?? "Finished OK";
-      for (const it of items) {
+      for (const it of scored) {
         const score = scoreByKey.get(`${p.id} ${it.id}`);
         if (score === undefined) continue; // a row per presented (answered) question
         const rec: Partial<Record<CleanedDataColumn, string>> = {
@@ -1463,11 +1789,18 @@ export class InMemoryDataProvider implements DataProvider {
           QuestionDescription: it.wording ?? "",
           QuestionType: "Multiple Choice",
           QuestionSubElement: it.sub ?? "",
+          QuestionPresentedNumber: presentedNumberByKey.get(`${p.id} ${it.id}`) != null ? String(presentedNumberByKey.get(`${p.id} ${it.id}`)) : "",
           QuestionWording: it.wording ?? "",
           QuestionMinimumScore: "0",
           QuestionMaximumScore: String(it.maxScore ?? 1),
           QuestionStatus: "Normal",
+          AnswerGiven: answerGivenByKey.get(`${p.id} ${it.id}`) ?? "",
           AnswerScore: String(score),
+          AnswerGivenChoiceNumber: choiceNumberByKey.get(`${p.id} ${it.id}`) ?? "",
+          AnswerResponseTimeSeconds:
+            responseTimeByKey.get(`${p.id} ${it.id}`) !== undefined
+              ? String(responseTimeByKey.get(`${p.id} ${it.id}`))
+              : "",
           AssessmentId: a.id,
           AssessmentName: a.name,
           // Participant identity, carried as its OWN column (the email = the
@@ -1502,7 +1835,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getCleaningImpact(cycleId: string): CleaningImpactModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const refs = this.assessmentRefs(cycleId);
     const exams = this.examAssessments();
     const cohortRemoved = this.cohortRemovedParticipants();
@@ -1588,7 +1921,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getCleaningSummary(cycleId: string): CleaningSummaryModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const refs = this.assessmentRefs(cycleId);
     const exams = this.examAssessments();
     const cohortExcluded = this.cohortExcludedSet();
@@ -1683,7 +2016,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getCleanedMasterDataset(cycleId: string): CleanedMasterDataset | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const exams = this.examAssessments();
     const rows: string[][] = [];
     const idIdx = CLEANED_DATA_COLUMNS.indexOf("ParticipantID" as CleanedDataColumn);
@@ -1707,7 +2040,7 @@ export class InMemoryDataProvider implements DataProvider {
 
   getNaiveScores(cycleId: string, assessmentId: string): NaiveScoresModel | null {
     const a = this.assessment(assessmentId);
-    if (cycleId !== this.seed.liveCycle.id || !a) return null;
+    if (!this.hostsCycle(cycleId) || !a) return null;
     const refs = this.assessmentRefs(cycleId);
     // Honour the Clean stage: columns/rows removed there are CLEANED OUT of the
     // data (distinct from item-review exclusions, which are applied later). The
@@ -1803,7 +2136,7 @@ export class InMemoryDataProvider implements DataProvider {
   // ── item review & scoring ───────────────────────────────────────────────--
   getReview(cycleId: string, assessmentId: string): ReviewModel | null {
     const a = this.assessment(assessmentId);
-    if (cycleId !== this.seed.liveCycle.id || !a) return null;
+    if (!this.hostsCycle(cycleId) || !a) return null;
     const excluded = this.excludedSet(cycleId, assessmentId);
     const refs = this.assessmentRefs(cycleId);
     const ref = refs.find((r) => r.id === assessmentId)!;
@@ -1812,7 +2145,8 @@ export class InMemoryDataProvider implements DataProvider {
     // response from that item's cohort psychometrics. With no per-student
     // exclusions this is byte-identical to the seed (parity-verified).
     const live = this.liveItemStats(cycleId, a);
-    const items: ItemRow[] = a.items.map((it) => {
+    const scoredItems = a.items.filter((it) => (it.maxScore ?? 1) >= 1);
+    const items: ItemRow[] = scoredItems.map((it) => {
       const s = live.get(it.id);
       return {
         id: it.id,
@@ -1866,7 +2200,7 @@ export class InMemoryDataProvider implements DataProvider {
       assessment: ref,
       assessments: refs,
       kpis: {
-        items: a.items.length,
+        items: scoredItems.length,
         excluded: excluded.size,
         medianDifficulty,
         cohortMean,
@@ -1881,8 +2215,11 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getItemDetail(cycleId: string, assessmentId: string, itemId: string): ItemDetailModel | null {
+    // Note: unlike getReview(), this still looks up by itemId across all of a.items,
+    // so a Max Score = 0 item is still reachable here even though it no longer
+    // appears as a row in the Review table. Possible follow-up, not fixed here.
     const a = this.assessment(assessmentId);
-    if (cycleId !== this.seed.liveCycle.id || !a) return null;
+    if (!this.hostsCycle(cycleId) || !a) return null;
     const index = a.items.findIndex((it) => it.id === itemId);
     if (index < 0) return null;
     const item = a.items[index]!;
@@ -2122,7 +2459,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getBoundaries(cycleId: string, scope: string): BoundaryModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const scopes = [
       ...this.seed.liveCycle.assessments.map((a) => ({ id: a.id, label: a.shortName })),
       { id: "overall", label: "Overall award" },
@@ -2277,7 +2614,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getGrades(cycleId: string): GradesModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const refs = this.assessmentRefs(cycleId);
     const perfLevels = this.grading.performanceLevels;
     const awardLevels = this.grading.awardLevels;
@@ -2385,31 +2722,133 @@ export class InMemoryDataProvider implements DataProvider {
       starMap: this.grading.starMap,
       performanceLevels: perfLevels,
       locked: this.locked.has(cycleId),
-      canLock: can(this.user, "general.signoff", this.resolvedActions) && !this.locked.has(cycleId),
+      canLock: this.permitted("general.signoff") && !this.locked.has(cycleId),
     };
   }
 
-  // ── Overall (best-of-two across the year's two sittings) ──────────────────
+  // ── Overall (best-of across the year's sittings) ─────────────────────────
   /**
-   * The year's Overall view: per student, per subject, the HIGHER award of the
-   * two sittings (by level rank), plus the derived overall award. Pure
-   * aggregation over each sitting's signed-off `GradesModel` (see
-   * `lib/data/overall.ts`) — no scoring, cut-score, or safeguard work runs here.
+   * The year's Overall view: per student, per subject, the BEST performance level across
+   * the year's sittings (by level rank; ties go to the LATEST sitting), plus the derived
+   * overall award. Pure aggregation over each sitting's `GradesModel` (see
+   * `lib/data/overall.ts`) — no scoring, cut-score, or safeguard work runs here. Students
+   * are matched across sittings by Student ID (qm_participant_id).
    *
-   * In this build only the live (May) sitting carries real grades, and live
-   * Supabase is unreachable, so the February baseline is synthesized from the May
-   * cohort (clearly flagged `demo: true`) to give the rollup two sittings to
-   * compare. With real two-sitting data, both sittings' `getGrades` feed the same
-   * `rollupOverall` unchanged.
+   * Two modes:
+   *  - LIVE data (`hydrated`): each sitting's real grades, read from the provider that
+   *    holds it; ONLY sittings whose grades are LOCKED count; subjects are matched across
+   *    sittings by canonical subject key (each sitting has its own assessment rows);
+   *    nothing is ever fabricated.
+   *  - The in-memory DEMO (no database): the legacy provisional view, where only the live
+   *    (May) sitting carries grades and the February baseline is synthesized from it
+   *    (clearly flagged `demo: true`).
+   * The year may be addressed by either id form (`y.id` or the real exam_years id).
    */
   getOverallGrades(yearId: string): OverallGradesModel | null {
-    const year = this.buildYears().find((y) => y.id === yearId);
+    const year = this.buildYears().find((y) => y.id === yearId || y.examYearId === yearId);
     if (!year) return null;
+    return this.hydrated ? this.overallFromSittings(year) : this.overallDemo(year);
+  }
 
-    const mayGrades = year.may.cycleId ? this.getGrades(year.may.cycleId) : null;
-    const realFeb = year.february.cycleId ? this.getGrades(year.february.cycleId) : null;
-    // Demo February baseline (only when there's a real May sitting but no real
-    // February grades to compare against).
+  /** LIVE Overall: the year's locked sittings, real data only. */
+  private overallFromSittings(year: ReturnType<InMemoryDataProvider["buildYears"]>[number]): OverallGradesModel {
+    const infos: OverallSittingInfo[] = [];
+    const counted: (GradesModel | null)[] = [];
+    for (const ref of year.sittings) {
+      const key = ref.sitting;
+      const label = periodLabel(key);
+      let status: OverallSittingStatus;
+      let grades: GradesModel | null = null;
+      if (!ref.started || !ref.cycleId) status = "not_started";
+      else if (!ref.locked) status = "not_locked";
+      else {
+        grades = this.gradesOf(ref.cycleId);
+        status = grades ? "counted" : this.cycleResolver?.(ref.cycleId) ? "no_data" : "loading";
+      }
+      const note: Record<OverallSittingStatus, string> = {
+        counted: `${label} sitting counted — grades locked`,
+        not_locked: `${label}: not counted yet — grades not locked`,
+        not_started: `${label}: no sitting`,
+        loading: `${label}: loading…`,
+        no_data: `${label}: locked, but it has no grades to count`,
+      };
+      infos.push({
+        key, label, cycleId: ref.cycleId, cycleName: ref.cycleName, started: ref.started,
+        locked: ref.started && ref.locked, expected: ref.expected, status, note: note[status],
+      });
+      counted.push(
+        grades
+          ? canonicalizeSubjects(grades, (a) => subjectKeyOf(a.name))
+          : null,
+      );
+    }
+
+    // Subjects: the union across counted sittings, newest sitting's order first.
+    const assessments: AssessmentRef[] = [];
+    for (const g of [...counted].reverse()) {
+      for (const a of g?.assessments ?? []) if (!assessments.some((x) => x.id === a.id)) assessments.push(a);
+    }
+
+    const perfLevels = this.grading.performanceLevels;
+    const awardLevels = this.grading.awardLevels;
+    const starMap = this.grading.starMap;
+    const rows = rollupOverall({
+      sittings: infos.map((i, k) => ({ key: i.key, grades: counted[k] ?? null })),
+      assessments,
+      performanceLevels: perfLevels,
+      awardLevels,
+      starMap,
+    });
+
+    const distCounts = new Map<string, number>();
+    for (const r of rows) distCounts.set(r.award, (distCounts.get(r.award) ?? 0) + 1);
+    const distribution = awardLevels.map((level) => ({ level, count: distCounts.get(level) ?? 0 }));
+
+    // "Ready" (final / certifiable) = every period the year EXPECTS has a locked sitting.
+    const ready = this.yearReady(year);
+    const waiting = infos.filter((i) => i.status === "not_locked" || i.status === "not_started");
+    const note = ready
+      ? "All sittings are signed off — this Overall is final and certificates issue from it."
+      : infos.some((i) => i.status === "counted")
+        ? `Overall counts only sittings whose grades are locked. ${waiting.map((w) => w.note).join(" · ")}.`
+        : `No sitting is locked yet, so nothing is counted. ${waiting.map((w) => w.note).join(" · ")}.`;
+
+    // Overall-level records (document settings, issue log) attach to a REAL sitting: the
+    // latest counted one, else the latest started one.
+    const recordCycleId =
+      [...infos].reverse().find((i) => i.status === "counted")?.cycleId ??
+      [...infos].reverse().find((i) => i.started)?.cycleId ??
+      null;
+    return {
+      yearId: year.id,
+      yearName: year.name,
+      assessments,
+      rows,
+      distribution,
+      awardLevels,
+      starMap,
+      performanceLevels: perfLevels,
+      recordCycleId,
+      sittings: infos,
+      ready,
+      locked: ready,
+      demo: false,
+      note,
+    };
+  }
+
+  /** The in-memory DEMO Overall (legacy provisional view with a synthesized baseline). */
+  private overallDemo(year: ReturnType<InMemoryDataProvider["buildYears"]>[number]): OverallGradesModel | null {
+    // The demo compares exactly two sittings: the registry's OLDEST period (whose baseline
+    // is synthesized when it has no real grades) and its NEWEST (the live run).
+    const oldestKey = SITTING_ORDER[0]!;
+    const newestKey = SITTING_ORDER[SITTING_ORDER.length - 1]!;
+    const newestRef = this.sittingIn(year, newestKey);
+    const oldestRef = this.sittingIn(year, oldestKey);
+    const mayGrades = newestRef?.cycleId ? this.gradesOf(newestRef.cycleId) : null;
+    const realFeb = oldestRef?.cycleId ? this.gradesOf(oldestRef.cycleId) : null;
+    // Demo baseline for the oldest period (only when there's a real newest sitting but no
+    // real grades for the oldest one to compare against).
     const febGrades = realFeb ?? (mayGrades ? this.demoFebruaryGrades(mayGrades) : null);
     const demo = realFeb === null && febGrades !== null;
 
@@ -2421,8 +2860,10 @@ export class InMemoryDataProvider implements DataProvider {
     const assessments = (mayGrades ?? febGrades)!.assessments;
 
     const rows = rollupOverall({
-      february: febGrades,
-      may: mayGrades,
+      sittings: [
+        { key: oldestKey, grades: febGrades },
+        ...(newestKey !== oldestKey ? [{ key: newestKey, grades: mayGrades }] : []),
+      ],
       assessments,
       performanceLevels: perfLevels,
       awardLevels,
@@ -2433,10 +2874,11 @@ export class InMemoryDataProvider implements DataProvider {
     for (const r of rows) distCounts.set(r.award, (distCounts.get(r.award) ?? 0) + 1);
     const distribution = awardLevels.map((level) => ({ level, count: distCounts.get(level) ?? 0 }));
 
-    const ready = year.february.started && year.february.locked && year.may.started && year.may.locked;
+    const ready = this.yearReady(year);
+    const two = year.expectedPeriods.length === 2;
     const note = ready
-      ? "Both sittings are signed off — this Overall is final and certificates issue from it."
-      : "Overall is provisional until both the February and May sittings are locked; figures shown are the current best-of-two.";
+      ? `${two ? "Both" : "All"} sittings are signed off — this Overall is final and certificates issue from it.`
+      : `Overall is provisional until ${two ? "both " : ""}the ${joinPeriodLabels(year.expectedPeriods)} sittings are locked; figures shown are the current best-of-two.`;
 
     return {
       yearId: year.id,
@@ -2447,8 +2889,7 @@ export class InMemoryDataProvider implements DataProvider {
       awardLevels,
       starMap,
       performanceLevels: perfLevels,
-      february: { cycleId: year.february.cycleId, cycleName: year.february.cycleName },
-      may: { cycleId: year.may.cycleId, cycleName: year.may.cycleName },
+      recordCycleId: newestRef?.cycleId ?? oldestRef?.cycleId ?? null,
       ready,
       locked: ready,
       demo,
@@ -2624,7 +3065,7 @@ export class InMemoryDataProvider implements DataProvider {
     ];
     const subjectOrder = slotDefs.map((d) => ({ slot: d.slot, assessment: resolve(d.re)?.name ?? d.slot }));
 
-    const base = this.docSettings(overall.may?.cycleId ?? yearId);
+    const base = this.docSettings(overall.recordCycleId ?? yearId);
     const settings: DocSettings = { ...base, cycleName: `${overall.yearName} · Overall` };
 
     // Students are populated whether or not the Overall is locked, so draft proofs
@@ -2648,7 +3089,7 @@ export class InMemoryDataProvider implements DataProvider {
       }),
     }));
 
-    return { cycleId: yearId, locked, students, settings, subjectOrder, signOff, readiness };
+    return { cycleId: overall.recordCycleId ?? "", yearId: overall.yearId, locked, students, settings, subjectOrder, signOff, readiness };
   }
 
   /**
@@ -2686,7 +3127,26 @@ export class InMemoryDataProvider implements DataProvider {
           if (!subOrder[it.major]!.includes(it.sub)) subOrder[it.major]!.push(it.sub);
         }
       }
-      subjects.push({ assessmentId: a.id, name: a.name, majorElements: majorOrder, subElements: subOrder });
+      // Essay subjects (English/Arabic) carry an offline-marked "Writing" major
+      // element with no MCQ items behind it, so it never appears in `a.items` —
+      // add it here (same detector + label resolver the raw-scores view uses)
+      // or it silently disappears from the report for exactly those subjects.
+      const essayMax = reservedEssayMax(a);
+      const essayWriting = isEssaySubject(a) && essayMax > 0 ? resolveEssayWritingLabel(this.elementLabels, a.name) : null;
+      if (essayWriting) {
+        majorOrder.push(essayWriting.label);
+        // No itemized sub-elements behind an offline essay mark — an explicit
+        // empty list (rather than no entry at all) keeps every major element
+        // uniformly keyed into `subElements`, itemized or not.
+        subOrder[essayWriting.label] ??= [];
+      }
+
+      // Canonical display name (raw→display mapped ONCE, here, right after
+      // reading the source data) so Class Performance and every downstream
+      // consumer of `subjects`/`summarySubjects` key and label this assessment
+      // identically — a raw-scripted name (e.g. the Arabic source name) and its
+      // canonical label never diverge into "two subjects" again.
+      subjects.push({ assessmentId: a.id, name: canonicalSubjectName(a.name), majorElements: majorOrder, subElements: subOrder });
 
       const excluded = this.excludedSet(cycleId, a.id);
       // accumulate raw/n per (participant, major) and per (participant, major, sub)
@@ -2724,6 +3184,17 @@ export class InMemoryDataProvider implements DataProvider {
         }
         pMap.set(pid, lvls);
       }
+      // Classify the essay "Writing" mark into the same performance-level scale
+      // (the subject's own boundary cuts), the same way every MCQ major element
+      // above was classified — so it shows a real level, not a blank cell.
+      if (essayWriting) {
+        for (const m of this.essayMarksFor(cycleId, a.id)) {
+          const pct = (m.mark / essayMax) * 100;
+          const lvls = pMap.get(m.participantId) ?? new Map<string, string>();
+          lvls.set(essayWriting.label, classify(pct, perfLevels, cuts));
+          pMap.set(m.participantId, lvls);
+        }
+      }
       elementLevelByP.set(a.id, pMap);
 
       const pSubMap = new Map<string, Map<string, Map<string, string>>>();
@@ -2760,16 +3231,15 @@ export class InMemoryDataProvider implements DataProvider {
       return { participantId: row.id, name: row.label, award: row.award, subjects: sub };
     });
 
-    // canonical Student-Summary columns mapped by subject alias (keyword)
+    // The five canonical Student-Summary columns, resolved through the SAME
+    // catalog matcher `subjects` above was canonicalised with (never a second,
+    // hand-rolled alias regex) — so a raw name that only that matcher
+    // recognises (e.g. an Arabic-script name) still finds its assessment here.
     const refs = grades.assessments;
-    const aliasFor = (re: RegExp) => refs.find((r) => re.test(r.id) || re.test(r.name))?.id ?? null;
-    const summarySubjects: PerfReportSummarySubject[] = [
-      { label: "Applicable Maths", assessmentId: aliasFor(/applicable math/i) },
-      { label: "Scientific Thinking", assessmentId: aliasFor(/scientific/i) },
-      { label: "Arabic 1st Language", assessmentId: aliasFor(/arabic/i) },
-      { label: "English 2nd Language", assessmentId: aliasFor(/english/i) },
-      { label: "Life Success Skills", assessmentId: aliasFor(/life/i) },
-    ];
+    const summarySubjects: PerfReportSummarySubject[] = SUBJECT_CATALOG.map((cat) => ({
+      label: cat.name,
+      assessmentId: refs.find((r) => cat.matchesRawName(r.name))?.id ?? null,
+    }));
 
     const n = grades.rows.length;
     const awardDistribution = grades.distribution.map((d) => ({
@@ -2933,7 +3403,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getStudentReview(cycleId: string): StudentReviewModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const te = this.technicalErrors.get(cycleId);
     const incidents = te?.incidents ?? [];
     const excluded = incidents.filter((i) => i.decision === "excluded").length;
@@ -2951,7 +3421,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   uploadTechnicalErrors(cycleId: string, fileName: string, rows: TechnicalErrorRow[]): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     const incidents = rows
       .filter((r) => (r.student ?? "").trim() || (r.question ?? "").trim())
@@ -2973,7 +3443,7 @@ export class InMemoryDataProvider implements DataProvider {
    * into scoring); it is flagged `sample: true` everywhere it surfaces.
    */
   clearTechnicalErrors(cycleId: string): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     if (!this.technicalErrors.has(cycleId)) return;
     this.technicalErrors.delete(cycleId);
@@ -3040,7 +3510,7 @@ export class InMemoryDataProvider implements DataProvider {
    * language file replaces that subject's marks → idempotent, never duplicated.
    */
   uploadEssayMarks(cycleId: string, fileName: string, rows: EssayUploadRow[]): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     const incoming = this.buildEssayState(rows, false, fileName);
     const touched = this.essaySubjectsTouched(rows);
@@ -3108,7 +3578,7 @@ export class InMemoryDataProvider implements DataProvider {
    * per student per subject exercise the averaging rule.
    */
   clearEssayMarks(cycleId: string): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     if (!this.essayMarksByCycle.has(cycleId)) return;
     this.essayMarksByCycle.delete(cycleId);
@@ -3126,7 +3596,7 @@ export class InMemoryDataProvider implements DataProvider {
    * lowercased — the ONLY valid join key.
    */
   getExamIncidentMatchContext(cycleId: string): ExamIncidentMatchContext | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const byId = new Map(this.seed.liveCycle.participants.map((p) => [p.id, p]));
     const emailOf = (id: string) => (byId.get(id)?.studentId ?? id).trim().toLowerCase();
     const nameOf = (id: string) => byId.get(id)?.label ?? id;
@@ -3156,7 +3626,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   upsertExamIncidents(cycleId: string, batchId: string, fileName: string, records: readonly ExamIncidentRecord[]): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     const map = this.examIncidentsByCycle.get(cycleId) ?? new Map<string, ExamIncidentRecord>();
     let n = 0;
@@ -3183,7 +3653,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   clearExamIncidents(cycleId: string): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     if (!this.examIncidentsByCycle.has(cycleId)) return;
     this.examIncidentsByCycle.delete(cycleId);
@@ -3250,7 +3720,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getEssayMarks(cycleId: string): EssayMarksModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const st = this.essayMarksByCycle.get(cycleId);
     const essayIds = new Set(this.essaySubjectIds());
     const subjects: EssaySubjectRef[] = this.seed.liveCycle.assessments
@@ -3307,7 +3777,7 @@ export class InMemoryDataProvider implements DataProvider {
    * removed sitting. Nothing here writes.
    */
   getEssayContext(cycleId: string): EssayUploadContext | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const essayIds = new Set(this.essaySubjectIds());
     const cohortExcluded = this.cohortExcludedSet();
     const byId = new Map(this.seed.liveCycle.participants.map((p) => [p.id, p]));
@@ -3395,7 +3865,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   uploadIncidentLog(cycleId: string, fileName: string, rows: IncidentInput[]): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     const incidents = rows.map((r) => this.buildTriageIncident(r));
     this.incidentLogByCycle.set(cycleId, { uploaded: true, sample: false, fileName, incidents });
@@ -3438,7 +3908,7 @@ export class InMemoryDataProvider implements DataProvider {
    * auto-applied — every row still needs a human decision.
    */
   clearIncidentLog(cycleId: string): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     if (!this.incidentLogByCycle.has(cycleId)) return;
     this.incidentLogByCycle.delete(cycleId);
@@ -3448,7 +3918,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   decideIncident(cycleId: string, incidentId: string, decision: IncidentDecisionInput): void {
-    if (!can(this.user, "incidents.triage", this.resolvedActions)) return;
+    if (!this.permitted("incidents.triage")) return;
     if (this.locked.has(cycleId)) return;
     const st = this.incidentLogByCycle.get(cycleId);
     const inc = st?.incidents.find((i) => i.id === incidentId);
@@ -3477,7 +3947,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getAdjustments(cycleId: string): AdjustmentsModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const st = this.incidentLogByCycle.get(cycleId);
     const incidents = st?.incidents ?? [];
     const roster = this.seed.liveCycle.participants.map((p) => ({ id: p.id, name: p.label }));
@@ -3528,8 +3998,8 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   uploadCgjFile(cycleId: string, fileName: string, rows: CgjUploadRow[]): void {
-    if (!can(this.user, "cgj.upload", this.resolvedActions)) return;
-    if (cycleId !== this.seed.liveCycle.id || this.locked.has(cycleId)) return;
+    if (!this.permitted("cgj.upload")) return;
+    if (!this.hostsCycle(cycleId) || this.locked.has(cycleId)) return;
     const students = this.buildCgjStudents(rows);
     this.cgjByCycle.set(cycleId, { uploaded: true, sample: false, fileName, students });
     this.audit("upload", "Added centre grade judgement", `${fileName} — expected grades for ${students.length} student(s)`, cycleId);
@@ -3543,7 +4013,7 @@ export class InMemoryDataProvider implements DataProvider {
    * comparison shows all four outcomes. Flagged `sample: true` everywhere.
    */
   clearCgj(cycleId: string): void {
-    if (!can(this.user, "cgj.upload", this.resolvedActions)) return;
+    if (!this.permitted("cgj.upload")) return;
     if (this.locked.has(cycleId)) return;
     if (!this.cgjByCycle.has(cycleId)) return;
     this.cgjByCycle.delete(cycleId);
@@ -3552,7 +4022,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getCgj(cycleId: string): CgjModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const grades = this.getGrades(cycleId);
     const refs = this.assessmentRefs(cycleId);
     const perfLevels = this.grading.performanceLevels;
@@ -3633,16 +4103,22 @@ export class InMemoryDataProvider implements DataProvider {
     const items: ItemMeta[] = [];
     for (const a of this.seed.liveCycle.assessments) {
       const excluded = this.excludedSet(cycleId, a.id);
+      // Never-scored (Max Score = 0) items — instructions/stimuli — never entered
+      // scoring either (getRawData/getNaiveScores apply the same maxScore>=1 gate),
+      // so they're dropped here too, before the exclusion filter below.
+      const scoredItemIds = new Set(
+        a.items.filter((it) => !excluded.has(it.id) && (it.maxScore ?? 1) >= 1).map((it) => it.id),
+      );
       // responsesOf already drops participants removed at the Clean stage, so the
       // cohort α is computed over reflects the cleaned set — the same way scoring
       // does. (excludedSet also folds in Clean-stage column removals.) This is what
       // makes a Clean change propagate into the reliability output.
       for (const r of this.responsesOf(a)) {
-        if (excluded.has(r.itemId)) continue;
+        if (!scoredItemIds.has(r.itemId)) continue;
         responses.push(r);
       }
       for (const it of a.items) {
-        if (excluded.has(it.id)) continue;
+        if (!scoredItemIds.has(it.id)) continue;
         items.push({
           itemId: it.id,
           assessmentId: a.id,
@@ -3658,7 +4134,7 @@ export class InMemoryDataProvider implements DataProvider {
 
   /** Cronbach's-α reliability for the cycle, at every construct grouping (read-only). */
   getReliability(cycleId: string): ReliabilityModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const { responses, items } = this.usableResponsesAndItems(cycleId);
     const result = engine.computeReliability({ responses, items });
     const nameById = new Map(this.seed.liveCycle.assessments.map((a) => [a.id, a.name]));
@@ -3676,6 +4152,14 @@ export class InMemoryDataProvider implements DataProvider {
       note: g.note,
       lowItems: g.lowItems,
       smallSample: g.smallSample,
+      totalParticipants: g.totalParticipants,
+      itemResponses: g.itemResponses,
+      spearmanBrown: g.spearmanBrown,
+      sbMultiplier80: g.sbMultiplier80,
+      sbMultiplier90: g.sbMultiplier90,
+      avgInterItemCorrelation: g.avgInterItemCorrelation,
+      status: g.status,
+      interpretation: g.interpretation,
     }));
     const overall = rows.find((r) => r.level === "overall")!;
     return {
@@ -3695,7 +4179,7 @@ export class InMemoryDataProvider implements DataProvider {
    * building happen in the page (so xlsx-js-style stays out of the main bundle).
    */
   getScoreAnalysisData(cycleId: string, preExclusion = false): AssembleScoreAnalysisArgs | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const responses: ResponseRecord[] = [];
     const items: ItemMeta[] = [];
     const excludedItemIds: string[] = [];
@@ -3739,14 +4223,45 @@ export class InMemoryDataProvider implements DataProvider {
 
   /** Engine primitives for the item-analysis export (full ItemStat per item). */
   getItemAnalysisData(cycleId: string): AssembleItemAnalysisArgs | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const stats: ItemStat[] = [];
     const facts: ItemResponseFact[] = [];
     const reviews: Record<string, ItemReviewDecision> = {};
+    const items: ItemMeta[] = [];
     for (const a of this.seed.liveCycle.assessments) {
-      stats.push(...engine.computeItemStats({ responses: this.responsesOf(a), scoringConfig: this.scoringConfig() }));
+      // Pass item metadata through so ItemStat carries wording/majorElement/
+      // subElement/demandLevel (the export reads these columns straight off the
+      // stat — see lib/export/item-analysis.ts). Without `items` here the engine
+      // has nothing to key metadata off and those columns render blank.
+      const aItemMetas = this.itemMetasFor(a);
+      stats.push(
+        ...engine.computeItemStats({
+          responses: this.responsesOf(a),
+          items: aItemMetas,
+          scoringConfig: this.scoringConfig(),
+        }),
+      );
+      // Carried through so assembleItemAnalysis can exclude maxScore:0
+      // stimulus/instruction items (STIMULUS_ITEM) from every row and
+      // aggregate — see lib/clean/flags.ts `isScoredItem`.
+      items.push(...aItemMetas);
       const excluded = this.excludedSet(cycleId, a.id);
-      for (const r of a.responses) facts.push({ assessmentId: a.id, itemId: r.i, participantId: r.p, answered: true, responseTime: null });
+      // Per-item average response time, already computed at hydration time from
+      // the real `responses.response_time` column (see supabase-hydrate.ts /
+      // build-live-cycle.ts). SeedResponse carries no per-response time, so the
+      // known item-level average is threaded onto every fact for that item —
+      // averaging it back out in assembleItemAnalysis reproduces the same value
+      // without re-deriving it from anything.
+      const avgTimeByItem = new Map(a.items.map((it) => [it.id, it.avgResponseTime]));
+      for (const r of a.responses) {
+        facts.push({
+          assessmentId: a.id,
+          itemId: r.i,
+          participantId: r.p,
+          answered: r.a !== false,
+          responseTime: avgTimeByItem.get(r.i) ?? null,
+        });
+      }
       for (const it of a.items) {
         if (excluded.has(it.id)) reviews[it.id] = { exclude: true, reason: this.reasons.get(`${cycleId}:${a.id}:${it.id}`) ?? null };
       }
@@ -3757,29 +4272,98 @@ export class InMemoryDataProvider implements DataProvider {
       stats,
       facts,
       reviews,
+      qualityThresholds: this.scoringConfig().quality,
+      items,
     };
   }
 
+  /**
+   * Assessment Health diagnostics, recomputed live from each assessment's CURRENT
+   * `items`/`responses` on every read — never the static ingest-time snapshot
+   * (`this.seed.liveCycle.diagnostics`) — so a Clean-stage participant removal
+   * (per-subject `setCleanRemoval` or cohort-wide `excludeParticipantFromCohort`)
+   * is reflected immediately, the same way `getReliability`/`getNaiveScores`
+   * already recompute over `responsesOf`'s corrected cohort.
+   */
   getDiagnostics(cycleId: string): DiagnosticsModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
-    const shortOf = new Map(this.seed.liveCycle.assessments.map((a) => [a.id, a.shortName]));
+    if (!this.hostsCycle(cycleId)) return null;
+    const cohortExcluded = this.cohortExcludedSet();
     return {
       cycleId,
-      assessments: (this.seed.liveCycle.diagnostics ?? []).map((d) => ({
-        assessmentId: d.assessmentId,
-        assessmentName: d.assessmentName,
-        shortName: shortOf.get(d.assessmentId) ?? d.assessmentName,
-        whole: d.whole,
-        byDemand: d.byDemand,
-        byItemSet: d.byItemSet,
-        timingByDemand: d.timingByDemand,
-        omissionByPosition: d.omissionByPosition,
-      })),
+      assessments: this.seed.liveCycle.assessments.map((a) => {
+        const removed = this.cleanRowSet(a.id);
+        const excludedParticipantIds = removed && removed.size ? new Set([...removed, ...cohortExcluded]) : cohortExcluded;
+        const cleanDiag = cleanDiagResponses(this.diagResponsesFor(a), { excludedParticipantIds });
+        // TEMP-DEBUG (maxScore-leak investigation — REMOVE AFTER): gate
+        // timingPerformance()'s internal [TEMP-DEBUG] logging to this one
+        // assessment, then reset immediately so nothing else logs.
+        const __tempDebugTarget = __tempDebugIsTargetAssessment(a);
+        if (__tempDebugTarget) __setTempDebugTimingLabel(a.name);
+        const d = buildAssessmentDiagnostics(cleanDiag);
+        if (__tempDebugTarget) __setTempDebugTimingLabel(null);
+        return {
+          assessmentId: a.id,
+          assessmentName: a.name,
+          shortName: a.shortName,
+          whole: d.whole,
+          byDemand: d.byDemand,
+          byItemSet: d.byItemSet,
+          timingByDemand: d.timingByDemand,
+          omissionByPosition: d.omissionByPosition,
+          byMajorElement: d.byMajorElement,
+          timingByMajorElement: d.timingByMajorElement,
+        };
+      }),
+    };
+  }
+
+  /**
+   * Raw per-item source for the Per-Item Speededness / Omission / Completion
+   * export: each assessment's CURRENT items + responses (read live, like
+   * `getDiagnostics`) plus the participant drop-set — Clean-stage removals for that
+   * subject ∪ cohort-wide exclusions, the SAME set `getDiagnostics` hands to
+   * `cleanDiagResponses`. Deliberately unfiltered and uncomputed: the drop-set,
+   * Max Score >= 1 filter, de-duplication and every metric are applied by
+   * lib/export/per-item-analysis.ts, so nothing in the diagnostics path changes.
+   */
+  getPerItemSource(cycleId: string): PerItemSource | null {
+    if (!this.hostsCycle(cycleId)) return null;
+    const cohortExcluded = this.cohortExcludedSet();
+    return {
+      cycleId,
+      sourceFileName: this.seed.liveCycle.fileName ? this.seed.liveCycle.fileName : null,
+      assessments: this.seed.liveCycle.assessments.map((a) => {
+        const removed = this.cleanRowSet(a.id);
+        const excluded = removed && removed.size ? new Set([...removed, ...cohortExcluded]) : cohortExcluded;
+        return {
+          assessmentId: a.id,
+          assessmentName: a.name,
+          items: a.items.map((it) => ({
+            id: it.id,
+            qmQuestionId: it.qmQuestionId ?? null,
+            description: it.description ?? null,
+            wording: it.wording,
+            major: it.major ?? null,
+            sub: it.sub ?? null,
+            demand: it.demand ?? null,
+            maxScore: it.maxScore ?? 1,
+          })),
+          responses: a.responses.map((r) => ({
+            participantId: r.p,
+            itemId: r.i,
+            score: r.s,
+            answered: r.a !== false,
+            presentedNumber: r.questionPresentedNumber ?? null,
+            responseTime: r.responseTime ?? null,
+          })),
+          excludedParticipantIds: [...excluded],
+        };
+      }),
     };
   }
 
   getComposition(cycleId: string): CompositionModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const essayIds = new Set(this.essaySubjectIds());
     const subjects = this.seed.liveCycle.assessments.map((a) => ({ id: a.id, name: a.name, shortName: a.shortName, hasEssay: essayIds.has(a.id) }));
     const labelOf = (id: string) => this.seed.liveCycle.participants.find((p) => p.id === id)?.label ?? id;
@@ -3895,7 +4479,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   setIncidentDecision(cycleId: string, incidentId: string, decision: IncidentDecision, reason?: string | null): void {
-    if (!can(this.user, "incidents.triage", this.resolvedActions)) return;
+    if (!this.permitted("incidents.triage")) return;
     if (this.locked.has(cycleId)) return;
     const te = this.technicalErrors.get(cycleId);
     const inc = te?.incidents.find((i) => i.id === incidentId);
@@ -4013,7 +4597,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   getDistinctionSafeguard(cycleId: string, scope?: string): DistinctionSafeguardModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const assessments = this.seed.liveCycle.assessments;
     const scopes = assessments.map((a) => ({ id: a.id, label: a.shortName }));
     const scopeId = scope && assessments.some((a) => a.id === scope) ? scope : assessments[0]?.id ?? "";
@@ -4079,14 +4663,14 @@ export class InMemoryDataProvider implements DataProvider {
         capped: vals.filter((v) => v === "capped").length,
         overridden: vals.filter((v) => v === "override").length,
       },
-      canOverride: can(this.user, "general.override_distinction", this.resolvedActions),
+      canOverride: this.permitted("general.override_distinction"),
       attemptedNote:
         "Eligibility uses D3 items answered CORRECTLY against the MAJORITY of D3 items AVAILABLE on each exam (dynamic per exam; recomputed after exclusions) — not attempts, and not a fixed count.",
     };
   }
 
   confirmDistinctionCaps(cycleId: string): void {
-    if (!can(this.user, "grades.confirm_distinction", this.resolvedActions)) return;
+    if (!this.permitted("grades.confirm_distinction")) return;
     if (this.locked.has(cycleId)) return;
     const capped = [...this.distinctionDecisions(cycleId).values()].filter((v) => v === "capped").length;
     this.distinctionConfirmed.add(cycleId);
@@ -4100,7 +4684,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   overrideDistinctionCap(cycleId: string, studentId: string, reason: string): void {
-    if (!can(this.user, "general.override_distinction", this.resolvedActions) || this.locked.has(cycleId)) return;
+    if (!this.permitted("general.override_distinction") || this.locked.has(cycleId)) return;
     const clean = reason.trim();
     if (!clean) return;
     const m = this.distinctionOverrides.get(cycleId) ?? new Map<string, { reason: string; by: string }>();
@@ -4112,7 +4696,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   undoDistinctionOverride(cycleId: string, studentId: string): void {
-    if (!can(this.user, "general.override_distinction", this.resolvedActions) || this.locked.has(cycleId)) return;
+    if (!this.permitted("general.override_distinction") || this.locked.has(cycleId)) return;
     const m = this.distinctionOverrides.get(cycleId);
     if (m?.delete(studentId)) {
       const label = this.seed.liveCycle.participants.find((p) => p.id === studentId)?.label ?? studentId;
@@ -4132,8 +4716,8 @@ export class InMemoryDataProvider implements DataProvider {
    * reason, time). Engine parity is unaffected: only the alterations INPUT changes.
    */
   adjustStudentMark(cycleId: string, participantId: string, assessmentId: string, newMark: number, reason: string): void {
-    if (!can(this.user, "grades.adjust", this.resolvedActions)) return;
-    if (cycleId !== this.seed.liveCycle.id || this.locked.has(cycleId)) return;
+    if (!this.permitted("grades.adjust")) return;
+    if (!this.hostsCycle(cycleId) || this.locked.has(cycleId)) return;
     const clean = (reason ?? "").trim();
     if (!clean) return; // reason is required
     if (!Number.isFinite(newMark)) return;
@@ -4185,7 +4769,7 @@ export class InMemoryDataProvider implements DataProvider {
    * audits the removal.
    */
   removeStudentMarkAdjustment(cycleId: string, adjustmentId: string): void {
-    if (!can(this.user, "grades.adjust", this.resolvedActions)) return;
+    if (!this.permitted("grades.adjust")) return;
     if (this.locked.has(cycleId)) return;
     const list = this.manualAdjustmentsByCycle.get(cycleId);
     const adj = list?.find((m) => m.id === adjustmentId);
@@ -4202,18 +4786,21 @@ export class InMemoryDataProvider implements DataProvider {
     this.bump();
   }
 
-  setSafeguardConfig(patch: { topDifficultyDemand?: string }): void {
-    if (!can(this.user, "general.config_methodology", this.resolvedActions)) return;
+  private mergeSafeguard(patch: { topDifficultyDemand?: string }): void {
     if (patch.topDifficultyDemand != null) {
       this.safeguard.topDifficultyDemand = patch.topDifficultyDemand;
     }
+  }
+  setSafeguardConfig(patch: { topDifficultyDemand?: string }): void {
+    if (!this.permitted("general.config_methodology")) return;
+    this.mergeSafeguard(patch);
     this.audit("safeguard", "Updated Distinction safeguard", `top-difficulty ${this.resolveTopDifficulty()}`, null);
     this.bump();
   }
 
   // ── document generation (Student Summary) ────────────────────────────────
   getDocuments(cycleId: string): DocumentsModel | null {
-    if (cycleId !== this.seed.liveCycle.id) return null;
+    if (!this.hostsCycle(cycleId)) return null;
     const locked = this.locked.has(cycleId);
 
     // Canonical template slots S1..S5 mapped to suite assessments by alias
@@ -4370,7 +4957,7 @@ export class InMemoryDataProvider implements DataProvider {
     excluded: boolean,
     reason?: string | null,
   ): void {
-    if (!can(this.user, "review.exclude", this.resolvedActions)) return;
+    if (!this.permitted("review.exclude")) return;
     if (this.locked.has(cycleId)) return;
     this.applyItemExclusionState(cycleId, assessmentId, itemId, excluded, reason ?? null);
     // A fresh direct decision supersedes any prior override provenance.
@@ -4406,7 +4993,7 @@ export class InMemoryDataProvider implements DataProvider {
     exclude: boolean,
     reason: string,
   ): void {
-    if (!can(this.user, "general.override_marks", this.resolvedActions)) return;
+    if (!this.permitted("general.override_marks")) return;
     if (this.locked.has(cycleId)) return;
     const key = `${cycleId}:${assessmentId}:${itemId}`;
     // `prior` names the previous decider for the override audit trail. P2 gates
@@ -4449,7 +5036,7 @@ export class InMemoryDataProvider implements DataProvider {
     newMark: number | null,
     reason: string,
   ): void {
-    if (!can(this.user, "general.override_marks", this.resolvedActions)) return;
+    if (!this.permitted("general.override_marks")) return;
     if (this.locked.has(cycleId)) return;
     const list = this.manualAdjustmentsByCycle.get(cycleId) ?? [];
     const existing = list.find((m) => m.participantId === participantId && m.assessmentId === assessmentId);
@@ -4526,7 +5113,7 @@ export class InMemoryDataProvider implements DataProvider {
     target: { rows?: string[]; cols?: string[] },
     removed: boolean,
   ): void {
-    if (!can(this.user, "clean.rows", this.resolvedActions)) return;
+    if (!this.permitted("clean.rows")) return;
     if (this.locked.has(cycleId)) return;
     const key = `${cycleId}:${assessmentId}`;
     const rows = this.cleanRows.get(key) ?? new Set<string>();
@@ -4574,7 +5161,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   clearCleanRemovals(cycleId: string, assessmentId: string): void {
-    if (!can(this.user, "clean.rows", this.resolvedActions)) return;
+    if (!this.permitted("clean.rows")) return;
     if (this.locked.has(cycleId)) return;
     const key = `${cycleId}:${assessmentId}`;
     const hadR = this.cleanRows.get(key)?.size ?? 0;
@@ -4594,7 +5181,7 @@ export class InMemoryDataProvider implements DataProvider {
     excluded: boolean,
     reason?: string | null,
   ): void {
-    if (!can(this.user, "clean.cohort", this.resolvedActions)) return;
+    if (!this.permitted("clean.cohort")) return;
     if (this.locked.has(cycleId)) return;
     let m = this.participantExclusions.get(cycleId);
     if (!m) this.participantExclusions.set(cycleId, (m = new Map<string, string>()));
@@ -4618,7 +5205,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   setBoundary(cycleId: string, scope: string, input: SetBoundaryInput): void {
-    if (!can(this.user, "cuts.set", this.resolvedActions)) return;
+    if (!this.permitted("cuts.set")) return;
     if (this.locked.has(cycleId)) return;
     const key = `${cycleId}:${scope}`;
     const cur = this.boundaryState(cycleId, scope);
@@ -4718,8 +5305,8 @@ export class InMemoryDataProvider implements DataProvider {
     this.bump();
   }
 
-  setGradingDefaults(patch: Partial<GradingConfig>): void {
-    if (!can(this.user, "general.config_methodology", this.resolvedActions)) return;
+  /** Merge a grading patch into the (shared) grading config. Ungated; no audit. */
+  private mergeGrading(patch: Partial<GradingConfig>): void {
     // When the level/award arrays are replaced, replace the star map wholesale
     // (rather than merging) so renamed/removed levels don't leave stale stars.
     const starMap = patch.starMap
@@ -4728,14 +5315,27 @@ export class InMemoryDataProvider implements DataProvider {
         : { ...this.grading.starMap, ...patch.starMap }
       : this.grading.starMap;
     this.grading = { ...this.grading, ...patch, starMap };
-    // Drop any boundary state that no longer matches the new band count so it
-    // re-derives from the updated defaults.
+    this.reconcileBoundariesWithGrading();
+  }
+
+  /**
+   * Drop any boundary state that no longer matches the current band count so it
+   * re-derives from the grading defaults. The grading config is workspace-level (shared
+   * by every sitting's provider) but boundaries are per cycle, so the live provider calls
+   * this on EVERY loaded sitting after a grading change — not just the one that made it.
+   */
+  reconcileBoundariesWithGrading(): void {
     const perfLen = this.grading.performanceLevels.length - 1;
     const awardLen = this.grading.awardLevels.length - 1;
     for (const [key, st] of [...this.boundaries.entries()]) {
       const isAward = key.endsWith(":overall");
       if (st.cuts.length !== (isAward ? awardLen : perfLen)) this.boundaries.delete(key);
     }
+  }
+
+  setGradingDefaults(patch: Partial<GradingConfig>): void {
+    if (!this.permitted("general.config_methodology")) return;
+    this.mergeGrading(patch);
     this.audit(
       "config",
       "Updated grading defaults",
@@ -4745,14 +5345,17 @@ export class InMemoryDataProvider implements DataProvider {
     this.bump();
   }
 
-  setQualityThresholds(patch: Partial<QualityThresholds>): void {
-    if (!can(this.user, "general.config_methodology", this.resolvedActions)) return;
+  private mergeQuality(patch: Partial<QualityThresholds>): void {
     this.quality = {
       pValue: { ...this.quality.pValue, ...(patch.pValue ?? {}) },
       itemTotal: { ...this.quality.itemTotal, ...(patch.itemTotal ?? {}) },
       pointBiserial: { ...this.quality.pointBiserial, ...(patch.pointBiserial ?? {}) },
       discrimination: { ...this.quality.discrimination, ...(patch.discrimination ?? {}) },
     };
+  }
+  setQualityThresholds(patch: Partial<QualityThresholds>): void {
+    if (!this.permitted("general.config_methodology")) return;
+    this.mergeQuality(patch);
     this.audit("config", "Changed item-quality thresholds", "Engine Good/Review/Flag rating bands updated", null);
     this.bump();
   }
@@ -4775,9 +5378,9 @@ export class InMemoryDataProvider implements DataProvider {
     // `clean`, keeping parity untouched).
     extra?: { canonical?: CanonicalModel; files?: { items?: string; assessments?: string; topics?: string } },
   ): Promise<void> {
-    if (!can(this.user, "upload.ingest", this.resolvedActions)) return Promise.resolve();
+    if (!this.permitted("upload.ingest")) return Promise.resolve();
     const lc = this.seed.liveCycle;
-    if (cycleId !== lc.id) return Promise.resolve();
+    if (!this.hostsCycle(cycleId)) return Promise.resolve();
 
     const built = buildLiveCycleData(clean);
 
@@ -4830,14 +5433,14 @@ export class InMemoryDataProvider implements DataProvider {
   // a clear/delete. Kept async to match the interface (and the live provider, which
   // awaits the DB). A re-ingest repopulates the seed and the counts recompute.
   clearSittingData(cycleId: string): Promise<void> {
-    if (!can(this.user, "upload.manage", this.resolvedActions)) return Promise.resolve();
+    if (!this.permitted("upload.manage")) return Promise.resolve();
     this.resetCycleToEmpty(cycleId);
     this.audit("upload", "Cleared sitting data", "Emptied ingested data — sitting returned to the Upload state", cycleId);
     this.bump();
     return Promise.resolve();
   }
   deleteSitting(cycleId: string): Promise<void> {
-    if (!can(this.user, "general.delete", this.resolvedActions)) return Promise.resolve();
+    if (!this.permitted("general.delete")) return Promise.resolve();
     const name = cycleId === this.seed.liveCycle.id ? this.seed.liveCycle.name : cycleId;
     this.resetCycleToEmpty(cycleId);
     this.audit("cycle", "Deleted sitting", `Removed sitting "${name}" and all its ingested data`, null);
@@ -4850,7 +5453,7 @@ export class InMemoryDataProvider implements DataProvider {
   // seeded cycle is emptied in place rather than removed, so it still shows here
   // after delete — the live Supabase path deletes for real and reaches zero.)
   deleteCycle(cycleId: string): Promise<void> {
-    if (!can(this.user, "general.delete", this.resolvedActions)) return Promise.resolve();
+    if (!this.permitted("general.delete")) return Promise.resolve();
     const name = cycleId === this.seed.liveCycle.id ? this.seed.liveCycle.name : cycleId;
     this.resetCycleToEmpty(cycleId);
     this.audit("cycle", "Deleted cycle", `Removed cycle "${name}" and every row keyed to it`, null);
@@ -4931,14 +5534,16 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   lockCycle(cycleId: string): void {
-    if (!can(this.user, "general.signoff", this.resolvedActions)) return;
+    if (!this.hostsCycle(cycleId) || this.locked.has(cycleId)) return;
+    if (!this.permitted("general.signoff")) return;
     this.locked.add(cycleId);
     const n = this.seed.liveCycle.participants.length;
     this.audit("lock", "Locked grades", `${n} students signed off across ${this.seed.liveCycle.assessments.length} assessments`, cycleId);
     this.bump();
   }
   unlockCycle(cycleId: string): void {
-    if (!can(this.user, "general.signoff", this.resolvedActions)) return;
+    if (!this.hostsCycle(cycleId) || !this.locked.has(cycleId)) return;
+    if (!this.permitted("general.signoff")) return;
     this.locked.delete(cycleId);
     this.audit("reopen", "Re-opened cycle", "Cycle unlocked for further review", cycleId);
     this.bump();
@@ -4954,7 +5559,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   inviteMember(email: string, roleId: string): void {
-    if (!can(this.user, MANAGE_USERS_ACTION, this.resolvedActions)) return;
+    if (!this.permitted(MANAGE_USERS_ACTION)) return;
     const clean = email.trim();
     if (!clean || this.members.some((m) => m.email.toLowerCase() === clean.toLowerCase())) return;
     const role = this.roles.find((r) => r.id === roleId) ?? [...this.roles].sort((a, b) => a.sort - b.sort)[0];
@@ -4978,7 +5583,7 @@ export class InMemoryDataProvider implements DataProvider {
     this.bump();
   }
   setMemberRole(memberId: string, roleId: string): void {
-    if (!can(this.user, MANAGE_USERS_ACTION, this.resolvedActions)) return;
+    if (!this.permitted(MANAGE_USERS_ACTION)) return;
     const m = this.members.find((x) => x.id === memberId);
     const role = this.roles.find((r) => r.id === roleId);
     if (!m || !role) return;
@@ -4987,12 +5592,12 @@ export class InMemoryDataProvider implements DataProvider {
     this.bump();
   }
   removeMember(memberId: string): void {
-    if (!can(this.user, MANAGE_USERS_ACTION, this.resolvedActions) || memberId === this.user.id) return;
+    if (!this.permitted(MANAGE_USERS_ACTION) || memberId === this.user.id) return;
     this.members = this.members.filter((m) => m.id !== memberId);
     this.bump();
   }
   resendInvite(memberId: string): void {
-    if (!can(this.user, MANAGE_USERS_ACTION, this.resolvedActions)) return;
+    if (!this.permitted(MANAGE_USERS_ACTION)) return;
     const m = this.members.find((x) => x.id === memberId);
     if (m && m.status === "invited") {
       m.lastActive = "Invite re-sent just now";
@@ -5028,7 +5633,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   createRole(name: string): void {
-    if (!can(this.user, MANAGE_ROLES_ACTION, this.resolvedActions)) return;
+    if (!this.permitted(MANAGE_ROLES_ACTION)) return;
     const clean = name.trim();
     if (!clean || this.roles.some((r) => r.name.toLowerCase() === clean.toLowerCase())) return;
     const id = `role-${this.seq++}-${clean.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
@@ -5041,7 +5646,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   renameRole(id: string, name: string): void {
-    if (!can(this.user, MANAGE_ROLES_ACTION, this.resolvedActions)) return;
+    if (!this.permitted(MANAGE_ROLES_ACTION)) return;
     const r = this.roles.find((x) => x.id === id);
     if (!r) return;
     const clean = name.trim();
@@ -5054,7 +5659,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   deleteRole(id: string): void {
-    if (!can(this.user, MANAGE_ROLES_ACTION, this.resolvedActions)) return;
+    if (!this.permitted(MANAGE_ROLES_ACTION)) return;
     const r = this.roles.find((x) => x.id === id);
     if (!r) return;
     // Lockout guard: the Admin system role is undeletable.
@@ -5071,7 +5676,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   setRoleAction(roleId: string, action: ActionKey, granted: boolean): void {
-    if (!can(this.user, MANAGE_ROLES_ACTION, this.resolvedActions)) return;
+    if (!this.permitted(MANAGE_ROLES_ACTION)) return;
     const r = this.roles.find((x) => x.id === roleId);
     if (!r || !(ACTION_KEYS as string[]).includes(action)) return;
     // Lockout guard: the Admin role's manage-roles + manage-users cells are
@@ -5138,11 +5743,34 @@ export class InMemoryDataProvider implements DataProvider {
    * Supabase RPC also validates server-side), and a change re-flags through the
    * full grade recompute on the next read (marginalInfo runs inside getGrades).
    */
-  setBorderlineConfig(patch: Partial<BorderlineConfig>): void {
-    if (!can(this.user, "general.config_methodology", this.resolvedActions)) return;
-    if (patch.bandPct == null || !Number.isFinite(patch.bandPct)) return;
+  private mergeBorderline(patch: Partial<BorderlineConfig>): boolean {
+    if (patch.bandPct == null || !Number.isFinite(patch.bandPct)) return false;
     this.borderline = { bandPct: clampBorderlineBand(patch.bandPct) };
+    return true;
+  }
+  setBorderlineConfig(patch: Partial<BorderlineConfig>): void {
+    if (!this.permitted("general.config_methodology")) return;
+    if (!this.mergeBorderline(patch)) return;
     this.audit("config", "Updated borderline flagging band", `±${this.borderline.bandPct}% around each grade boundary`, null);
+    this.bump();
+  }
+
+  /**
+   * Apply the PERSISTED workspace configuration to the shared workspace state —
+   * grading defaults, quality thresholds, safeguard, borderline band and element labels.
+   * HYDRATION, not an edit: UNGATED (the interactive setters need `config_methodology`,
+   * so replaying through them silently dropped the stored config for a read-only viewer
+   * and for any session whose role grid wasn't applied yet), and it writes no audit
+   * entries. Values are validated exactly as the interactive setters validate them.
+   */
+  hydrateWorkspaceConfig(settings: Record<string, unknown>, elementLabels?: ElementLabelsConfig): void {
+    if (settings.grading_defaults) this.mergeGrading(settings.grading_defaults as Partial<GradingConfig>);
+    if (settings.quality_thresholds) this.mergeQuality(settings.quality_thresholds as Partial<QualityThresholds>);
+    if (settings.safeguard) this.mergeSafeguard(settings.safeguard as { topDifficultyDemand?: string });
+    if (settings.borderline) this.mergeBorderline(settings.borderline as Partial<BorderlineConfig>);
+    if (elementLabels && !validateElementLabels(elementLabels)) {
+      this.elementLabels = JSON.parse(JSON.stringify(elementLabels));
+    }
     this.bump();
   }
 
@@ -5150,7 +5778,7 @@ export class InMemoryDataProvider implements DataProvider {
     return JSON.parse(JSON.stringify(this.elementLabels));
   }
   setElementLabels(config: ElementLabelsConfig): void {
-    if (!can(this.user, "general.config_methodology", this.resolvedActions)) return;
+    if (!this.permitted("general.config_methodology")) return;
     // Server-side parity: reject an invalid set (empty labels, duplicate letters).
     if (validateElementLabels(config)) return;
     this.elementLabels = JSON.parse(JSON.stringify(config));
@@ -5162,7 +5790,7 @@ export class InMemoryDataProvider implements DataProvider {
   getIncidentConfig(): IncidentConfigModel {
     const c = this.incidentConfig;
     return {
-      canEdit: can(this.user, "general.config_incidents", this.resolvedActions),
+      canEdit: this.permitted("general.config_incidents"),
       perStudentCap: c.perStudentCap,
       mapping: { ...c.mapping },
       codes: c.codes.map((code) => ({
@@ -5174,7 +5802,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   upsertIncidentCode(input: IncidentCodeInput): void {
-    if (!can(this.user, "general.config_incidents", this.resolvedActions)) return;
+    if (!this.permitted("general.config_incidents")) return;
     // Defence in depth (the UI validates too): reject anything not add-only / invalid.
     if (validateIncidentCode(input, this.incidentConfig.codes).length > 0) return;
     if (input.id) {
@@ -5191,7 +5819,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   deleteIncidentCode(id: string): void {
-    if (!can(this.user, "general.config_incidents", this.resolvedActions)) return;
+    if (!this.permitted("general.config_incidents")) return;
     const before = this.incidentConfig.codes.length;
     this.incidentConfig.codes = this.incidentConfig.codes.filter((c) => c.id !== id);
     if (this.incidentConfig.codes.length !== before) {
@@ -5201,7 +5829,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   setIncidentPerStudentCap(cap: number | null): void {
-    if (!can(this.user, "general.config_incidents", this.resolvedActions)) return;
+    if (!this.permitted("general.config_incidents")) return;
     if (validatePerStudentCap(cap).length > 0) return;
     this.incidentConfig.perStudentCap = cap;
     this.audit("config", "Updated per-student incident cap", cap === null ? "No cap" : `${cap} marks`, null);
@@ -5209,7 +5837,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   setIncidentMapping(mapping: IncidentColumnMapping): void {
-    if (!can(this.user, "general.config_incidents", this.resolvedActions)) return;
+    if (!this.permitted("general.config_incidents")) return;
     this.incidentConfig.mapping = { ...mapping };
     this.audit("config", "Updated incident import mapping", "Column mapping", null);
     this.bump();
@@ -5229,7 +5857,7 @@ export class InMemoryDataProvider implements DataProvider {
     rows: readonly ResolvedIncidentRow[],
     source?: { fileName: string; sample: boolean },
   ): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     this.incidentRows.set(cycleId, rows.map((r) => ({ ...r, errors: [...r.errors] })));
     if (source) this.incidentSource.set(cycleId, { ...source });
@@ -5240,7 +5868,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   clearIncidentRows(cycleId: string): void {
-    if (!can(this.user, "incidents.upload", this.resolvedActions)) return;
+    if (!this.permitted("incidents.upload")) return;
     if (this.locked.has(cycleId)) return;
     if (!this.incidentRows.has(cycleId) && !this.incidentSource.has(cycleId)) return;
     this.incidentRows.delete(cycleId);
@@ -5317,7 +5945,7 @@ export class InMemoryDataProvider implements DataProvider {
       applied: applied !== null,
       appliedBy: applied?.by ?? null,
       appliedAt: applied?.at ?? null,
-      canApply: can(this.user, "incidents.apply", this.resolvedActions),
+      canApply: this.permitted("incidents.apply"),
       perStudentCap: this.incidentConfig.perStudentCap,
       source: this.incidentSource.get(cycleId) ?? null,
       students: matched,
@@ -5336,7 +5964,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   applyIncidentAdjustments(cycleId: string): void {
-    if (!can(this.user, "incidents.apply", this.resolvedActions)) return; // only admin may commit to scores
+    if (!this.permitted("incidents.apply")) return; // only admin may commit to scores
     if (this.locked.has(cycleId)) return;
     if ((this.incidentRows.get(cycleId) ?? []).length === 0) return;
     this.incidentApplied.set(cycleId, { by: this.user.name, at: new Date().toISOString() });
@@ -5347,7 +5975,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   unapplyIncidentAdjustments(cycleId: string): void {
-    if (!can(this.user, "incidents.apply", this.resolvedActions)) return;
+    if (!this.permitted("incidents.apply")) return;
     if (!this.incidentApplied.has(cycleId)) return;
     this.incidentApplied.delete(cycleId);
     this.audit("student", "Reverted incident adjustments", "Base scores stand alone", cycleId);
@@ -5387,7 +6015,7 @@ export class InMemoryDataProvider implements DataProvider {
     // P2: a decision is overridable when the signed-in user holds the `override`
     // permission and the sitting is unlocked — the matrix, not the old
     // strictly-higher role hierarchy. `decidedByRole` is kept purely as a label.
-    const mayOverride = (): boolean => !locked && can(this.user, "general.override_marks", this.resolvedActions);
+    const mayOverride = (): boolean => !locked && this.permitted("general.override_marks");
 
     // Excluded items (the grade-bearing item-review state).
     for (const [key, set] of this.exclusions) {
@@ -5446,7 +6074,7 @@ export class InMemoryDataProvider implements DataProvider {
       // Override rights AT ALL: holds the `override` permission on an unlocked
       // sitting. Each row's `canOverride` reflects the same permission (P2: the
       // matrix is the source of truth, not the old strictly-higher hierarchy).
-      canOverride: can(this.user, "general.override_marks", this.resolvedActions) && !locked,
+      canOverride: this.permitted("general.override_marks") && !locked,
       decisions,
       counts: { decisions: decisions.length, overridden: decisions.filter((d) => d.override).length },
     };
@@ -5578,7 +6206,7 @@ export class InMemoryDataProvider implements DataProvider {
     const subjects = [...subjectsSeen.values()];
 
     const liveCentre = this.centreFor(this.effectiveCentreId(liveId, this.seed.liveCycle.testCentreId)).name;
-    const liveYearRaw = this.yearOf(this.seed.liveCycle.name);
+    const liveYearRaw = this.seed.liveCycle.yearName ?? this.yearOf(this.seed.liveCycle.name);
     const liveYear = /^\d{4}$/.test(liveYearRaw) ? Number(liveYearRaw) : 2026;
 
     const cells: OACell[] = [];
@@ -5760,11 +6388,24 @@ export class InMemoryDataProvider implements DataProvider {
       // 0010 — the sitting (and its year) is created under a chosen test centre.
       testCentres: active.map((c) => ({ ...c })),
       defaultTestCentreId: active[0]?.id ?? null,
+      defaultSitting: DEFAULT_NEW_PERIOD,
+      // Existing REAL exam years (a year row exists only on live data) the new
+      // sitting can attach to, with the periods each already has.
+      // (A workspace with no centres has no years either — and no primary centre to
+      // group them under — so skip the grouping rather than crash the create form.)
+      years: (this.testCentres.length === 0 ? [] : this.listYears())
+        .filter((y) => !!y.examYearId)
+        .map((y) => ({
+          examYearId: y.examYearId!,
+          name: y.name,
+          testCentreId: y.testCentreId,
+          takenSittings: y.sittings.filter((slot) => slot.started).map((slot) => slot.sitting),
+        })),
     };
   }
 
   createCycle(input: CreateCycleInput): Promise<string> {
-    if (!can(this.user, "upload.manage", this.resolvedActions)) return Promise.resolve(this.seed.liveCycle.id);
+    if (!this.permitted("upload.manage")) return Promise.resolve(this.seed.liveCycle.id);
     // In-memory/demo mode has no database: record the intent in the audit log and
     // resolve to the demo cycle id (the only one with real data) so navigation
     // works. The Supabase provider overrides this to persist a real cycle.
@@ -5772,7 +6413,7 @@ export class InMemoryDataProvider implements DataProvider {
     this.audit(
       "cycle",
       "Created cycle",
-      `${centre.name} · ${input.name} — ${input.assessmentIds.length} assessments`,
+      `${centre.name} · ${input.name} [${sittingLabel(input.sitting)}${input.yearName ? ` ${input.yearName}` : ""}] — ${input.assessmentIds.length} assessments`,
       this.seed.liveCycle.id,
     );
     this.bump();
@@ -5785,7 +6426,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   createTestCentre(input: { name: string; code: string }): void {
-    if (!can(this.user, "general.manage_centres", this.resolvedActions)) return;
+    if (!this.permitted("general.manage_centres")) return;
     const name = input.name.trim();
     const code = input.code.trim();
     if (!name || !code) return;
@@ -5797,7 +6438,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   updateTestCentre(id: string, patch: { name?: string; code?: string; active?: boolean }): void {
-    if (!can(this.user, "general.manage_centres", this.resolvedActions)) return;
+    if (!this.permitted("general.manage_centres")) return;
     const c = this.testCentres.find((x) => x.id === id);
     if (!c) return;
     if (patch.name !== undefined && patch.name.trim()) c.name = patch.name.trim();
@@ -5808,7 +6449,7 @@ export class InMemoryDataProvider implements DataProvider {
   }
 
   setTestCentreActive(id: string, active: boolean): void {
-    if (!can(this.user, "general.manage_centres", this.resolvedActions)) return;
+    if (!this.permitted("general.manage_centres")) return;
     const c = this.testCentres.find((x) => x.id === id);
     if (!c) return;
     c.active = active;
@@ -5826,9 +6467,9 @@ export class InMemoryDataProvider implements DataProvider {
    * re-run. `yearId` is the derived year id from `listYears()`.
    */
   moveExamYearToCentre(yearId: string, testCentreId: string): Promise<void> {
-    if (!can(this.user, "general.manage_centres", this.resolvedActions)) return Promise.resolve();
+    if (!this.permitted("general.manage_centres")) return Promise.resolve();
     const years = this.buildYears();
-    const year = years.find((y) => y.id === yearId);
+    const year = years.find((y) => y.id === yearId || y.examYearId === yearId);
     if (!year) return Promise.reject(new Error("Exam year not found."));
     const target = this.testCentres.find((c) => c.id === testCentreId);
     if (!target) return Promise.reject(new Error("Test centre not found."));
@@ -5846,11 +6487,29 @@ export class InMemoryDataProvider implements DataProvider {
     // cycle's CycleSummary.testCentreId is already the EFFECTIVE id, so matching
     // on the year's current centre selects exactly this year's cycles.
     for (const c of this.listCycles()) {
-      if (this.yearOf(c.name) === year.name && c.testCentreId === year.testCentreId) {
+      if (this.yearLabelOf(c) === year.name && c.testCentreId === year.testCentreId) {
         this.cycleCentreOverride.set(c.id, testCentreId);
       }
     }
     this.audit("config", "Moved exam year to centre", `${year.name} → ${target.name}`, null);
+    this.bump();
+    return Promise.resolve();
+  }
+
+  /**
+   * Set the periods a year expects (0051). The in-memory demo has no database year rows, so
+   * only a year that carries a real `examYearId` can be configured; the demo's years always
+   * expect the registry defaults. Same gate as moving a year between centres.
+   */
+  setYearExpectedPeriods(yearId: string, periods: SittingKey[]): Promise<void> {
+    if (!this.permitted("general.manage_centres")) return Promise.resolve();
+    const year = this.buildYears().find((y) => y.id === yearId || y.examYearId === yearId);
+    if (!year) return Promise.reject(new Error("Exam year not found."));
+    if (!year.examYearId) return Promise.reject(new Error("This year can't be configured — it has no database record yet."));
+    const keys = sortPeriods([...new Set(periods)]);
+    if (keys.length === 0) return Promise.reject(new Error("A year must expect at least one period."));
+    this.ws.expectedPeriodsByYear.set(year.examYearId, keys);
+    this.audit("config", "Set expected periods", `${year.name}: ${joinPeriodLabels(keys)}`, null);
     this.bump();
     return Promise.resolve();
   }
