@@ -346,6 +346,101 @@ tr.hf-hover:hover .hf-sticky-col {
   }
 }
 
+/* ── Sign-in entry frame (EntryFrame brand="signin" only) ──────────────────
+   Two columns on desktop (fluid brand panel + centred form). At the existing
+   820px breakpoint the panel collapses to a compact header above the form.
+   Uses min-height so short screens and the mobile keyboard just scroll. */
+.entry-si {
+  display: flex;
+  align-items: stretch;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+.entry-si-panel {
+  flex: 0 0 clamp(340px, 42vw, 460px);
+  min-width: 0;
+  padding: 52px clamp(32px, 4vw, 48px);
+}
+.entry-si-logo {
+  width: 100%;
+  max-width: 300px;
+  margin-top: 24px;
+}
+.entry-si-title {
+  font-size: 26px;
+}
+.entry-si-main {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+}
+@media (max-height: 500px) {
+  .entry-si-panel {
+    padding-top: 24px;
+    padding-bottom: 24px;
+  }
+  .entry-si-logo {
+    margin-top: 0;
+  }
+}
+@media (max-width: 820px) {
+  .entry-si {
+    flex-direction: column;
+  }
+  .entry-si-panel {
+    flex: 0 0 auto;
+    width: 100%;
+    padding: 28px max(24px, calc((100% - 380px) / 2));
+  }
+  .entry-si-logo {
+    margin-top: 0;
+    max-width: 220px;
+  }
+  .entry-si-spacer,
+  .entry-si-desc,
+  .entry-si-foot {
+    display: none;
+  }
+  .entry-si-copy {
+    margin-top: 20px;
+  }
+  .entry-si-title {
+    font-size: 22px;
+  }
+  .entry-si-main {
+    align-items: flex-start;
+    padding: 28px 24px 40px;
+  }
+  .entry-si-main .hf-textinput {
+    min-height: 44px;
+    font-size: 16px; /* >=16px stops iOS zooming on focus */
+  }
+  .entry-si-main .hf-btn {
+    min-height: 48px;
+  }
+}
+@media (max-width: 820px) and (max-height: 500px) {
+  .entry-si-panel {
+    padding-top: 16px;
+    padding-bottom: 16px;
+  }
+  .entry-si-logo {
+    max-width: 150px;
+  }
+  .entry-si-copy {
+    margin-top: 12px;
+  }
+  .entry-si-title {
+    font-size: 18px;
+  }
+  .entry-si-main {
+    padding-top: 20px;
+  }
+}
+
 /* focus visibility for accessibility */
 .hf-btn:focus-visible,
 .hf-chip:focus-visible,

@@ -13,16 +13,29 @@ import { H } from "@/lib/ui/tokens";
 const SIGNIN_LOGO = { src: "/images/alsama-logo.jpeg", width: 2000, height: 842 };
 
 export function EntryFrame({ children, brand }: { children: ReactNode; brand?: "signin" }) {
+  // Sign-in only: layout comes from the `.entry-si*` rules in globals.css (fluid,
+  // stacks on narrow screens). Every other entry screen keeps its original fixed layout.
+  const si = brand === "signin";
   return (
-    <div style={{ display: "flex", alignItems: "stretch", height: "100vh", background: H.canvas, fontFamily: "var(--font-ui)", color: H.ink }}>
+    <div
+      className={si ? "entry-si" : undefined}
+      style={si
+        ? { background: H.canvas, fontFamily: "var(--font-ui)", color: H.ink }
+        : { display: "flex", alignItems: "stretch", height: "100vh", background: H.canvas, fontFamily: "var(--font-ui)", color: H.ink }}
+    >
       {/* brand panel */}
-      <div style={{ width: 460, flex: "0 0 auto", background: H.slate, color: "#fff", padding: "52px 48px", position: "relative", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+      <div
+        className={si ? "entry-si-panel" : undefined}
+        style={si
+          ? { background: H.slate, color: "#fff", position: "relative", overflow: "hidden", display: "flex", flexDirection: "column" }
+          : { width: 460, flex: "0 0 auto", background: H.slate, color: "#fff", padding: "52px 48px", position: "relative", overflow: "hidden", display: "flex", flexDirection: "column" }}
+      >
         <div style={{ position: "absolute", width: 360, height: 360, borderRadius: 999, background: H.pink, opacity: 0.16, right: -150, top: -120 }} />
         <div style={{ position: "absolute", width: 240, height: 240, borderRadius: 999, border: `2px solid ${H.pink}`, opacity: 0.18, left: -90, bottom: 40 }} />
         <div style={{ position: "relative" }}>
-          {brand === "signin" ? (
+          {si ? (
             // The logo file has a light-grey (#f7f7f7) background, so it sits on a matching rounded tile.
-            <div style={{ width: "100%", maxWidth: 300, borderRadius: 14, overflow: "hidden", background: "#f7f7f7", lineHeight: 0 }}>
+            <div className="entry-si-logo" style={{ borderRadius: 14, overflow: "hidden", background: "#f7f7f7", lineHeight: 0 }}>
               <Image
                 src={SIGNIN_LOGO.src}
                 width={SIGNIN_LOGO.width}
@@ -41,24 +54,29 @@ export function EntryFrame({ children, brand }: { children: ReactNode; brand?: "
             </>
           )}
         </div>
-        <div style={{ flex: 1 }} />
-        <div style={{ position: "relative" }}>
-          <div style={{ fontSize: 26, fontWeight: 700, letterSpacing: "-.5px", lineHeight: 1.15 }}>
-            {brand === "signin" ? (
+        <div className={si ? "entry-si-spacer" : undefined} style={{ flex: 1 }} />
+        <div className={si ? "entry-si-copy" : undefined} style={{ position: "relative" }}>
+          <div className={si ? "entry-si-title" : undefined} style={si ? { fontWeight: 700, letterSpacing: "-.5px", lineHeight: 1.15 } : { fontSize: 26, fontWeight: 700, letterSpacing: "-.5px", lineHeight: 1.15 }}>
+            {si ? (
               <>G12++ Candidate<br />Performance App</>
             ) : (
               <>G12++ Exam<br />Processing Suite</>
             )}
           </div>
-          <div style={{ fontSize: 14, color: "rgba(255,255,255,.72)", marginTop: 14, maxWidth: 320, lineHeight: 1.5 }}>
+          <div className={si ? "entry-si-desc" : undefined} style={{ fontSize: 14, color: "rgba(255,255,255,.72)", marginTop: 14, maxWidth: 320, lineHeight: 1.5 }}>
             Review item quality, set grade boundaries, and publish auditable results — one exam sitting at a time.
           </div>
         </div>
-        <div style={{ flex: 1 }} />
-        <div style={{ position: "relative", fontSize: 11.5, color: "rgba(255,255,255,.5)" }}>Alsama Project · internal assessment tool</div>
+        <div className={si ? "entry-si-spacer" : undefined} style={{ flex: 1 }} />
+        <div className={si ? "entry-si-foot" : undefined} style={{ position: "relative", fontSize: 11.5, color: "rgba(255,255,255,.5)" }}>Alsama Project · internal assessment tool</div>
       </div>
       {/* content */}
-      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 40 }}>{children}</div>
+      <div
+        className={si ? "entry-si-main" : undefined}
+        style={si ? undefined : { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 40 }}
+      >
+        {children}
+      </div>
     </div>
   );
 }
