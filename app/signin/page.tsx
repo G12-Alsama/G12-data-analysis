@@ -61,7 +61,7 @@ function SignInForm() {
   };
 
   return (
-    <EntryFrame>
+    <EntryFrame brand="signin">
       <form onSubmit={submit} style={{ width: 380 }}>
         <div className="hf-h1" style={{ fontSize: 24 }}>Sign in</div>
         <div className="hf-sub" style={{ marginTop: 8, marginBottom: 22, fontSize: 13.5 }}>
@@ -130,7 +130,7 @@ function SignInForm() {
 export default function SignInPage() {
   // useSearchParams() requires a Suspense boundary in the App Router.
   return (
-    <Suspense fallback={<EntryFrame><div style={{ width: 380 }} /></EntryFrame>}>
+    <Suspense fallback={<EntryFrame brand="signin"><div style={{ width: 380 }} /></EntryFrame>}>
       <SignInForm />
     </Suspense>
   );
