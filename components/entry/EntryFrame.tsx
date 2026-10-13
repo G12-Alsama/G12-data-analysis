@@ -9,7 +9,9 @@ import type { ReactNode } from "react";
 import Image from "next/image";
 import { H } from "@/lib/ui/tokens";
 
-/** Sign-in branding (opt-in via `EntryFrame`'s `brand` prop; other entry screens keep the default). */
+/** App name shown in the brand panel of every entry screen: one definition, rendered as a two-line heading. */
+const APP_NAME_LINES = ["G12++ Candidate", "Performance App"] as const;
+/** Alsama logo tile (opt-in via `EntryFrame`'s `brand="signin"`; other entry screens keep the CSS "A" mark). */
 const SIGNIN_LOGO = { src: "/images/alsama-logo.jpeg", width: 2000, height: 842 };
 
 export function EntryFrame({ children, brand }: { children: ReactNode; brand?: "signin" }) {
@@ -57,11 +59,7 @@ export function EntryFrame({ children, brand }: { children: ReactNode; brand?: "
         <div className={si ? "entry-si-spacer" : undefined} style={{ flex: 1 }} />
         <div className={si ? "entry-si-copy" : undefined} style={{ position: "relative" }}>
           <div className={si ? "entry-si-title" : undefined} style={si ? { fontWeight: 700, letterSpacing: "-.5px", lineHeight: 1.15 } : { fontSize: 26, fontWeight: 700, letterSpacing: "-.5px", lineHeight: 1.15 }}>
-            {si ? (
-              <>G12++ Candidate<br />Performance App</>
-            ) : (
-              <>G12++ Exam<br />Processing Suite</>
-            )}
+            {APP_NAME_LINES[0]}<br />{APP_NAME_LINES[1]}
           </div>
           <div className={si ? "entry-si-desc" : undefined} style={{ fontSize: 14, color: "rgba(255,255,255,.72)", marginTop: 14, maxWidth: 320, lineHeight: 1.5 }}>
             Review item quality, set grade boundaries, and publish auditable results — one exam sitting at a time.
