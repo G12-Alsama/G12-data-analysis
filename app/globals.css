@@ -31,7 +31,6 @@
   /* font families come from next/font (variables set on <html>) */
   --font-ui: var(--font-sofia), system-ui, sans-serif;
   --font-mono: var(--font-plex-mono), ui-monospace, monospace;
-  --font-script: var(--font-yellowtail), cursive;
 }
 
 html,
