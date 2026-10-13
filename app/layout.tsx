@@ -32,7 +32,7 @@ const barlow = Barlow({
 });
 
 export const metadata: Metadata = {
-  title: "G12++ Exam Processing Suite",
+  title: "G12++ Candidate Performance App",
   description:
     "Process MCQ exam results: ingest, review item quality, set grade boundaries, assign and sign off grades.",
 };
