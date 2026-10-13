@@ -100,10 +100,19 @@ export interface CycleSummary {
    *  undefined in the demo seed, which has no database year rows). Used to target
    *  the year-reassignment RPC. */
   examYearId?: string;
+  /** 0005 — the STORED period of this sitting (exam_cycles.sitting). The Years UI
+   *  slots a sitting by this, not by guessing from its name. Absent only for demo
+   *  fixtures / un-migrated rows, which fall back to the legacy name inference. */
+  sitting?: SittingKey;
+  /** The stored exam_years.name this sitting belongs to (live data only). */
+  yearName?: string;
+  /** ISO date the sitting was held (exam_cycles.sitting_date); display only. */
+  sittingDate?: string;
 }
 
-/** Which sitting of a year. "overall" is the derived best-of-two view. */
-export type SittingKey = "february" | "may";
+/** Which sitting of a year. Defined once, in ./periods (the only place that lists them). */
+import type { SittingKey } from "./periods";
+export type { SittingKey };
 
 /**
  * One sitting tile inside a year. A sitting is a full pipeline run (an
@@ -126,8 +135,17 @@ export interface SittingRef {
   participants: number;
   assessments: number;
   lastActivity: string;
+  /** ISO date the sitting was held (exam_cycles.sitting_date); display only. */
+  sittingDate?: string;
   live: boolean;
   mock: boolean;
+  /**
+   * Whether the year EXPECTS this period (`exam_years.expected_periods`). An expected
+   * period without a sitting is a tile that invites starting it and holds the year back
+   * from "ready"; a sitting in a period the year does not expect is shown and counted
+   * when locked, but never blocks readiness.
+   */
+  expected: boolean;
 }
 
 /** One row in the year list (was the cycles list). */
@@ -140,9 +158,14 @@ export interface YearSummary {
   /** 0013 — the real exam_years.id (live data only; undefined in the demo seed).
    *  Target of move_exam_year_to_centre when an admin reassigns the year. */
   examYearId?: string;
-  february: SittingRef;
-  may: SittingRef;
-  /** Distinct participants across the year's sittings (max of the two). */
+  /**
+   * The year's sittings in period order (oldest → newest): every period the year expects
+   * (a not-started one has `started: false`) plus any other period that has a sitting.
+   */
+  sittings: SittingRef[];
+  /** The periods this year expects, in period order (default: the registry's defaults). */
+  expectedPeriods: SittingKey[];
+  /** Distinct participants across the year's sittings (the largest). */
   participants: number;
   lastActivity: string;
   /** True when one of the sittings is the live (active) run. */
@@ -151,7 +174,7 @@ export interface YearSummary {
   mock: boolean;
 }
 
-/** A year opened: its two sittings + the (stubbed) Overall rollup. */
+/** A year opened: its sittings + the Overall summary. */
 export interface YearDetail {
   id: string;
   name: string;
@@ -160,12 +183,14 @@ export interface YearDetail {
   testCentreName: string;
   /** 0013 — the real exam_years.id (live data only; undefined in the demo seed). */
   examYearId?: string;
-  february: SittingRef;
-  may: SittingRef;
+  /** The year's sittings in period order (see `YearSummary.sittings`). */
+  sittings: SittingRef[];
+  /** The periods this year expects, in period order. */
+  expectedPeriods: SittingKey[];
   /**
-   * Overall is DERIVED (best-of-two by award level, per student per subject) —
-   * the rollup lives in `getOverallGrades` / `lib/data/overall.ts`. `ready` is
-   * true only once both sittings are locked, which is when an Overall is final.
+   * Overall is DERIVED (best level per student and subject across the locked sittings) —
+   * the rollup lives in `getOverallGrades` / `lib/data/overall.ts`. `ready` is true only
+   * once every EXPECTED period has a locked sitting, which is when an Overall is final.
    */
   overall: { ready: boolean; note: string };
 }
@@ -193,7 +218,17 @@ export interface CycleDetail {
   testCentreName: string;
   doNext: { title: string; body: string; href: string; cta: string };
   assessments: AssessmentRef[];
+  /**
+   * True when this sitting's detailed data is loaded and its pipeline pages can read
+   * it. False for a real sitting the cycle list knows only as a light summary (the
+   * live provider loads a sitting's full data lazily, when it is opened): the summary
+   * fields above are real, but `assessments` is empty until it loads. Absent = loaded.
+   */
+  loaded?: boolean;
 }
+
+/** Lazy-load state of one sitting: "ready" to read, "loading", "error", or "missing" (no such sitting). */
+export type CycleLoadState = "ready" | "loading" | "error" | "missing";
 
 /** Optional technical-errors spreadsheet attached at ingest (never gates progress). */
 export interface TechnicalErrorsUpload {
@@ -710,7 +745,25 @@ export interface ReliabilityRow {
   lowItems: boolean;
   /** n below the small-sample threshold — α is unstable. */
   smallSample: boolean;
+  /** Every participant who attempted at least one item in the group (not just the complete-case n used for α). */
+  totalParticipants: number;
+  /** Raw item-response rows feeding the group (one per participant × item they answered). */
+  itemResponses: number;
+  /** Predicted α if the group's item count were doubled with similar-quality items. */
+  spearmanBrown: number | null;
+  /** Test-length multiplier needed to reach α = 0.80 (Spearman-Brown prophecy). */
+  sbMultiplier80: number | null;
+  /** Test-length multiplier needed to reach α = 0.90 (Spearman-Brown prophecy). */
+  sbMultiplier90: number | null;
+  /** Average pairwise Pearson correlation across the group's items (complete-case). */
+  avgInterItemCorrelation: number | null;
+  /** Interpretation band for α. */
+  status: ReliabilityStatus;
+  /** Plain-language reading of `status`. */
+  interpretation: string;
 }
+
+export type ReliabilityStatus = "Excellent" | "Good" | "Acceptable" | "Questionable" | "Flag / Low" | "Not Available";
 
 export interface ReliabilityModel {
   cycleId: string;
@@ -1143,50 +1196,77 @@ export interface CgjModel {
   pldAwardMapAssumed: boolean;
 }
 
-// --- Overall (best-of-two across the year's two sittings) --------------------
-/** Which sitting a chosen per-subject result came from. */
-export type OverallSource = "february" | "may";
+// --- Overall (best level across the year's locked sittings) -------------------
+/** Which sitting (by period) a chosen per-subject result came from. */
+export type OverallSource = SittingKey;
+
+/** One sitting's level for a subject (`null` = no result in that sitting). */
+export interface OverallSittingLevel {
+  /** The sitting's period. */
+  key: SittingKey;
+  level: string | null;
+}
 
 /**
- * One subject cell in the Overall (best-of-two) view: the HIGHER of the two
- * sittings' performance levels, with provenance (which sitting it came from) and
- * the raw per-sitting levels for transparency. The comparison is by performance
- * level RANK (best → lowest), never by raw score.
+ * One subject cell in the Overall view: the BEST performance level across the counted
+ * sittings, with provenance (which sitting it came from) and every sitting's own level
+ * for transparency. The comparison is by performance level RANK (best → lowest), never
+ * by raw score; a tie goes to the LATEST sitting (period order).
  */
 export interface OverallGradeCell {
-  /** The chosen (higher) performance level. */
+  /** The chosen (best) performance level. */
   level: string;
   stars: string;
-  /** Which sitting supplied the chosen level (the visible Feb/May tag). */
+  /** The period of the sitting that supplied the chosen level (the visible tag). */
   source: OverallSource;
-  /** Level recorded in the February sitting (null = no February result). */
-  februaryLevel: string | null;
-  /** Level recorded in the May sitting (null = no May result). */
-  mayLevel: string | null;
+  /** Each sitting's level, in period order (oldest → newest); one entry per sitting rolled up. */
+  levels: OverallSittingLevel[];
 }
 
 export interface OverallGradeRow {
-  /** Stable key — the human Student ID, which matches across the two sittings. */
+  /** Stable key — the human Student ID, which matches across sittings. */
   id: string;
   studentId: string;
   label: string;
-  /** Best-of-two per assessment id. */
+  /** Best level per assessment id. */
   grades: Record<string, OverallGradeCell>;
   /**
-   * Overall award DERIVED from the best-of-two per-subject levels via the
-   * existing award-derivation rule. The per-sitting D3 safeguard is NOT re-run at
-   * the Overall level (each sitting's award is already signed-off, safeguard-checked).
+   * Overall award DERIVED from the best per-subject levels via the existing
+   * award-derivation rule. The per-sitting D3 safeguard is NOT re-run at the Overall
+   * level (each sitting's award is already signed-off, safeguard-checked).
    */
   award: string;
-  /** Whether the student appeared in each sitting. */
-  inFebruary: boolean;
-  inMay: boolean;
+  /** The periods of the sittings the student appears in, in period order. */
+  presentIn: SittingKey[];
+}
+
+/** Why a sitting does / doesn't contribute to an Overall. */
+export type OverallSittingStatus =
+  | "counted" //     grades locked and loaded — in the rollup
+  | "not_locked" //  started, but grades not locked yet — NOT counted
+  | "not_started" // no sitting in this period
+  | "loading" //     locked, but its data is still being loaded
+  | "no_data"; //    locked, but it has no grades to roll up
+
+export interface OverallSittingInfo {
+  key: SittingKey;
+  /** Period label, e.g. "February". */
+  label: string;
+  cycleId: string | null;
+  cycleName: string | null;
+  started: boolean;
+  locked: boolean;
+  /** Whether the year expects this period (a not-started expected period holds readiness back). */
+  expected: boolean;
+  status: OverallSittingStatus;
+  /** Human reading of `status`, e.g. "Not counted yet: grades not locked". */
+  note: string;
 }
 
 export interface OverallGradesModel {
   yearId: string;
   yearName: string;
-  /** Subjects (union across the two sittings — uses the populated sitting's refs). */
+  /** Subjects (union across the counted sittings, newest sitting's order first). */
   assessments: AssessmentRef[];
   rows: OverallGradeRow[];
   /** Distribution over the award levels (derived overall awards). */
@@ -1194,17 +1274,30 @@ export interface OverallGradesModel {
   awardLevels: string[];
   starMap: Record<string, string>;
   performanceLevels: string[];
-  february: { cycleId: string | null; cycleName: string | null } | null;
-  may: { cycleId: string | null; cycleName: string | null } | null;
-  /** True when both sittings are locked (signed off) — Overall is final / certifiable. */
+  /**
+   * The REAL sitting (exam_cycles row) that Overall-level records attach to — document
+   * settings and the document-issue log: the latest counted sitting, else the latest
+   * started one; null when the year has no sitting. Never a year id.
+   */
+  recordCycleId: string | null;
+  /**
+   * Every sitting of the year that is expected or exists, in period order, with whether
+   * it COUNTS toward this Overall. Only sittings whose grades are locked count; an
+   * unlocked one is listed with its reason ("not counted yet: grades not locked") so the
+   * page can say so. Absent only in the in-memory demo.
+   */
+  sittings?: OverallSittingInfo[];
+  /**
+   * True when every period the year EXPECTS has a locked sitting — the Overall is final /
+   * certifiable.
+   */
   ready: boolean;
   /** Alias of `ready`: certificates issue only from a signed-off Overall. */
   locked: boolean;
   /**
-   * True when the February sitting is DEMO data synthesized from the May cohort.
-   * In this build only the live (May) sitting carries real grades and live
-   * Supabase is unreachable, so the February baseline is generated locally to
-   * exercise the best-of-two rollup. With real two-sitting data this is false.
+   * True when the OLDEST period's sitting is DEMO data synthesized from the newest
+   * period's cohort (the in-memory demo only: there is no database, so the baseline is
+   * generated locally to exercise the rollup). Never true for live data.
    */
   demo: boolean;
   note: string;
@@ -1465,7 +1558,14 @@ export interface IssuanceReadiness {
 }
 
 export interface DocumentsModel {
+  /**
+   * The REAL sitting (exam_cycles id) that document settings and the document-issue log
+   * attach to. For the Overall documents model it is the year's latest counted sitting
+   * (else its latest started one) — never a year id; "" only when the year has no sitting.
+   */
   cycleId: string;
+  /** The year this model is for (Overall documents model only). */
+  yearId?: string;
   /**
    * True once all contributing sittings are locked/signed off. Note: `students`
    * is populated regardless (provisional or final) so draft proofs and the
@@ -1784,6 +1884,19 @@ export interface NewCycleModel {
   testCentres: TestCentreSummary[];
   /** Pre-selected centre (first active centre), or null when none exist yet. */
   defaultTestCentreId: string | null;
+  /** Pre-selected period. */
+  defaultSitting: SittingKey;
+  /** Existing exam years the sitting can be attached to (real DB years only). */
+  years: NewCycleYearOption[];
+}
+
+/** An existing exam year offered in the create-sitting form. */
+export interface NewCycleYearOption {
+  examYearId: string;
+  name: string;
+  testCentreId: string;
+  /** Periods that already have a sitting in this year (can't be created twice). */
+  takenSittings: SittingKey[];
 }
 
 export interface CreateCycleInput {
@@ -1792,6 +1905,12 @@ export interface CreateCycleInput {
   assessmentIds: string[];
   /** 0010 — the test centre to create this sitting (and its year) under. */
   testCentreId: string;
+  /** The period of this sitting — an explicit choice, never inferred from `name`. */
+  sitting: SittingKey;
+  /** Attach to this existing exam year (exam_years.id)… */
+  examYearId?: string;
+  /** …or create/find the year with this name (a 4-digit year) under the centre. */
+  yearName?: string;
 }
 
 // --- Per-student technical exclusions (Student review step) ------------------

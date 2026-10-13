@@ -35,6 +35,22 @@ export interface CleanResponse {
   questionType: string;
   maxScore: number;
   answerGiven: string | null;
+  /**
+   * The export's `AnswerGivenChoiceNumber` — QM's own answer-index field, blank
+   * (normalised to null) when the item was left unanswered. Unlike `answerGiven`
+   * (which carries the sentinel text "<Not defined>" for an unanswered item, a
+   * truthy string), this is the field to key "was this item answered?" off of.
+   */
+  answerGivenChoiceNumber: string | null;
+  /**
+   * The export's `QuestionPresentedNumber` — QM's real per-sitting item order,
+   * null when blank/non-numeric. VARIES per participant even for the same
+   * (assessment, question) — confirmed against the 700435 fixture — so this is a
+   * per-response value, never a per-question constant. The authoritative source
+   * for Assessment Health's "presentation order", replacing the first-appearance-
+   * order proxy previously used.
+   */
+  questionPresentedNumber: number | null;
   answerScore: number;
   responseTime: number | null;
   resultStatus: string | null;

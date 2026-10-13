@@ -1,13 +1,15 @@
 "use client";
 
 /**
- * Screen 02 — A year opened. Shows the year's two sittings (February and May)
+ * Screen 02 — A year opened. Shows the year's sittings (one per period)
  * plus the derived Overall view. Each sitting tile opens the existing
  * per-sitting pipeline (app/cycles/[cycleId]) unchanged; Overall opens the
  * best-of-two rollup (app/years/[yearId]/overall).
  */
 import Link from "next/link";
-import { useProviderData } from "@/lib/data/context";
+import { useProvider, useProviderData } from "@/lib/data/context";
+import { can } from "@/lib/auth/actions";
+import { ExpectedPeriods } from "@/components/years/ExpectedPeriods";
 import { H } from "@/lib/ui/tokens";
 import { Shell } from "@/components/shell/Shell";
 import { Button, Card, Badge } from "@/components/ui/primitives";
@@ -20,6 +22,14 @@ import { PIPELINE, type SittingRef } from "@/lib/data/types";
 // can never disagree on N — and a stale/over-counted source can never read as
 // more steps done than exist.
 const TOTAL_STEPS = PIPELINE.length;
+
+/** "2026-05-14" → "14 May 2026" (date-only: parsed as UTC so it never shifts a day). */
+function formatSittingDate(iso: string): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+}
 
 function SittingCard({ s }: { s: SittingRef }) {
   return (
@@ -46,7 +56,10 @@ function SittingCard({ s }: { s: SittingRef }) {
 
       {s.started ? (
         <>
-          <div className="hf-sub">{s.cycleName}</div>
+          <div className="hf-sub">
+            {s.cycleName}
+            {s.sittingDate && <> · {formatSittingDate(s.sittingDate)}</>}
+          </div>
           <div style={{ display: "flex", gap: 22, marginTop: "auto" }}>
             <div>
               <div className="hf-mono" style={{ fontSize: 18, fontWeight: 700 }}>{s.participants.toLocaleString()}</div>
@@ -86,7 +99,9 @@ function SittingCard({ s }: { s: SittingRef }) {
 }
 
 export default function YearPage({ params }: { params: { yearId: string } }) {
+  const provider = useProvider();
   const year = useProviderData((p) => p.getYear(params.yearId), [params.yearId]);
+  const canConfigure = can(provider.getCurrentUser().role, "general.manage_centres");
 
   if (!year) {
     return (
@@ -112,15 +127,27 @@ export default function YearPage({ params }: { params: { yearId: string } }) {
             </span>
           </div>
           <div className="hf-sub" style={{ marginTop: 7 }}>
-            Two sittings run the full pipeline independently. Overall takes the higher award across the two, per student per subject.
+            {year.sittings.length === 2
+              ? "Two sittings run the full pipeline independently. Overall takes the higher award across the two, per student per subject."
+              : "Each sitting runs the full pipeline independently. Overall takes the best level across the locked sittings, per student per subject."}
           </div>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 18 }}>
-          <SittingCard s={year.february} />
-          <SittingCard s={year.may} />
+        {/* Only a real (database) year can be configured; the demo's years always expect the defaults. */}
+        {year.examYearId && (
+          <ExpectedPeriods
+            expected={year.expectedPeriods}
+            canEdit={canConfigure}
+            onChange={(next) => provider.setYearExpectedPeriods(year.id, next)}
+          />
+        )}
 
-          {/* Overall — derived best-of-two across the two sittings. */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 18 }}>
+          {year.sittings.map((s) => (
+            <SittingCard key={s.sitting} s={s} />
+          ))}
+
+          {/* Overall — derived: the best level across the locked sittings. */}
           <Card style={{ padding: 20, display: "flex", flexDirection: "column", gap: 14, minHeight: 190, borderStyle: "dashed" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <div style={{ fontWeight: 700, fontSize: 16 }}>Overall</div>

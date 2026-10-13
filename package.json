@@ -18,6 +18,7 @@
     "@supabase/ssr": "^0.5.2",
     "@supabase/supabase-js": "^2.45.4",
     "docxtemplater": "^3.68.7",
+    "exceljs": "^4.4.0",
     "jszip": "^3.10.1",
     "next": "14.2.15",
     "pizzip": "^3.2.0",

@@ -21,6 +21,8 @@ import { CycleShell } from "@/components/shell/CycleShell";
 import { Button, Badge } from "@/components/ui/primitives";
 import { UploadButton } from "@/components/import/UploadButton";
 import { UploadStatusLine, ConfirmStep, type UploadStage } from "@/components/import/UploadFlow";
+import { UploadMismatchWarning } from "@/components/import/UploadMismatchWarning";
+import { compareExportToSitting, planUpload, type SittingMatchReport } from "@/lib/ingest/qm/sitting-match";
 import { Icon, Mark, type MarkKind } from "@/components/ui/icons";
 import { EssayMarksCard } from "@/components/cycle/EssayMarksCard";
 import { StepIntro } from "@/components/ui/StepIntro";
@@ -436,11 +438,27 @@ function ExportEmpty({ cycleId }: { cycleId: string }) {
  */
 function RawExportUploader({ cycleId, label, variant }: { cycleId: string; label: string; variant: "pri" | "ghost" }) {
   const provider = useProvider();
+  // The sitting's year and period, to check the file against (absent on demo/legacy sittings).
+  const target = useProviderData(
+    (p) => {
+      const c = p.listCycles().find((x) => x.id === cycleId);
+      return c ? { yearName: c.yearName, sitting: c.sitting } : null;
+    },
+    [cycleId],
+  );
   const fileRef = useRef<HTMLInputElement>(null);
   // Explicit, visible stages: idle → uploading (read/parse) → ingesting
   // (persist + split) → done / failed. The status line names the active one.
   const [stage, setStage] = useState<UploadStage>("idle");
   const [error, setError] = useState<string | null>(null);
+  // A parsed file held because it does not look like it belongs to this sitting; nothing has
+  // been sent to the server. Confirming persists it; cancelling drops it.
+  const [held, setHeld] = useState<{
+    parsed: ReturnType<typeof ingestThreeExports>;
+    report: SittingMatchReport;
+    fileName: string;
+    sizeMB: number;
+  } | null>(null);
   const busy = stage === "uploading" || stage === "ingesting";
 
   const fail = (msg: string) => {
@@ -448,36 +466,70 @@ function RawExportUploader({ cycleId, label, variant }: { cycleId: string; label
     setStage("failed");
   };
 
+  /** Persist an already-parsed export (the server split + store). */
+  const persist = async (parsed: ReturnType<typeof ingestThreeExports>, sizeMB: number) => {
+    const { canonical, cleanedResponses, validationReport, sources } = parsed;
+    setStage("ingesting");
+    // `sources` is the REAL recognition (by columns) of which uploaded file became
+    // which export — not a filename guess. Persisted for the audit trail + the
+    // per-file recognition display.
+    await provider.ingestRawExport(
+      cycleId,
+      { name: sources.assessments, sizeMB },
+      cleanedResponses,
+      validationReport,
+      { canonical, files: sources },
+    );
+    setStage("done");
+  };
+
+  const confirmHeld = async () => {
+    if (!held) return;
+    const { parsed, sizeMB } = held;
+    setHeld(null);
+    setError(null);
+    try {
+      await persist(parsed, sizeMB);
+    } catch (e) {
+      fail(e instanceof Error ? e.message : "Couldn’t upload that file.");
+    }
+  };
+
+  const cancelHeld = () => {
+    setHeld(null);
+    setError(null);
+    setStage("idle");
+  };
+
   const onFiles = async (fileList: FileList | null) => {
     const files = fileList ? [...fileList] : [];
     if (files.length === 0) return;
     setError(null);
+    setHeld(null);
     setStage("uploading");
     try {
       // Read every dropped file; detection sorts out which is which by columns.
       const named = await Promise.all(
         files.map(async (f) => ({ name: f.name, data: await f.arrayBuffer() })),
       );
-      const { canonical, cleanedResponses, validationReport, sources } = ingestThreeExports(named);
-      if (cleanedResponses.length === 0) {
+      const parsed = ingestThreeExports(named);
+      if (parsed.cleanedResponses.length === 0) {
         fail("No scored responses after cleaning. Check these are the graded G12++ exports (not just surveys).");
         return;
       }
-      // Browser parse/join/clean done; the server persist + split is the next stage.
-      setStage("ingesting");
       const totalBytes = files.reduce((n, f) => n + f.size, 0);
       const sizeMB = Math.round((totalBytes / (1024 * 1024)) * 10) / 10;
-      // `sources` is the REAL recognition (by columns) of which uploaded file became
-      // which export — not a filename guess. Persisted for the audit trail + the
-      // per-file recognition display.
-      await provider.ingestRawExport(
-        cycleId,
-        { name: sources.assessments, sizeMB },
-        cleanedResponses,
-        validationReport,
-        { canonical, files: sources },
-      );
-      setStage("done");
+      // Does the export say it is another year / period than this sitting? If so hold it —
+      // nothing is sent — until the user confirms. A match, or an export with nothing to
+      // compare (no tag, no dates), goes straight on.
+      const report = compareExportToSitting(parsed.canonical, target);
+      if (planUpload(report) === "confirm") {
+        setHeld({ parsed, report, fileName: parsed.sources.assessments, sizeMB });
+        setStage("confirm");
+        return;
+      }
+      // Browser parse/join/clean done; the server persist + split is the next stage.
+      await persist(parsed, sizeMB);
     } catch (e) {
       if (e instanceof DetectionError) {
         fail(e.message);
@@ -507,6 +559,15 @@ function RawExportUploader({ cycleId, label, variant }: { cycleId: string; label
       />
       <UploadButton busy={busy} label={buttonLabel} variant={variant} onClick={() => fileRef.current?.click()} />
       <UploadStatusLine stage={stage} error={error} />
+      {held && (
+        <UploadMismatchWarning
+          report={held.report}
+          fileName={held.fileName}
+          busy={busy}
+          onConfirm={() => void confirmHeld()}
+          onCancel={cancelHeld}
+        />
+      )}
     </div>
   );
 }

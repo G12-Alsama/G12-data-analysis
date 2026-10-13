@@ -149,6 +149,14 @@ describe("computeReliability — grouping by construct tag", () => {
     expect(demand.find((d) => d.assessmentId === "S2" && d.label === "D3")!.k).toBe(1);
   });
 
+  it("also produces a cross-subject group per demand tag (assessmentId null), spanning every subject that carries it", () => {
+    const demandAll = g((x) => x.level === "demandLevel" && x.assessmentId === null);
+    // D1 spans S1 (i1,i3) + S2 (i4); D2 is S1-only (i2); D3 is S2-only (i5).
+    expect(demandAll.find((d) => d.label === "D1")!.k).toBe(3);
+    expect(demandAll.find((d) => d.label === "D2")!.k).toBe(1);
+    expect(demandAll.find((d) => d.label === "D3")!.k).toBe(1);
+  });
+
   it("only produces context groups where a context tag exists", () => {
     const ctx = g((x) => x.level === "context");
     expect(ctx).toHaveLength(1); // only S1's Bio

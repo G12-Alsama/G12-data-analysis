@@ -44,10 +44,9 @@ describe("getOverallGrades — year best-of-two", () => {
       for (const cell of Object.values(r.grades)) {
         expect(["february", "may"]).toContain(cell.source);
         // chosen level is at least as good as each sitting's recorded level
-        expect(rank(cell.level)).toBeLessThanOrEqual(rank(cell.februaryLevel));
-        expect(rank(cell.level)).toBeLessThanOrEqual(rank(cell.mayLevel));
+        for (const l of cell.levels) expect(rank(cell.level)).toBeLessThanOrEqual(rank(l.level));
         // chosen level matches its claimed source
-        const src = cell.source === "february" ? cell.februaryLevel : cell.mayLevel;
+        const src = cell.levels.find((l) => l.key === cell.source)!.level;
         expect(cell.level).toBe(src);
         if (cell.source === "february") feb++;
         else may++;

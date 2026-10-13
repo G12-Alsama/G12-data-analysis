@@ -11,6 +11,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { InMemoryDataProvider } from "@/lib/data/in-memory-provider";
+import { slotOf } from "./helpers/year-slots";
 
 function setup() {
   const p = new InMemoryDataProvider();
@@ -41,7 +42,7 @@ describe("clearSittingData resets the cached cycle summary to 0/0", () => {
     // The sitting ref for THIS cycle in the year grid (the card the user opened).
     const slotFor = () => {
       for (const y of p.listYears()) {
-        for (const s of [y.february, y.may]) if (s.cycleId === cycleId) return s;
+        for (const s of [slotOf(y, "february"), slotOf(y, "may")]) if (s.cycleId === cycleId) return s;
       }
       return null;
     };

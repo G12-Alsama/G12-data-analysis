@@ -20,7 +20,7 @@ import { Button, Spinner } from "@/components/ui/primitives";
 import { Icon, Mark } from "@/components/ui/icons";
 
 /** Explicit, visible stages the upload control moves through. */
-export type UploadStage = "idle" | "uploading" | "ingesting" | "done" | "failed";
+export type UploadStage = "idle" | "uploading" | "confirm" | "ingesting" | "done" | "failed";
 
 const STAGE_TEXT: Record<"uploading" | "ingesting", string> = {
   uploading: "Uploading — reading and parsing the file…",
@@ -41,7 +41,8 @@ export function UploadStatusLine({
   error?: string | null;
   subjectCount?: number;
 }) {
-  if (stage === "idle") return null;
+  // "confirm" = a parsed file is held for the mismatch warning; that card speaks for itself.
+  if (stage === "idle" || stage === "confirm") return null;
 
   const base = {
     display: "inline-flex",

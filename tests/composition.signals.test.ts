@@ -26,7 +26,9 @@ describe("per-student score signals (D3 answered + technical incidents)", () => 
       if (d3.available === 0) {
         expect(d3.pct).toBeNull();
       } else {
-        expect(d3.pct).toBeCloseTo((d3.attempted / d3.available) * 100, 5);
+        // d3.pct is rounded to 1 dp for display (see in-memory-provider.ts), so
+        // compare at that same precision rather than the exact unrounded ratio.
+        expect(d3.pct).toBeCloseTo((d3.attempted / d3.available) * 100, 1);
         expect(d3.pct!).toBeGreaterThanOrEqual(0);
         expect(d3.pct!).toBeLessThanOrEqual(100);
       }
