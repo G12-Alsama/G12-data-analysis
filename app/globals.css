@@ -363,15 +363,14 @@ tr.hf-hover:hover .hf-sticky-col {
   min-width: 0;
   padding: 52px clamp(32px, 4vw, 48px);
 }
+/* Alsama logo (transparent PNG drawn straight on the slate panel) */
 .entry-logo {
   width: 100%;
-  max-width: 300px;
-  margin-top: 24px; /* sign-in logo tile sits a step lower than the old top-left spot */
+  max-width: 160px;
 }
-.entry-wordmark {
-  font-size: 40px;
-  line-height: 1;
-  margin-top: 26px;
+.entry-logo--signin {
+  max-width: 200px;
+  margin-top: 24px; /* sign-in logo sits a step lower than the old top-left spot */
 }
 .entry-title {
   font-size: 26px;
@@ -393,7 +392,7 @@ tr.hf-hover:hover .hf-sticky-col {
     padding-top: 24px;
     padding-bottom: 24px;
   }
-  .entry-logo {
+  .entry-logo--signin {
     margin-top: 0;
   }
 }
@@ -406,18 +405,12 @@ tr.hf-hover:hover .hf-sticky-col {
     width: 100%;
     padding: 28px max(24px, calc((100% - 380px) / 2));
   }
-  .entry-mark {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-  }
   .entry-logo {
-    margin-top: 0;
-    max-width: 220px;
+    max-width: 130px;
   }
-  .entry-wordmark {
-    font-size: 34px;
-    margin-top: 6px; /* script ascender/descender optical alignment with the badge */
+  .entry-logo--signin {
+    margin-top: 0;
+    max-width: 150px;
   }
   .entry-spacer,
   .entry-desc,
@@ -447,17 +440,15 @@ tr.hf-hover:hover .hf-sticky-col {
     padding-top: 16px;
     padding-bottom: 16px;
   }
-  .entry-logo {
-    max-width: 150px;
+  .entry-logo,
+  .entry-logo--signin {
+    max-width: 100px;
   }
   .entry-copy {
     margin-top: 12px;
   }
   .entry-title {
     font-size: 18px;
-  }
-  .entry-wordmark {
-    font-size: 28px;
   }
   .entry-main {
     padding-top: 20px;

@@ -11,8 +11,8 @@ import { H } from "@/lib/ui/tokens";
 
 /** App name shown in the brand panel of every entry screen: one definition, rendered as a two-line heading. */
 const APP_NAME_LINES = ["G12++ Candidate", "Performance App"] as const;
-/** Alsama logo tile (opt-in via `EntryFrame`'s `brand="signin"`; other entry screens keep the CSS "A" mark). */
-const SIGNIN_LOGO = { src: "/images/alsama-logo.jpeg", width: 2000, height: 842 };
+/** Alsama logo: trimmed transparent PNG, drawn directly on the brand panel (intrinsic size from the file). */
+const LOGO = { src: "/images/alsama-logo.png", width: 1200, height: 459 };
 
 export function EntryFrame({ children, brand }: { children: ReactNode; brand?: "signin" }) {
   // Layout is fluid and lives in the `.entry*` rules in globals.css: two columns on
@@ -25,26 +25,17 @@ export function EntryFrame({ children, brand }: { children: ReactNode; brand?: "
         <div style={{ position: "absolute", width: 360, height: 360, borderRadius: 999, background: H.pink, opacity: 0.16, right: -150, top: -120 }} />
         <div style={{ position: "absolute", width: 240, height: 240, borderRadius: 999, border: `2px solid ${H.pink}`, opacity: 0.18, left: -90, bottom: 40 }} />
         <div className="entry-mark" style={{ position: "relative" }}>
-          {signin ? (
-            // The logo file has a light-grey (#f7f7f7) background, so it sits on a matching rounded tile.
-            <div className="entry-logo" style={{ borderRadius: 14, overflow: "hidden", background: "#f7f7f7", lineHeight: 0 }}>
-              <Image
-                src={SIGNIN_LOGO.src}
-                width={SIGNIN_LOGO.width}
-                height={SIGNIN_LOGO.height}
-                alt="Alsama logo"
-                priority
-                style={{ width: "100%", height: "auto", display: "block" }}
-              />
-            </div>
-          ) : (
-            <>
-              <div className="entry-badge" style={{ width: 46, height: 46, borderRadius: 13, background: H.pink, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 10px rgba(193,44,104,.5)" }}>
-                <span style={{ fontFamily: "var(--font-script)", fontSize: 30, marginTop: 6 }}>A</span>
-              </div>
-              <div className="entry-wordmark" style={{ fontFamily: "var(--font-script)" }}>Alsama</div>
-            </>
-          )}
+          {/* `signin` sits a step lower and slightly larger (see .entry-logo--signin) */}
+          <div className={signin ? "entry-logo entry-logo--signin" : "entry-logo"}>
+            <Image
+              src={LOGO.src}
+              width={LOGO.width}
+              height={LOGO.height}
+              alt="Alsama logo"
+              priority
+              style={{ width: "100%", height: "auto", display: "block" }}
+            />
+          </div>
         </div>
         <div className="entry-spacer" style={{ flex: 1 }} />
         <div className="entry-copy" style={{ position: "relative" }}>
