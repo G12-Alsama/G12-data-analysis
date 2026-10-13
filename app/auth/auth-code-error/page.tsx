@@ -8,7 +8,7 @@ import { Mark } from "@/components/ui/icons";
 export default function AuthCodeErrorPage() {
   return (
     <EntryFrame>
-      <div style={{ width: 380 }}>
+      <div style={{ width: "100%", maxWidth: 380 }}>
         <div
           style={{
             width: 46,
