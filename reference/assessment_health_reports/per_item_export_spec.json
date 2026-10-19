@@ -1,0 +1,892 @@
+{
+ "file_name_original": "Per_Item_Speededness_Omission_Completion_May2026.xlsx",
+ "file_name_app_convention": "per_item_speededness_omission_completion_<period>.xlsx",
+ "workbook": {
+  "sheet_order": [
+   "README & Methodology",
+   "<one sheet per assessment, in the app's existing assessment order>"
+  ],
+  "default_row_height": 13.8,
+  "no_freeze_panes": true,
+  "no_tab_colors": true,
+  "font": "Carlito",
+  "font_size": 11
+ },
+ "readme": {
+  "merges": [
+   "A1:D1",
+   "A2:D2"
+  ],
+  "col_widths": {
+   "A": 25.8984375,
+   "B": 50.0,
+   "C": 35.0,
+   "D": 55.0
+  },
+  "row_heights": {
+   "1": 32.4,
+   "2": 16.05,
+   "4": 25.65,
+   "5": 27.15,
+   "6": 41.4,
+   "7": 27.6,
+   "8": 27.6,
+   "9": 27.6,
+   "10": 41.4,
+   "11": 49.65,
+   "12": 46.35
+  },
+  "title": "MCQ Psychometric Analysis — Item-Level Speededness, Omission, and Completion (All Items)",
+  "subtitle": "Source dataset: <source dataset file name>",
+  "title_style": {
+   "font_color": "FFFFFFFF",
+   "fill": "FFB2375B",
+   "bold": true,
+   "align": {
+    "h": "left",
+    "v": "center",
+    "wrap": true
+   }
+  },
+  "subtitle_style": {
+   "font_color": "FF47535A",
+   "fill": "FFF9F5F2",
+   "wrap": true
+  },
+  "table_header": [
+   "Metric",
+   "Formula / Calculation",
+   "Data Used",
+   "Interpretation / Thresholds"
+  ],
+  "rows": [
+   [
+    "Number of Participants",
+    "Unique count of ParticipantID for the item.",
+    "ParticipantID",
+    "Higher counts provide more stable item-level percentages."
+   ],
+   [
+    "Median AnswerResponseTimeSeconds",
+    "Median of AnswerResponseTimeSeconds across all participant responses to the item.",
+    "AnswerResponseTimeSeconds",
+    "Median is used because response times are often skewed by pauses and unusually long or short responses."
+   ],
+   [
+    "Omission Rate",
+    "Omitted item responses ÷ total item responses. An item is omitted when AnswerGivenChoiceNumber is blank.",
+    "AnswerGivenChoiceNumber",
+    "Good ≤ 5%; Review > 5% and ≤ 10%; Flag > 10%."
+   ],
+   [
+    "Completion Rate",
+    "Completed item responses ÷ total item responses = 1 − Omission Rate.",
+    "AnswerGivenChoiceNumber",
+    "Good ≥ 95%; Review ≥ 90% and < 95%; Flag < 90%."
+   ],
+   [
+    "Item Accuracy",
+    "Mean AnswerScore for the item. For dichotomous MCQs, this equals the proportion answered correctly.",
+    "AnswerScore",
+    "Supporting diagnostic used to interpret the item-level speededness signal."
+   ],
+   [
+    "Late-Item Definition",
+    "Within each assessment, items are ordered by their median QuestionPresentedNumber. The final 25% of unique items (rounded up) remain classified as late items.",
+    "QuestionId, QuestionPresentedNumber",
+    "The late-item label is retained as positional context; it no longer determines whether the Speededness Index is calculated."
+   ],
+   [
+    "Item-Level Speededness Index",
+    "For every item: average of max(0, Item Omission Rate − Assessment Early-Item Omission Rate) and max(0, Assessment Early-Item Accuracy − Item Accuracy).",
+    "QuestionPresentedNumber, AnswerGivenChoiceNumber, AnswerScore",
+    "Good ≤ 5%; Review > 5% and ≤ 15%; Flag > 15%. The same assessment early-item baseline and thresholds are applied to all items."
+   ],
+   [
+    "Interpretation Caution",
+    "The all-item index is a comparative diagnostic signal, not proof that time pressure caused lower performance.",
+    "All calculated metrics",
+    "For early/middle items, interpret the index mainly as an omission/performance deviation. Evidence of test speededness is stronger when elevated values occur in the late section."
+   ]
+  ],
+  "header_cell": "bold, centered, wrap, thin borders all sides, no fill",
+  "body_cell": "top-aligned, wrap, thin borders all sides, no fill"
+ },
+ "item_sheet": {
+  "sheet_name_rule": "assessment name; strip chars []:*?/\\ ; max 31 chars",
+  "title_template": "{AssessmentName} — Item-Level Speededness, Omission, and Completion Analysis",
+  "subtitle": "Interpret item-level speededness together with item accuracy, omission, completion, wording, content, and item position. The index is calculated for all items; late-section items provide the strongest evidence of possible time pressure.",
+  "merges": [
+   "A1:T1",
+   "A2:T2"
+  ],
+  "title_style": {
+   "font_color": "FFFFFFFF",
+   "fill": "FFB2375B",
+   "bold": true,
+   "align": {
+    "h": "left",
+    "v": "center",
+    "wrap": true
+   }
+  },
+  "subtitle_style": {
+   "font_color": "FF47535A",
+   "fill": "FFF9F5F2",
+   "wrap": true,
+   "v": "center"
+  },
+  "header_row": 4,
+  "first_data_row": 5,
+  "row3": "empty spacer row (height 19.2)",
+  "row_heights": {
+   "1": 33.6,
+   "2": 19.2,
+   "3": 19.2,
+   "4": 33.6,
+   "data_rows": 35.25
+  },
+  "columns": [
+   {
+    "col": "A",
+    "header": "AssessmentName",
+    "number_format": "General",
+    "data_align": {
+     "h": null,
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": null,
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": null,
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "B",
+    "header": "QuestionId",
+    "number_format": "0",
+    "data_align": {
+     "h": "center",
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "C",
+    "header": "QuestionDescription",
+    "number_format": "General",
+    "data_align": {
+     "h": null,
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "D",
+    "header": "QuestionWording",
+    "number_format": "General",
+    "data_align": {
+     "h": null,
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "E",
+    "header": "QuestionMajorElement",
+    "number_format": "General",
+    "data_align": {
+     "h": null,
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "F",
+    "header": "QuestionSubElement",
+    "number_format": "General",
+    "data_align": {
+     "h": null,
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "G",
+    "header": "DemandLevel",
+    "number_format": "General",
+    "data_align": {
+     "h": "center",
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "H",
+    "header": "QuestionPresentedNumber",
+    "number_format": "0.0",
+    "data_align": {
+     "h": "center",
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "I",
+    "header": "Test Section",
+    "number_format": "General",
+    "data_align": {
+     "h": "center",
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "J",
+    "header": "Number of Participants",
+    "number_format": "0",
+    "data_align": {
+     "h": "center",
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "K",
+    "header": "Number of Item Responses",
+    "number_format": "0",
+    "data_align": {
+     "h": "center",
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "L",
+    "header": "Median AnswerResponseTimeSeconds",
+    "number_format": "0.0",
+    "data_align": {
+     "h": "center",
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "M",
+    "header": "Item Accuracy",
+    "number_format": "0.0%",
+    "data_align": {
+     "h": "center",
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "N",
+    "header": "Speededness Index",
+    "number_format": "0.0%",
+    "data_align": {
+     "h": "center",
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "O",
+    "header": "Speededness Status",
+    "number_format": "General",
+    "data_align": {
+     "h": null,
+     "v": "center",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "P",
+    "header": "Omission Rate",
+    "number_format": "0.0%",
+    "data_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "Q",
+    "header": "Completion Rate",
+    "number_format": "0.0%",
+    "data_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "R",
+    "header": "Omission Status",
+    "number_format": "General",
+    "data_align": {
+     "h": null,
+     "v": "center",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "S",
+    "header": "Completion Status",
+    "number_format": "General",
+    "data_align": {
+     "h": null,
+     "v": "center",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": "thin",
+     "top": null,
+     "bottom": "thin"
+    }
+   },
+   {
+    "col": "T",
+    "header": "Notes",
+    "number_format": "General",
+    "data_align": {
+     "h": null,
+     "v": "top",
+     "wrap": true
+    },
+    "header_align": {
+     "h": "center",
+     "v": "center",
+     "wrap": null
+    },
+    "data_border": {
+     "left": "thin",
+     "right": null,
+     "top": "thin",
+     "bottom": "thin"
+    },
+    "header_border": {
+     "left": "thin",
+     "right": null,
+     "top": null,
+     "bottom": "thin"
+    }
+   }
+  ],
+  "col_widths_fixed": {
+   "D": 52.0,
+   "G": 13.19921875,
+   "H": 25.09765625,
+   "J": 21.19921875,
+   "K": 25.09765625,
+   "L": 35.796875,
+   "M": 13.59765625,
+   "N": 18.5,
+   "O": 19.09765625,
+   "P": 13.796875,
+   "Q": 15.59765625,
+   "R": 17.796875,
+   "S": 19.796875,
+   "T": 48.0
+  },
+  "col_widths_variable": {
+   "A": {
+    "min": 17.09765625,
+    "max": 22.0,
+    "per_sheet": {
+     "Applicable Math": 22.0,
+     "Arabic as a 1st Language": 21.5,
+     "English as a 2nd Language": 17.09765625,
+     "Life Success Skills": 17.09765625,
+     "Scientific Thinking": 17.09765625
+    }
+   },
+   "B": {
+    "min": 13.0,
+    "max": 15.0,
+    "per_sheet": {
+     "Applicable Math": 15.0,
+     "Arabic as a 1st Language": 13.0,
+     "English as a 2nd Language": 13.0,
+     "Life Success Skills": 13.0,
+     "Scientific Thinking": 13.0
+    }
+   },
+   "C": {
+    "min": 30.5,
+    "max": 32.0,
+    "per_sheet": {
+     "Applicable Math": 32.0,
+     "Arabic as a 1st Language": 32.0,
+     "English as a 2nd Language": 31.69921875,
+     "Life Success Skills": 30.5,
+     "Scientific Thinking": 31.796875
+    }
+   },
+   "E": {
+    "min": 21.19921875,
+    "max": 28.296875,
+    "per_sheet": {
+     "Applicable Math": 28.296875,
+     "Arabic as a 1st Language": 21.19921875,
+     "English as a 2nd Language": 21.19921875,
+     "Life Success Skills": 21.3984375,
+     "Scientific Thinking": 27.09765625
+    }
+   },
+   "F": {
+    "min": 19.69921875,
+    "max": 29.59765625,
+    "per_sheet": {
+     "Applicable Math": 29.3984375,
+     "Arabic as a 1st Language": 27.09765625,
+     "English as a 2nd Language": 22.296875,
+     "Life Success Skills": 19.69921875,
+     "Scientific Thinking": 29.59765625
+    }
+   },
+   "I": {
+    "min": 13.59765625,
+    "max": 14.3984375,
+    "per_sheet": {
+     "Applicable Math": 14.3984375,
+     "Arabic as a 1st Language": 13.59765625,
+     "English as a 2nd Language": 14.3984375,
+     "Life Success Skills": 14.3984375,
+     "Scientific Thinking": 14.3984375
+    }
+   }
+  },
+  "col_width_rule_for_variable": "use the MAX observed value across the five reference sheets for each variable column (never narrower), always written as an explicit width",
+  "excel_table": {
+   "name_rule": "sanitize sheet name to [A-Za-z0-9] only, truncate to 20 chars, append \"ItemTable\"",
+   "ref": "A4:T<last data row>",
+   "style_name": null,
+   "showRowStripes": true,
+   "header_row": true,
+   "totals_row": false,
+   "examples": [
+    "ApplicableMathItemTable",
+    "Arabicasa1stLanguageItemTable",
+    "Englishasa2ndLanguagItemTable",
+    "LifeSuccessSkillsItemTable",
+    "ScientificThinkingItemTable"
+   ]
+  },
+  "conditional_formatting": [
+   {
+    "range": "N5:N<last>",
+    "rules": [
+     [
+      "AND(ISNUMBER(N5),N5<=0.05)",
+      "good"
+     ],
+     [
+      "AND(ISNUMBER(N5),N5>0.05,N5<=0.15)",
+      "review"
+     ],
+     [
+      "AND(ISNUMBER(N5),N5>0.15)",
+      "flag"
+     ]
+    ]
+   },
+   {
+    "range": "P5:P<last>",
+    "rules": [
+     [
+      "P5<=0.05",
+      "good"
+     ],
+     [
+      "AND(P5>0.05,P5<=0.1)",
+      "review"
+     ],
+     [
+      "P5>0.1",
+      "flag"
+     ]
+    ]
+   },
+   {
+    "range": "Q5:Q<last>",
+    "rules": [
+     [
+      "Q5>=0.95",
+      "good"
+     ],
+     [
+      "AND(Q5>=0.9,Q5<0.95)",
+      "review"
+     ],
+     [
+      "Q5<0.9",
+      "flag"
+     ]
+    ]
+   }
+  ],
+  "cf_colors": {
+   "good": {
+    "fill": "FFE2F0D9",
+    "font": "FF006100"
+   },
+   "review": {
+    "fill": "FFFFF2CC",
+    "font": "FF9C6500"
+   },
+   "flag": {
+    "fill": "FFF4CCCC",
+    "font": "FF9C0006"
+   }
+  },
+  "status_labels": {
+   "speededness": [
+    "Good / Low pressure",
+    "Review / Moderate pressure",
+    "Flag / Possible speededness"
+   ],
+   "omission": [
+    "Good / Low omission",
+    "Review / Moderate omission",
+    "Flag / High omission"
+   ],
+   "completion": [
+    "Good / High completion",
+    "Review / Moderate completion",
+    "Flag / Low completion"
+   ]
+  },
+  "test_section_labels": [
+   "Early / Middle",
+   "Late (final 25%)"
+  ],
+  "notes_templates": {
+   "early_middle": {
+    "Good": "Low relative pressure signal. As this item is outside the final 25%, interpret the index as a comparative omission/performance diagnostic rather than direct evidence of test speededness.",
+    "Review": "Moderate relative pressure signal. As this item is outside the final 25%, review item difficulty, wording, omission, and response time; the result alone is not evidence of time pressure.",
+    "Flag": "High relative pressure signal. As this item is outside the final 25%, investigate item difficulty, wording, omission, and response time; do not interpret the result alone as test speededness."
+   },
+   "late": {
+    "Good": "Low item-level time-pressure signal relative to the assessment's early-item baseline; interpret together with item difficulty, wording, and response time.",
+    "Review": "Moderate item-level time-pressure signal; review together with item difficulty, wording, omission, and response-time evidence.",
+    "Flag": "Possible item-level time-pressure signal; later position coincides with a marked accuracy decline and/or higher omission relative to the assessment's early-item baseline."
+   }
+  }
+ }
+}

@@ -6,6 +6,8 @@
  * Supabase type generator and re-apply the `Database` wrapper).
  */
 
+import type { SittingKey } from "@/lib/data/periods";
+
 // --- Enums (mirror the Postgres enums) --------------------------------------
 export type CycleStatus =
   | "draft"
@@ -28,8 +30,10 @@ export type SchemeMethod = "judgemental" | "fixed_pct";
 // 0003
 export type IncidentSource = "incident_log" | "complaint";
 export type AlterationApply = "student" | "subject" | "none";
-// 0005 — a year contains two sittings; each sitting is a full pipeline run.
-export type SittingPeriod = "february" | "may";
+// 0005 — a year contains sittings, one per period; each sitting is a full pipeline run.
+// The values are the period registry's keys (lib/data/periods.ts); the DB enum
+// `sitting_period` must hold exactly those (tests/periods.registry.test.ts).
+export type SittingPeriod = SittingKey;
 
 // --- Reusable JSON shapes ----------------------------------------------------
 export interface GradeBand {
@@ -68,6 +72,11 @@ export interface ExamYearRow {
    * Definer-only: set exclusively by create_exam_year / create_cycle_with_assessments.
    */
   test_centre_id: string;
+  /**
+   * 0051 — the periods this year must have a LOCKED sitting in before its Overall is
+   * final. Default {february,may}. Definer-only: set by set_year_expected_periods.
+   */
+  expected_periods: SittingPeriod[];
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -78,9 +87,11 @@ export interface ExamCycleRow {
   name: string;
   status: CycleStatus;
   region: string;
-  /** 0005 — the year this sitting belongs to (NULL only for un-migrated rows). */
+  /** 0005 — the year this sitting belongs to. NOT NULL once 0050 is applied (nullable here
+   *  so the app still reads a database that predates it). */
   year_id: string | null;
-  /** 0005 — which sitting of the year this pipeline run is. */
+  /** 0005 — which sitting of the year this pipeline run is. NOT NULL once 0050 is applied;
+   *  unique with `year_id` (one sitting per period per year). */
   sitting: SittingPeriod | null;
   /** 0031 — the exam date the human picked when creating the sitting (ISO date,
    *  NULL when not set). Display/reference only — not a key. */
@@ -117,6 +128,9 @@ export interface ItemRow {
   assessment_id: string;
   qm_question_id: string;
   wording: string | null;
+  /** 0048 — QM `QuestionDescription` (an internal code/label), or null. Optional
+   *  on the TS side so rows typed before 0048 stay valid; NULL until re-ingest. */
+  description?: string | null;
   major_element: string | null;
   sub_element: string | null;
   demand_level: DemandLevel | null;
@@ -190,6 +204,15 @@ export interface ResponseRow {
   item_id: string;
   assessment_id: string | null;
   answer_given: string | null;
+  /** 0046 — raw QM `AnswerGivenChoiceNumber`, blank normalised to NULL upstream.
+   *  The correct field for "was this item answered?" (`answer_given` carries the
+   *  sentinel "<Not defined>" for an unanswered item and stays non-null). */
+  answer_given_choice_number: string | null;
+  /** 0047 — raw QM `QuestionPresentedNumber` for this participant's sitting of
+   *  this question. VARIES per participant even for the same question (confirmed
+   *  against the 700435 fixture) — a per-response value, never a per-question
+   *  constant. The authoritative "presentation order" for Assessment Health. */
+  question_presented_number: number | null;
   answer_score: number;
   response_time: number | null;
   result_status: string | null;
@@ -613,7 +636,9 @@ export interface Database {
     };
     Views: Record<string, never>;
     Functions: {
-      // 0001
+      // 0001 — RETIRED by 0050 (execute revoked: it creates a cycle with no year or period).
+      // Kept in the type map only so the generated shape still matches the function that
+      // exists in the database; nothing in the app calls it.
       create_cycle: { Args: { p_name: string; p_region?: string }; Returns: ExamCycleRow };
       // 0004 (extended in 0005 with year_id / sitting; in 0010 with test_centre_id;
       // in 0031 with sitting_date)
@@ -652,6 +677,8 @@ export interface Database {
         Args: { p_year_id: string; p_test_centre_id: string };
         Returns: ExamYearRow;
       };
+      // 0051 — which periods a year expects (drives "ready").
+      set_year_expected_periods: { Args: { p_year_id: string; p_periods: SittingPeriod[] }; Returns: ExamYearRow };
       set_cycle_status: { Args: { p_cycle: string; p_status: CycleStatus }; Returns: ExamCycleRow };
       set_assessment_status: { Args: { p_assessment: string; p_status: AssessmentStatus }; Returns: undefined };
       decide_item_exclusion: { Args: { p_item: string; p_exclude: boolean; p_reason: string | null; p_notes?: string | null }; Returns: undefined };

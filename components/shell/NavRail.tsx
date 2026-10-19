@@ -2,9 +2,10 @@
 
 /**
  * Left icon nav rail (ported from design/hf.jsx HRail). Light cool-neutral rail;
- * the magenta accent appears only on the brand mark and the active item. The
+ * the magenta accent appears only on the Alsama mark and the active item. The
  * current-user avatar at the foot reflects the mocked Lead user.
  */
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { H } from "@/lib/ui/tokens";
@@ -54,17 +55,15 @@ export function NavRail({ active }: { active?: "Cycles" | "Analytics" | "Setting
           width: 34,
           height: 34,
           borderRadius: 10,
-          background: H.pink,
-          color: "#fff",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
           marginBottom: 14,
-          boxShadow: "0 1px 4px rgba(193,44,104,.35)",
           textDecoration: "none",
         }}
       >
-        <span style={{ fontFamily: "var(--font-script)", fontSize: 22, lineHeight: 1, marginTop: 4 }}>A</span>
+        {/* compact "A" mark cropped from the Alsama logo (the full wordmark is too small at the rail's width) */}
+        <Image src="/images/alsama-mark.png" width={128} height={128} alt="Alsama logo" priority style={{ width: 34, height: 34, display: "block" }} />
       </Link>
       {NAV.map((it) => {
         const on = it.k === activeKey;

@@ -47,10 +47,22 @@ When future migrations are added, run them in ascending filename order
 Use Supabase RPC, e.g.:
 
 ```ts
-const { data, error } = await supabase.rpc("create_cycle", {
+// A sitting belongs to an exam year and has a period (february | may); both are
+// explicit. Create the year first (idempotent), then the sitting in it.
+const { data: year } = await supabase.rpc("create_exam_year", {
+  p_name: "2026",
+  p_region: "eu-west",
+  p_test_centre_id: centreId,
+});
+const { data: cycleId, error } = await supabase.rpc("create_cycle_with_assessments", {
   p_name: "May 2026",
   p_region: "eu-west",
+  p_year_id: year.id,
+  p_sitting: "may",
+  p_sitting_date: "2026-05-14",
+  p_assessments: [{ name: "Applicable Maths" }],
 });
+// (The original year-less `create_cycle(name, region)` is retired by migration 0050.)
 
 await supabase.rpc("decide_item_exclusion", {
   p_item: itemId,

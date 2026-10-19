@@ -77,7 +77,7 @@ own role check):
 
 | Function | Purpose |
 | --- | --- |
-| `create_cycle` | Create a cycle and make the creator its `lead_admin`. |
+| `create_cycle_with_assessments` | Create a sitting (an `exam_cycles` row) with its assessments, under an exam year and period, and make the creator its `lead_admin`. (The original year-less `create_cycle` was retired by migration 0050.) |
 | `set_cycle_status` / `set_assessment_status` | Move status enums (lead only). |
 | `decide_item_exclusion` | Record human gate 1 + flip `items.status` + audit. |
 | `write_item_stats` | Engine writes `item_stats`, tagged with `engine_version`. |
@@ -364,27 +364,61 @@ memory. The live implementation, **`SupabaseDataProvider`**
 (`supabase` → live; anything else → in-memory). **No screen or component
 changes** — only the provider.
 
-#### SupabaseDataProvider — hydrate-replay-delegate
+#### SupabaseDataProvider — light list + lazy per-sitting providers
 
-The `DataProvider` is **synchronous**; Supabase is async. So the provider:
+The `DataProvider` is **synchronous**; Supabase is async. Every sitting
+(`exam_cycles` row) is a first-class citizen — there is no "active" or "newest"
+sitting. (Design note: `docs/multi-sitting-provider.md`.) The provider holds:
 
-1. **Hydrates** a `Seed` from the database (`lib/data/supabase-hydrate.ts`),
-   using the real row **UUIDs as the Seed ids** so write RPCs can pass ids
-   straight through. Item statistics come from `item_stats`; diagnostics are
-   recomputed from `responses` via `lib/diagnostics`.
-2. Constructs an inner `InMemoryDataProvider` from that seed (the provider now
-   accepts an injected seed + user) and **replays** the stored decisions
-   (exclusions, boundaries, essays, incident triage, distinction, lock, config
-   blobs) through that provider's own mutators — reaching a faithful, fully
-   computed mirror. **Reads delegate** to it, so every read-model works unchanged.
-3. **Writes** apply optimistically to the inner provider (instant UI) **and** call
-   the `SECURITY DEFINER` RPCs over the RLS-scoped client — the only sanctioned
-   path for status/decision/computed columns. The database enforces authorization
-   (RLS + each function's role check), so an unauthorized write is rejected
-   server-side even though the optimistic local copy updated.
+1. A **directory** `InMemoryDataProvider` — the shared **workspace state**
+   (grading config, quality thresholds, roles + action grid, element labels,
+   incident config, centres, members, audit, signed-in user:
+   `lib/data/workspace-state.ts`) plus the **light list of every sitting**: id,
+   name, year, stored period, date, status, lock and real participant /
+   assessment counts. It answers the Years pages and every workspace-level call
+   and hosts no sitting's data.
+2. **One `InMemoryDataProvider` per opened sitting**, built over the *same*
+   `WorkspaceState` (shared by reference, never copied) and **replayed** with that
+   sitting's stored decisions as database truth (ungated, unaudited — a read-only
+   viewer sees the same grades as an admin). Every cycle-scoped call is **routed
+   by `cycleId`** to that sitting's provider, so reading or editing sitting A never
+   touches B and opening B never changes A.
 
-Hydration is async; until it finishes the provider serves an empty cycle, then
-bumps its version (`useSyncExternalStore`) so screens re-render.
+Hydration (`lib/data/supabase-hydrate.ts`) is in two parts, using the real row
+**UUIDs as the Seed ids** so write RPCs can pass ids straight through:
+
+- `loadWorkspace` — the **light load** at sign-in: workspace config plus the list
+  of all cycles, with counts from column-limited selects. It reads **no**
+  per-cycle fact table (`responses`, `items`, `item_stats`, `sittings`, grades,
+  scores).
+- `hydrateCycle(cycleId)` — the **full load of one sitting**, called lazily when
+  it is opened (the `app/cycles/[cycleId]` layout calls `ensureCycleLoaded`; the
+  Overall calls `ensureYearLoaded` for the year's *locked* sittings). Concurrent
+  callers share one load; a reload is built off to the side and swapped in, so a
+  failed refresh keeps the old data. Item statistics come from `item_stats`;
+  diagnostics are recomputed from `responses` via `lib/diagnostics`.
+
+**Writes** apply optimistically to the sitting's provider (instant UI) **and** call
+the `SECURITY DEFINER` RPCs over the RLS-scoped client — the only sanctioned path
+for status/decision/computed columns. The database enforces authorization (RLS +
+each function's role check), so an unauthorized write is rejected server-side even
+though the optimistic local copy updated. A write refreshes **only what it
+affects**: create → the light list (the new sitting is not opened; the one being
+viewed is untouched); ingest / clear → that sitting; delete → drops its slot;
+roles / centres → the workspace. The heavy Overall-**analytics** projection loads
+on first use of `/analytics`, not at sign-in.
+
+**Lock state** has one source of truth: `exam_cycles.status = 'locked'`
+(`lock_grades` flips `grades.locked` only for rows that exist, and the app writes
+none). It is read the same way for every sitting and restored through an ungated
+setter. `lockCycle` sends the RPC only if the in-memory lock was accepted, and
+re-reads the sitting if the server refuses. Known gap: nothing **server-side** enforces
+the lock — input-changing RPCs and the ingest route do not check `status`, and an ingest
+into a locked sitting sets it back to `in_review` — so the lock is a UI/provider guard
+today (see the persisted-grades design for the proposed `assert_unlocked` guard).
+
+Hydration is async; until the light load finishes the provider serves an empty
+list, then bumps its version (`useSyncExternalStore`) so screens re-render.
 
 #### Auth (real, `@supabase/ssr`)
 
@@ -489,7 +523,13 @@ from the batch-1 and batch-2 design (`design/hf*.jsx`).
   cycle's aggregates are REAL** (computed from the engine — participants, cohort
   mean/median/σ, items excluded, mean item quality, award distribution,
   per-assessment means); **prior cycles are clearly-labelled MOCK** (a "MOCK
-  PRIORS" banner + tags), since there's no real cross-cycle history.
+  PRIORS" banner + tags), since there's no real cross-cycle history. (This is the
+  in-memory *demo*. The live provider's `/analytics` reads the persisted
+  multi-cycle projection — loaded on first use, not at sign-in — and is
+  otherwise unchanged. It cannot see real sittings yet because the app never writes
+  `grades` rows; the design for persisting a snapshot at lock — and filtering
+  `/analytics` on locked sittings — is in `docs/multi-sitting-provider.md`, Phase 2 §4
+  (design only, not implemented).)
 - **Configuration** (`getConfig` / `getScoringConfig`) — full CRUD, Lead/Admin
   only, with downstream warnings (see "Settings CRUD" below): the item-quality
   thresholds are **editable** (`QualityThresholdsEditor` → `setQualityThresholds`)
@@ -675,45 +715,86 @@ The cohort-level half of the D3 rule (constraining the Outstanding cut so ≥½ 
 is implied) and the suggested-cut-score backsolver are **Wave 3b**, out of scope
 here.
 
-### Overall rollup — best-of-two across the year's two sittings (`lib/data/overall.ts`)
+### Overall rollup — best-of across the year's sittings (`lib/data/overall.ts`)
 
-A year holds two sittings (February + May); each is a full, independently
-signed-off pipeline run. **Overall** is the derived best-of-two view used to
-issue certificates. `rollupOverall` is **comparison / aggregation only** — it
-consumes each sitting's `GradesModel` and never touches scoring, cut scores, or
+A year holds a sitting per period (today February + May, defined once in the **period
+registry**, `lib/data/periods.ts`); each is a full, independently signed-off pipeline run. **Overall** is the derived best-of view
+used to issue certificates. `rollupOverall` is **comparison / aggregation only** —
+it consumes each sitting's `GradesModel` and never touches scoring, cut scores, or
 the safeguard:
 
-1. For every **student × subject**, it takes the **higher performance level** of
-   the two sittings, by level **rank** (best → lowest), *not* raw score. A subject
-   present in only one sitting uses that sitting; students are matched across
-   sittings by **Student ID**. Each `OverallGradeCell` records its `source`
-   (`february` / `may`) and both raw per-sitting levels for provenance.
+1. For every **student × subject**, it takes the **best performance level** across
+   the sittings, by level **rank** (best → lowest), *not* raw score. **Ties go to
+   the latest sitting.** A subject present in only one sitting uses that sitting;
+   students are matched across sittings by **Student ID** (`qm_participant_id`,
+   the email). Each `OverallGradeCell` records its `source` (the sitting's period) and a
+   `levels` list — every sitting's own level, oldest → newest — for provenance. The
+   rollup takes **any number of sittings** (one per period); the registry's order, not
+   the order they are passed in or created, decides ties.
 2. The **overall award** is derived from the rolled-up per-subject levels via the
    existing `deriveAward` rule (the award rule is **reused, not reinvented**). The
    per-sitting **D3 safeguard is NOT re-run** at the Overall level — each
    sitting's award is already its own signed-off, safeguard-checked result — so
-   `deriveAward` is called with `d3Pass: true` (no cap recomputed on the
-   rolled-up levels). This is the value of best-of-two: a student who aced
-   different subjects in different sittings can earn a higher *overall* award than
-   either sitting alone.
+   `deriveAward` is called with `d3Pass: true`. This is the value of best-of: a
+   student who aced different subjects in different sittings can earn a higher
+   *overall* award than either sitting alone.
 
-Provider: `getOverallGrades(yearId)` → `OverallGradesModel` (the Overall view,
-`/years/[yearId]/overall`, reuses the Grades table layout with a Feb/May tag per
-cell); `getOverallDocuments(yearId)` → `DocumentsModel` so **certificates issue
-from Overall, not a single sitting** (`/years/[yearId]/overall/documents`),
-gated until both sittings are locked. Tests: `tests/overall.rollup.test.ts`,
-`tests/overall.provider.test.ts`, `tests/overall-page.render.test.ts`. Parity is
-unaffected — **183/183** (aggregation over already-computed awards).
+**Only sittings whose grades are locked count.** An unlocked sitting is listed on
+the Overall page as "not counted yet — grades not locked" (`OverallGradesModel.
+sittings`) and its data is never fetched for the rollup.
 
-**Data-shape note (flagged assumption).** The retake model treats a
-student × subject *present in May* as a retake and *absent* as "February stands".
-The current build's seed inverts this: it carries **real grades only for the live
-May sitting**, and live Supabase is unreachable, so there is no real February
-sitting to compare. `getOverallGrades` therefore **synthesizes a clearly-labelled
-demo February baseline** from the May cohort (`demo: true`, shown with a banner)
-so the rollup has two sittings to exercise in the UI. The rollup logic itself is
-general and fully unit-tested against two-sitting fixtures; wiring two *real*
-sittings only needs multi-cycle hydration to feed both `getGrades` calls.
+**Real data per sitting.** Each sitting is its own cycle with its own assessment
+rows (own uuids), so `getOverallGrades(yearId)` reads each locked sitting's
+`getGrades` from the provider that holds it and re-keys the subjects to a
+canonical key (`canonicalizeSubjects`, `subjectKeyOf`) before rolling up
+(`rollupOverall({ sittings: [{ key, grades }] })`; `rollupOrdered` is the positional
+adapter), so callers never name a period. The year resolves by either id form (`y.id`
+or the real `exam_years.id`). `ready` (final / certifiable) means **every period the
+year expects has a locked sitting**: `exam_years.expected_periods` (migration 0051,
+default `{february,may}`, so existing years behave as before) via
+`setYearExpectedPeriods`; a locked sitting in a non-expected period counts but never
+blocks, and an unlocked one is listed "not counted yet" without blocking.
+
+Provider: `getOverallGrades(yearId)` → `OverallGradesModel` (`/years/[yearId]/
+overall`, reuses the Grades table layout with a source tag per cell);
+`getOverallDocuments(yearId)` → `DocumentsModel` so **certificates issue from
+Overall, not a single sitting** (`/years/[yearId]/overall/documents`). Overall-level
+records (document settings, the document-issue audit event) attach to a **real
+sitting** — `recordCycleId`, the latest counted sitting — never to the year id. Tests:
+`tests/overall.rollup.test.ts`, `tests/overall.live.test.ts` (two real locked
+sittings), `tests/overall.n-sittings.test.ts` (three, over a registry with a third
+period), `tests/year-readiness.test.ts`, `tests/overall-documents.cycle.test.ts`,
+`tests/overall.ordered.test.ts`, `tests/overall.provider.test.ts` (demo),
+`tests/demo-mode.unchanged.test.ts`,
+`tests/overall-page.render.test.ts`, `tests/overall-live-page.render.test.ts`.
+Parity is unaffected — **183/183** (aggregation over already-computed awards).
+
+**Demo vs live.** The in-memory demo (no database) keeps its legacy *provisional*
+view: only the seeded May sitting carries grades, so `demoFebruaryGrades`
+**synthesizes a clearly-labelled February baseline** (`demo: true`, shown with a
+banner) and unlocked sittings are shown provisionally. The live provider never
+fabricates a sitting and applies the locked-only rule.
+
+**Period registry (`lib/data/periods.ts`).** The single source of truth for sitting
+periods: key, label, short label, month, order, the calendar months an export dated in
+them is attributed to, and whether a year expects it by default. `SittingKey` is derived
+from it, `YearSummary`/`YearDetail` carry `sittings: SittingRef[]` in period order, and
+nothing else in app code spells a period (`tests/periods.registry.test.ts` scans for it
+and checks the registry against the `sitting_period` enum declared by the migrations).
+**Adding a period = one registry entry + one migration extending the enum**
+(`supabase/templates/add-sitting-period.template.sql`, with the `ALTER TYPE … ADD VALUE`
+transaction caveat); existing years keep expecting only their configured periods.
+
+**Still two-slot, deliberately:** the `/analytics` projection (`OACell.february/may`, the
+"Sat Feb → Sat May" sections). It compares the registry's first two periods and skips a
+sitting in any other period rather than mislabelling it; generalising it belongs with
+persisted grades (see `docs/multi-sitting-provider.md`, Phase 2 §4).
+
+**Upload check.** Before an export is ingested, `compareExportToSitting`
+(`lib/ingest/qm/sitting-match.ts`) compares its sitting tag and its result dates
+(`CanonicalModel.dateRange`, when the export has date columns) with the sitting's year and
+period; a mismatch holds the file behind a warning that must be confirmed (never a hard
+block).
 
 ### Element / sub-element results & the unofficial report
 
@@ -741,8 +822,9 @@ granularity, **clearly marked unofficial** (internal/learner diagnostic).
   are all mock (in-memory) — see "Admin, audit & analytics" above. Analytics
   priors and the data-retention/branding config are labelled `MOCK`; only the
   live cycle's analytics and the engine's quality thresholds are real.
-- **Prior cycles + cross-cycle comparisons.** There is only one real cycle. Prior
-  cycles are clearly-labelled `MOCK` rows; the "vs Jan 2026" boundary comparison
+- **Prior cycles + cross-cycle comparisons.** On live data every sitting is real
+  and usable (see "SupabaseDataProvider"); in the in-memory *demo* the prior cycles
+  are clearly-labelled `MOCK` rows. The "vs Jan 2026" boundary comparison
   is driven by a labelled fixture behind a `SHOW_CROSS_CYCLE` flag and tagged
   `MOCK` in the UI — no delta is computed against invented numbers as if real.
 - **Duplicate-resolution** is detected by the real validator; the resolution

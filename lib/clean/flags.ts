@@ -74,6 +74,18 @@ export interface CleanFlagInput {
   partialThreshold?: number;
 }
 
+/**
+ * A "real" scored MCQ item has `maxScore > 0`. A `maxScore: 0` item is a
+ * stimulus / instruction / welcome page (flagged below as STIMULUS_ITEM) —
+ * delivered alongside the real questions but never itself a question. This is
+ * the single source of truth for that distinction; other call sites (e.g. the
+ * item-analysis export) reference this instead of re-deriving their own
+ * `maxScore === 0` check.
+ */
+export function isScoredItem(item: { maxScore: number }): boolean {
+  return item.maxScore > 0;
+}
+
 const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function normEmail(email: string): string {
@@ -116,7 +128,7 @@ export function computeCleanFlags(input: CleanFlagInput): CleanFlag[] {
 
     // STIMULUS_ITEM — a maxScore-0 instruction / stimulus / welcome page. This is
     // the 41st item behind "41 total vs 40 scored"; informational, not an error.
-    const isStimulus = item.maxScore === 0;
+    const isStimulus = !isScoredItem(item);
     if (isStimulus) {
       flags.push({
         target: "column",

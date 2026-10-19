@@ -37,7 +37,7 @@ export function UpdatePasswordForm() {
 
   return (
     <EntryFrame>
-      <form onSubmit={submit} style={{ width: 380 }}>
+      <form onSubmit={submit} style={{ width: "100%", maxWidth: 380 }}>
         <div className="hf-h1" style={{ fontSize: 24 }}>Choose a new password</div>
         <div className="hf-sub" style={{ marginTop: 8, marginBottom: 22, fontSize: 13.5 }}>
           Your new password must be at least 8 characters.

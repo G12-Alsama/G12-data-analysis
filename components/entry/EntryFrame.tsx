@@ -6,35 +6,51 @@
  * No nav rail — these screens are pre-auth.
  */
 import type { ReactNode } from "react";
+import Image from "next/image";
 import { H } from "@/lib/ui/tokens";
 
-export function EntryFrame({ children }: { children: ReactNode }) {
+/** App name shown in the brand panel of every entry screen: one definition, rendered as a two-line heading. */
+const APP_NAME_LINES = ["G12++ Candidate", "Performance App"] as const;
+/** Alsama logo: trimmed transparent PNG, drawn directly on the brand panel (intrinsic size from the file). */
+const LOGO = { src: "/images/alsama-logo.png", width: 1200, height: 459 };
+
+export function EntryFrame({ children, brand }: { children: ReactNode; brand?: "signin" }) {
+  // Layout is fluid and lives in the `.entry*` rules in globals.css: two columns on
+  // desktop, a compact brand header stacked above the content on narrow screens.
+  const signin = brand === "signin";
   return (
-    <div style={{ display: "flex", alignItems: "stretch", height: "100vh", background: H.canvas, fontFamily: "var(--font-ui)", color: H.ink }}>
+    <div className="entry" style={{ background: H.canvas, fontFamily: "var(--font-ui)", color: H.ink }}>
       {/* brand panel */}
-      <div style={{ width: 460, flex: "0 0 auto", background: H.slate, color: "#fff", padding: "52px 48px", position: "relative", overflow: "hidden", display: "flex", flexDirection: "column" }}>
+      <div className="entry-panel" style={{ background: H.slate, color: "#fff", position: "relative", overflow: "hidden", display: "flex", flexDirection: "column" }}>
         <div style={{ position: "absolute", width: 360, height: 360, borderRadius: 999, background: H.pink, opacity: 0.16, right: -150, top: -120 }} />
         <div style={{ position: "absolute", width: 240, height: 240, borderRadius: 999, border: `2px solid ${H.pink}`, opacity: 0.18, left: -90, bottom: 40 }} />
-        <div style={{ position: "relative" }}>
-          <div style={{ width: 46, height: 46, borderRadius: 13, background: H.pink, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 2px 10px rgba(193,44,104,.5)" }}>
-            <span style={{ fontFamily: "var(--font-script)", fontSize: 30, marginTop: 6 }}>A</span>
+        <div className="entry-mark" style={{ position: "relative" }}>
+          {/* `signin` sits a step lower and slightly larger (see .entry-logo--signin) */}
+          <div className={signin ? "entry-logo entry-logo--signin" : "entry-logo"}>
+            <Image
+              src={LOGO.src}
+              width={LOGO.width}
+              height={LOGO.height}
+              alt="Alsama logo"
+              priority
+              style={{ width: "100%", height: "auto", display: "block" }}
+            />
           </div>
-          <div style={{ fontFamily: "var(--font-script)", fontSize: 40, marginTop: 26, lineHeight: 1 }}>Alsama</div>
         </div>
-        <div style={{ flex: 1 }} />
-        <div style={{ position: "relative" }}>
-          <div style={{ fontSize: 26, fontWeight: 700, letterSpacing: "-.5px", lineHeight: 1.15 }}>
-            G12++ Exam<br />Processing Suite
+        <div className="entry-spacer" style={{ flex: 1 }} />
+        <div className="entry-copy" style={{ position: "relative" }}>
+          <div className="entry-title" style={{ fontWeight: 700, letterSpacing: "-.5px", lineHeight: 1.15 }}>
+            {APP_NAME_LINES[0]}<br />{APP_NAME_LINES[1]}
           </div>
-          <div style={{ fontSize: 14, color: "rgba(255,255,255,.72)", marginTop: 14, maxWidth: 320, lineHeight: 1.5 }}>
+          <div className="entry-desc" style={{ fontSize: 14, color: "rgba(255,255,255,.72)", marginTop: 14, maxWidth: 320, lineHeight: 1.5 }}>
             Review item quality, set grade boundaries, and publish auditable results — one exam sitting at a time.
           </div>
         </div>
-        <div style={{ flex: 1 }} />
-        <div style={{ position: "relative", fontSize: 11.5, color: "rgba(255,255,255,.5)" }}>Alsama Project · internal assessment tool</div>
+        <div className="entry-spacer" style={{ flex: 1 }} />
+        <div className="entry-foot" style={{ position: "relative", fontSize: 11.5, color: "rgba(255,255,255,.5)" }}>Alsama Project · internal assessment tool</div>
       </div>
       {/* content */}
-      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 40 }}>{children}</div>
+      <div className="entry-main">{children}</div>
     </div>
   );
 }

@@ -197,6 +197,32 @@ describe("Clean-stage removals", () => {
     expect(raw.items - raw.scoredItems).toBeGreaterThan(0);
   });
 
+  it("getReview excludes maxScore-0 items from both the item rows and kpis.items", () => {
+    const { p, cycleId, assessmentId } = setup();
+    const raw = p.getRawData(cycleId, assessmentId)!;
+    const review = p.getReview(cycleId, assessmentId)!;
+    // Same Applicable Math sample as the getRawData test above: 41 items total,
+    // 40 scored (one maxScore-0 stimulus/instruction item) — Review must mirror
+    // getRawData/getNaiveScores' scored-items convention, not the raw item list.
+    expect(raw.items - raw.scoredItems).toBeGreaterThan(0);
+    expect(review.items.length).toBe(raw.scoredItems);
+    expect(review.kpis.items).toBe(raw.scoredItems);
+    expect(review.items.length).toBe(review.kpis.items);
+
+    const zeroScoreIds = new Set(raw.columns.filter((c) => c.maxScore < 1).map((c) => c.id));
+    expect(zeroScoreIds.size).toBeGreaterThan(0);
+    for (const it of review.items) expect(zeroScoreIds.has(it.id)).toBe(false);
+
+    // byElement/byDemand/medianDifficulty are still computed over the retained
+    // (non-excluded, already-scored-only) items — unchanged behavior, just now
+    // starting from the smaller, scored-only base list.
+    const retainedCount = review.items.filter((it) => !it.excluded).length;
+    const elementTotal = review.byElement.reduce((n, e) => n + e.v, 0);
+    const demandTotal = review.byDemand.reduce((n, d) => n + d.v, 0);
+    expect(elementTotal).toBeLessThanOrEqual(retainedCount);
+    expect(demandTotal).toBeLessThanOrEqual(retainedCount);
+  });
+
   it("does not change scores when nothing is removed (parity-safe default)", () => {
     const { p, cycleId, assessmentId } = setup();
     const a = p.getNaiveScores(cycleId, assessmentId)!;

@@ -18,6 +18,7 @@ import Docxtemplater from "docxtemplater";
 import JSZip from "jszip";
 import type { DocKind, GenerateRequest, GenerateResult, PerStudentStatus } from "./types";
 import type { DocSettings, StudentSummary } from "@/lib/data/types";
+import { isSittingKey, periodShortLabel } from "@/lib/data/periods";
 
 export const DOCGEN_VERSION = "docgen-pptx-zip-1.0.0";
 
@@ -70,7 +71,7 @@ function tokensFor(s: StudentSummary, settings: DocSettings, draft: boolean): Re
     // Feb/May provenance for the best-of-two level (Overall performance reports).
     // Empty for a per-sitting document or a subject with no result; templates that
     // don't carry the token simply ignore it.
-    data[`${sub.slot}_SOURCE`] = sub.source === "february" ? "Feb" : sub.source === "may" ? "May" : "";
+    data[`${sub.slot}_SOURCE`] = sub.source && isSittingKey(sub.source) ? periodShortLabel(sub.source) : "";
   }
   // Element/sub-element tokens for the unofficial diagnostic report (populated
   // only when the locked-grades read-model carries the breakdown). Each subject

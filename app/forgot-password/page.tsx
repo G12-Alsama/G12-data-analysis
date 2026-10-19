@@ -21,7 +21,7 @@ function ForgotPasswordForm() {
   if (done) {
     return (
       <EntryFrame>
-        <div style={{ width: 380 }}>
+        <div style={{ width: "100%", maxWidth: 380 }}>
           <div className="hf-h1" style={{ fontSize: 24 }}>Check your email</div>
           <div
             className="hf-sub"
@@ -45,7 +45,7 @@ function ForgotPasswordForm() {
 
   return (
     <EntryFrame>
-      <form onSubmit={submit} style={{ width: 380 }}>
+      <form onSubmit={submit} style={{ width: "100%", maxWidth: 380 }}>
         <div className="hf-h1" style={{ fontSize: 24 }}>Forgot your password?</div>
         <div className="hf-sub" style={{ marginTop: 8, marginBottom: 22, fontSize: 13.5 }}>
           Enter your account email and we'll send a reset link.
