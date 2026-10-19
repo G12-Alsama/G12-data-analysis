@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Sofia_Sans, IBM_Plex_Mono, Yellowtail, Barlow } from "next/font/google";
+import { Sofia_Sans, IBM_Plex_Mono, Barlow } from "next/font/google";
 import "./globals.css";
 import { DataProviderRoot } from "@/lib/data/context";
 
@@ -15,12 +15,6 @@ const plexMono = IBM_Plex_Mono({
   variable: "--font-plex-mono",
   display: "swap",
 });
-const yellowtail = Yellowtail({
-  subsets: ["latin"],
-  weight: "400",
-  variable: "--font-yellowtail",
-  display: "swap",
-});
 // Barlow is open-licensed and is the report template's body font. Loading it
 // in-browser keeps the document preview's text-overflow checks accurate.
 const barlow = Barlow({
@@ -32,7 +26,7 @@ const barlow = Barlow({
 });
 
 export const metadata: Metadata = {
-  title: "G12++ Exam Processing Suite",
+  title: "G12++ Candidate Performance App",
   description:
     "Process MCQ exam results: ingest, review item quality, set grade boundaries, assign and sign off grades.",
 };
@@ -41,7 +35,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html
       lang="en"
-      className={`${sofia.variable} ${plexMono.variable} ${yellowtail.variable} ${barlow.variable}`}
+      className={`${sofia.variable} ${plexMono.variable} ${barlow.variable}`}
     >
       <body>
         <DataProviderRoot>{children}</DataProviderRoot>
