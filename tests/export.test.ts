@@ -758,6 +758,166 @@ describe("score analysis workbook — colour, merges, sizing and AutoFilter scal
   });
 });
 
+describe("score analysis workbook — Summary sheet scores as percentages", () => {
+  const TOL = 1e-9;
+
+  type Spec = { id: string; name: string; items: number; majors: string[]; demands: string[]; correct: number[] };
+  /**
+   * Alpha: 10 items, Beta: 4, Gamma: 5 — different totals. Raw means: Alpha 6.75,
+   * Beta 3.5, Gamma 3; as a share of the total: Alpha 67.5%, Beta 87.5%, Gamma 60%.
+   * So raw points pick Alpha while percentages pick Beta.
+   */
+  const SPECS: Spec[] = [
+    { id: "A", name: "Alpha", items: 10, majors: ["M1", "M2"], demands: ["D1", "D2"], correct: [7, 7, 7, 6] },
+    { id: "B", name: "Beta", items: 4, majors: ["M1", "M3"], demands: ["D1", "D3"], correct: [4, 3, 4, 3] },
+    { id: "C", name: "Gamma", items: 5, majors: ["M2", "M3"], demands: ["D2", "D3"], correct: [3, 3, 4, 2] },
+  ];
+
+  function makeInput(specs: Spec[], maxScore = 1): ScoreAnalysisInput {
+    const participants = [0, 1, 2, 3].map((i) => ({ id: `p${i}`, label: `Participant ${i}` }));
+    const scoredResponses: ScoredItemResponse[] = [];
+    for (const sp of specs) {
+      participants.forEach((p, pi) => {
+        for (let i = 0; i < sp.items; i++) {
+          scoredResponses.push({
+            participantId: p.id,
+            assessmentId: sp.id,
+            itemId: `${sp.id}${i}`,
+            majorElement: sp.majors[i % sp.majors.length]!,
+            demandLevel: sp.demands[i % sp.demands.length]!,
+            score: i < sp.correct[pi]! ? 1 : 0,
+            maxScore,
+          });
+        }
+      });
+    }
+    return { assessments: specs.map((sp) => ({ id: sp.id, name: sp.name })), participants, scoredResponses };
+  }
+
+  const summaryOf = (input: ScoreAnalysisInput) =>
+    buildScoreAnalysisWorkbook(input).Sheets["Overall Scores Summary"] as unknown as XLSXR.WorkSheet;
+
+  /** The three tables' data rows (0-indexed), located by their banner text — never a fixed address. */
+  function tablesOf(ws: XLSXR.WorkSheet) {
+    const aoa = XLSXR.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: null, raw: true });
+    const banners = {
+      assessment: "MCQ score summary of all participants for each assessment",
+      major: "MCQ score summary of all participants for each major element",
+      demand: "MCQ score summary of all participants for each demand level",
+    };
+    const out: Record<keyof typeof banners, { rowIdx: number; row: unknown[] }[]> = { assessment: [], major: [], demand: [] };
+    (Object.keys(banners) as (keyof typeof banners)[]).forEach((k) => {
+      const bannerRow = aoa.findIndex((r) => r[0] === banners[k]);
+      expect(bannerRow).toBeGreaterThanOrEqual(0);
+      for (let r = bannerRow + 2; r < aoa.length && aoa[r]![0] != null; r++) out[k].push({ rowIdx: r, row: aoa[r]! });
+    });
+    return out;
+  }
+
+  const kpi = (ws: XLSXR.WorkSheet, label: string) => {
+    const aoa = XLSXR.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: null });
+    for (const row of aoa) {
+      const i = row.indexOf(label);
+      if (i >= 0) return row[i + 1];
+    }
+    return undefined;
+  };
+
+  it("writes Average / Lowest / Highest in all three tables as 0–1 fractions of the total, formatted 0%", () => {
+    const input = makeInput(SPECS);
+    const ws = summaryOf(input);
+    const tables = tablesOf(ws);
+
+    // Independent expectation per assessment (raw points ÷ assessment total).
+    const expected: Record<string, [number, number, number]> = {
+      Alpha: [6.75 / 10, 6 / 10, 7 / 10],
+      Beta: [3.5 / 4, 3 / 4, 4 / 4],
+      Gamma: [3 / 5, 2 / 5, 4 / 5],
+    };
+    expect(tables.assessment.map((t) => t.row[0])).toEqual(["Alpha", "Beta", "Gamma"]);
+
+    for (const key of ["assessment", "major", "demand"] as const) {
+      expect(tables[key].length).toBeGreaterThan(0);
+      for (const { rowIdx } of tables[key]) {
+        for (const c of [3, 4, 5]) {
+          const cell = ws[XLSXR.utils.encode_cell({ r: rowIdx, c })]!;
+          expect(cell.t).toBe("n");
+          expect(cell.z).toBe("0%");
+          expect(cell.v as number).toBeGreaterThanOrEqual(0);
+          expect(cell.v as number).toBeLessThanOrEqual(1);
+        }
+        // The total column itself keeps raw points and no percentage format.
+        expect(ws[XLSXR.utils.encode_cell({ r: rowIdx, c: 1 })]!.z).toBeUndefined();
+        expect(ws[XLSXR.utils.encode_cell({ r: rowIdx, c: 2 })]!.z).toBeUndefined();
+      }
+    }
+    for (const { rowIdx, row } of tables.assessment) {
+      const [avg, lo, hi] = expected[String(row[0])]!;
+      const get = (c: number) => ws[XLSXR.utils.encode_cell({ r: rowIdx, c })]!.v as number;
+      expect(Math.abs(get(3) - avg)).toBeLessThan(TOL);
+      expect(Math.abs(get(4) - lo)).toBeLessThan(TOL);
+      expect(Math.abs(get(5) - hi)).toBeLessThan(TOL);
+    }
+
+    // Major element M1 = items A0,A2,A4,A6,A8 + B0,B2 → total 7; raw mean 5.75.
+    // Demand D3 = B1,B3 + C1,C3 → total 4; raw mean 2.75.
+    const m1 = tables.major.find((t) => t.row[0] === "M1")!;
+    expect(Number(m1.row[1])).toBe(7);
+    expect(Math.abs((ws[XLSXR.utils.encode_cell({ r: m1.rowIdx, c: 3 })]!.v as number) - 5.75 / 7)).toBeLessThan(TOL);
+    const d3 = tables.demand.find((t) => t.row[0] === "D3")!;
+    expect(Number(d3.row[1])).toBe(4);
+    expect(Math.abs((ws[XLSXR.utils.encode_cell({ r: d3.rowIdx, c: 3 })]!.v as number) - 2.75 / 4)).toBeLessThan(TOL);
+  });
+
+  it('ranks the "Highest Assessment" KPI on percentages, not raw points', () => {
+    const input = makeInput(SPECS);
+    // Raw points would pick Alpha (6.75 vs 3.5 vs 3)…
+    const rawMeans = SPECS.map((sp) => ({ name: sp.name, m: sp.correct.reduce((a, b) => a + b, 0) / sp.correct.length }));
+    expect(rawMeans.sort((a, b) => b.m - a.m)[0]!.name).toBe("Alpha");
+    // …percentages pick Beta (87.5% vs 67.5% vs 60%).
+    expect(kpi(summaryOf(input), "Highest Assessment")).toBe("Beta");
+  });
+
+  it("keeps the first assessment on a percentage tie, ignoring floating-point noise", () => {
+    // 1/3 and 2/6 are equal as percentages but differ by float noise in some paths.
+    const specs: Spec[] = [
+      { id: "A", name: "First", items: 3, majors: ["M1"], demands: ["D1"], correct: [1, 1, 1, 1] },
+      { id: "B", name: "Second", items: 6, majors: ["M1"], demands: ["D1"], correct: [2, 2, 2, 2] },
+    ];
+    expect(kpi(summaryOf(makeInput(specs)), "Highest Assessment")).toBe("First");
+    expect(kpi(summaryOf(makeInput([specs[1]!, specs[0]!])), "Highest Assessment")).toBe("Second");
+  });
+
+  it("leaves score cells empty rather than dividing by a zero total", () => {
+    const ws = summaryOf(makeInput([SPECS[1]!], 0));
+    const tables = tablesOf(ws);
+    expect(tables.assessment.length).toBe(1);
+    for (const key of ["assessment", "major", "demand"] as const) {
+      for (const { rowIdx } of tables[key]) {
+        for (const c of [3, 4, 5]) {
+          const cell = ws[XLSXR.utils.encode_cell({ r: rowIdx, c })];
+          expect(cell === undefined || cell.t === "z" || cell.v === undefined).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("does not change the headers or the other Summary KPIs", () => {
+    const ws = summaryOf(makeInput(SPECS));
+    expect(kpi(ws, "Number of Assessments")).toBe(3);
+    expect(kpi(ws, "Number of Participants")).toBe(4);
+    const aoa = XLSXR.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: null });
+    expect(aoa[9]).toEqual([
+      "AssessmentName",
+      "AssessmentTotalScore",
+      "NumberOfParticipants",
+      "AverageOfParticipantScores",
+      "LowestParticipantScore",
+      "HighestParticipantScore",
+    ]);
+  });
+});
+
 describe("grades workbook — canonical layout", () => {
   const CYCLE = "may-2026";
 

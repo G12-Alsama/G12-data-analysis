@@ -82,3 +82,24 @@ with the requester before implementation):
   block asserting merge ranges, AutoFilter boundaries, column widths, and row
   heights scale correctly with row/column counts (not pinned to today's
   fixture cohort size).
+
+## Fix 2 — Summary sheet scores as percentages
+
+**Status:** Done (narrow scope).
+
+**Decision:** On `Overall Scores Summary`, the Average / Lowest / Highest
+columns of all three summary tables (assessment, major element, demand level)
+are written as an unrounded fraction of the table's total column with number
+format `0%`, and the "Highest Assessment" KPI is ranked on the percentage
+average (1e-9 tolerance, first assessment wins ties) instead of raw points,
+because totals differ between assessments. A zero or missing total leaves the
+cell empty. Headers, the total/participant columns, the other KPIs, styling,
+merges, sizing, AutoFilter and every other sheet are unchanged.
+
+**Left out on purpose (the export doesn't have them today):** the
+`HighestMajorElement` / `LowestMajorElement` columns, the participant rollup
+table, and per-assessment grouping of the major-element / demand-level tables
+(those two aggregate across all assessments). Adding them is a separate,
+larger change.
+
+**Files changed:** `lib/export/score-analysis.ts`, `tests/export.test.ts`.

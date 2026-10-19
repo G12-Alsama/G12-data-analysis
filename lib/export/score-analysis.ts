@@ -96,9 +96,24 @@ function pct(agg: Agg): number | null {
   return agg.max > 0 ? roundOrNull((agg.score / agg.max) * 100, 2) : null;
 }
 
-function mean(xs: number[]): number | null {
-  return xs.length ? roundOrNull(xs.reduce((a, b) => a + b, 0) / xs.length, 2) : null;
+/** Unrounded mean — used where a percentage is derived (rounding is display-only). */
+function rawMean(xs: number[]): number | null {
+  return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
 }
+
+/**
+ * `value` as a fraction (0–1) of `total`, left unrounded — the Summary sheet
+ * formats it `0%`. Null when the value is missing or the total is zero/missing.
+ */
+function fractionOf(value: number | null, total: number | null | undefined): number | null {
+  return value != null && total != null && total > 0 ? value / total : null;
+}
+
+/** Tolerance when comparing percentages, so floating-point noise cannot change a ranking or tie. */
+const PCT_TOLERANCE = 1e-9;
+
+/** Number format for the Summary sheet's percentage columns. */
+const PERCENT_FORMAT = "0%";
 
 // ── sheet builders ───────────────────────────────────────────────────────────
 
@@ -178,12 +193,17 @@ function buildSummarySheet(input: ScoreAnalysisInput): XLSX.WorkSheet {
   }
   const participantCount = overallByP.size;
 
-  let highestAssessment = { name: "—", mean: -Infinity };
+  const totalOfAssessment = (id: string): number =>
+    [...(assessmentMax.get(id)?.values() ?? [])].reduce((s, m) => s + m, 0);
+
+  // Ranked on the average as a percentage of the assessment total (totals differ
+  // between assessments, so raw points are not comparable). Ties keep the first.
+  let highestAssessment = { name: "—", pct: -Infinity };
   for (const a of assessments) {
     const byP = perAssessment.get(a.id);
     if (!byP || byP.size === 0) continue;
-    const m = mean([...byP.values()].map((g) => g.score)) ?? 0;
-    if (m > highestAssessment.mean) highestAssessment = { name: a.name, mean: m };
+    const p = fractionOf(rawMean([...byP.values()].map((g) => g.score)), totalOfAssessment(a.id)) ?? 0;
+    if (p > highestAssessment.pct + PCT_TOLERANCE) highestAssessment = { name: a.name, pct: p };
   }
   let highestParticipant = { id: "—", pct: -Infinity };
   const labelById = new Map(participants.map((p) => [p.id, p.label]));
@@ -207,14 +227,14 @@ function buildSummarySheet(input: ScoreAnalysisInput): XLSX.WorkSheet {
   for (const a of assessments) {
     const byP = perAssessment.get(a.id);
     const scores = byP ? [...byP.values()].map((g) => g.score) : [];
-    const total = [...(assessmentMax.get(a.id)?.values() ?? [])].reduce((s, m) => s + m, 0);
+    const total = totalOfAssessment(a.id);
     aoa[row++] = [
       a.name,
       total,
       byP?.size ?? 0,
-      mean(scores),
-      scores.length ? Math.min(...scores) : null,
-      scores.length ? Math.max(...scores) : null,
+      fractionOf(rawMean(scores), total),
+      fractionOf(scores.length ? Math.min(...scores) : null, total),
+      fractionOf(scores.length ? Math.max(...scores) : null, total),
     ];
   }
   const assessmentDataEnd = row - 1;
@@ -249,6 +269,21 @@ function buildSummarySheet(input: ScoreAnalysisInput): XLSX.WorkSheet {
   styleHeaderRow(ws, majorHeaderRow, ncols);
   styleHeaderRow(ws, demandHeaderRow, ncols);
 
+  // Average / Lowest / Highest columns (D–F) hold fractions of the total, shown as %.
+  const percentRows = [
+    [assessmentHeaderRow + 1, assessmentDataEnd],
+    [majorHeaderRow + 1, majorDataEnd],
+    [demandHeaderRow + 1, demandDataEnd],
+  ] as const;
+  for (const [first, last] of percentRows) {
+    for (let r = first; r <= last; r++) {
+      for (let c = 3; c <= 5; c++) {
+        const cell = ws[XLSX.utils.encode_cell({ r, c })];
+        if (cell && cell.t === "n") cell.z = PERCENT_FORMAT;
+      }
+    }
+  }
+
   ws["!merges"] = [
     fullWidthMerge(0, ncols),
     fullWidthMerge(2, ncols),
@@ -276,7 +311,7 @@ function buildSummarySheet(input: ScoreAnalysisInput): XLSX.WorkSheet {
   return ws;
 }
 
-/** Append a group summary block (TotalScore / participants / avg / lo / hi). */
+/** Append a group summary block (TotalScore / participants / avg / lo / hi, as fractions of TotalScore). */
 function appendGroupSummary(
   aoa: (string | number | null)[][],
   startRow: number,
@@ -308,9 +343,9 @@ function appendGroupSummary(
       k,
       total,
       g.perP.size,
-      mean(scores),
-      scores.length ? Math.min(...scores) : null,
-      scores.length ? Math.max(...scores) : null,
+      fractionOf(rawMean(scores), total),
+      fractionOf(scores.length ? Math.min(...scores) : null, total),
+      fractionOf(scores.length ? Math.max(...scores) : null, total),
     ];
   }
   return row;
