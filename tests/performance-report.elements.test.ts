@@ -62,12 +62,20 @@ describe("element / sub-element results (Part 3)", () => {
     expect(checkedSub).toBeGreaterThan(0);
   });
 
-  it("the Student Profiles export sheet includes a Sub-Elements Performance column", () => {
-    const wb = buildPerformanceReportWorkbook({ ...report, alterations: [], audit: [] });
-    const buf = XLSXR.write(wb, { type: "buffer", bookType: "xlsx" });
+  it("the Student Profiles export sheet includes a Major Elements Performance column with one bullet per major element", async () => {
+    const buf = await buildPerformanceReportWorkbook({ ...report, alterations: [], audit: [] });
     const re = XLSXR.read(buf, { type: "buffer" });
-    const flat = aoaOf(re, "Student Profiles").flat().map((v) => String(v ?? ""));
-    expect(flat).toContain("Sub-Elements Performance");
+    const aoa = aoaOf(re, "Student Profiles");
+    const flat = aoa.flat().map((v) => String(v ?? ""));
     expect(flat).toContain("Major Elements Performance");
+    // The design shows major-element granularity only (no separate sub-element
+    // column) — one "• Element: Level" bullet per major element, sub-element
+    // detail stays in the data model for other consumers.
+    const withBullets = aoa.find((row) => String(row[2] ?? "").includes("•"));
+    expect(withBullets).toBeTruthy();
+    const subject = report.subjects.find((s) => (s.majorElements.length ?? 0) > 0)!;
+    const bulletCount = (String(withBullets![2]).match(/•/g) ?? []).length;
+    expect(bulletCount).toBeGreaterThan(0);
+    expect(bulletCount).toBeLessThanOrEqual(subject.majorElements.length + 1);
   });
 });

@@ -18,7 +18,16 @@
 
 type Row = Record<string, unknown>;
 
+/** One executed read: the table and the `.eq()` filters it carried. */
+export interface QueryLogEntry {
+  table: string;
+  eq: Record<string, unknown>;
+}
+
 export interface MockClientOptions {
+  /** When set, every executed read is appended here (table + `.eq` filters) so a
+   *  test can assert WHICH tables were read, and for which cycle. */
+  log?: QueryLogEntry[];
   /** PostgREST `max-rows` cap. Omitted → unbounded (legacy behaviour). */
   maxRows?: number;
   /** Per-table index order used when a query specifies no explicit `.order()`. */
@@ -60,7 +69,9 @@ class Query implements PromiseLike<{ data: Row[] | Row | null; error: null }> {
   select(_cols?: string): this {
     return this;
   }
+  private eqs: Record<string, unknown> = {};
   eq(col: string, val: unknown): this {
+    this.eqs[col] = val;
     this.rows = this.rows.filter((r) => r[col] === val);
     return this;
   }
@@ -111,6 +122,7 @@ class Query implements PromiseLike<{ data: Row[] | Row | null; error: null }> {
     onfulfilled?: ((v: { data: Row[] | Row | null; error: null }) => TR | PromiseLike<TR>) | null,
     onrejected?: ((reason: unknown) => TE | PromiseLike<TE>) | null,
   ): Promise<TR | TE> {
+    this.opts.log?.push({ table: this.table, eq: { ...this.eqs } });
     const rows = this.resolveRows();
     const data = this.single ? rows[0] ?? null : rows;
     return Promise.resolve({ data, error: null }).then(onfulfilled, onrejected);

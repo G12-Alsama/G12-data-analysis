@@ -38,7 +38,7 @@ export default function AccessDeniedPage() {
   };
   return (
     <EntryFrame>
-      <div style={{ width: 400 }}>
+      <div style={{ width: "100%", maxWidth: 400 }}>
         <div style={{ width: 46, height: 46, borderRadius: 12, background: H.warnSoft, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 18 }}>
           <Mark kind="warn" size={24} />
         </div>
@@ -51,7 +51,7 @@ export default function AccessDeniedPage() {
           <div className="hf-card" style={{ padding: "13px 15px", marginTop: 20, display: "flex", alignItems: "center", gap: 11 }}>
             <Avatar name={email} size={36} />
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div className="hf-mono hf-sub" style={{ fontSize: 12 }}>{email}</div>
+              <div className="hf-mono hf-sub" style={{ fontSize: 12, overflowWrap: "anywhere" }}>{email}</div>
             </div>
             <Badge tone="bad">No access</Badge>
           </div>

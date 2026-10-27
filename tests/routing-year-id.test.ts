@@ -13,6 +13,7 @@ import { describe, it, expect } from "vitest";
 import seedJson from "@/lib/data/seed.generated.json";
 import { InMemoryDataProvider } from "@/lib/data/in-memory-provider";
 import type { Seed } from "@/lib/data/seed-types";
+import { slotOf } from "./helpers/year-slots";
 
 // A real exam_years.id shape (the DB-side canonical year id).
 const REAL_YEAR_UUID = "11111111-2222-3333-4444-555555555555";
@@ -84,7 +85,7 @@ describe("live data with no year row still routes on a real id (year-Unknown imp
     // id so "Open pipeline" (/cycles/<id>) resolves.
     const detail = p.getYear(y.id);
     expect(detail).not.toBeNull();
-    const opened = detail!.february.cycleId ?? detail!.may.cycleId;
+    const opened = slotOf(detail!, "february").cycleId ?? slotOf(detail!, "may").cycleId;
     expect(opened).toBe(cycleId);
     expect(p.getCycle(opened!)).not.toBeNull();
   });

@@ -14,15 +14,18 @@
  * are computed over exactly the items that counted toward their score.
  */
 
+import { XLSX, styleCell, roundOrNull } from "./sheet-utils";
 import {
-  XLSX,
-  HEADER_STYLE,
-  TITLE_STYLE,
-  META_STYLE,
-  GUIDE_STYLE,
-  styleCell,
-  roundOrNull,
-} from "./sheet-utils";
+  SA_TITLE_STYLE,
+  SA_SUBTITLE_STYLE,
+  SA_BANNER_STYLE,
+  SA_HEADER_STYLE,
+  applyAlsamaTheme,
+  fullWidthMerge,
+  computeColWidths,
+  buildRowHeights,
+  applyAutoFilter,
+} from "./score-analysis-theme";
 import type {
   AssembleScoreAnalysisArgs,
   ScoreAnalysisInput,
@@ -93,9 +96,24 @@ function pct(agg: Agg): number | null {
   return agg.max > 0 ? roundOrNull((agg.score / agg.max) * 100, 2) : null;
 }
 
-function mean(xs: number[]): number | null {
-  return xs.length ? roundOrNull(xs.reduce((a, b) => a + b, 0) / xs.length, 2) : null;
+/** Unrounded mean — used where a percentage is derived (rounding is display-only). */
+function rawMean(xs: number[]): number | null {
+  return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
 }
+
+/**
+ * `value` as a fraction (0–1) of `total`, left unrounded — the Summary sheet
+ * formats it `0%`. Null when the value is missing or the total is zero/missing.
+ */
+function fractionOf(value: number | null, total: number | null | undefined): number | null {
+  return value != null && total != null && total > 0 ? value / total : null;
+}
+
+/** Tolerance when comparing percentages, so floating-point noise cannot change a ranking or tie. */
+const PCT_TOLERANCE = 1e-9;
+
+/** Number format for the Summary sheet's percentage columns. */
+const PERCENT_FORMAT = "0%";
 
 // ── sheet builders ───────────────────────────────────────────────────────────
 
@@ -141,7 +159,7 @@ const ASSESSMENT_SUMMARY_HEADER = [
 ];
 
 function styleHeaderRow(ws: XLSX.WorkSheet, row: number, ncols: number): void {
-  for (let c = 0; c < ncols; c++) styleCell(ws, row, c, HEADER_STYLE);
+  for (let c = 0; c < ncols; c++) styleCell(ws, row, c, SA_HEADER_STYLE);
 }
 
 function buildSummarySheet(input: ScoreAnalysisInput): XLSX.WorkSheet {
@@ -175,12 +193,17 @@ function buildSummarySheet(input: ScoreAnalysisInput): XLSX.WorkSheet {
   }
   const participantCount = overallByP.size;
 
-  let highestAssessment = { name: "—", mean: -Infinity };
+  const totalOfAssessment = (id: string): number =>
+    [...(assessmentMax.get(id)?.values() ?? [])].reduce((s, m) => s + m, 0);
+
+  // Ranked on the average as a percentage of the assessment total (totals differ
+  // between assessments, so raw points are not comparable). Ties keep the first.
+  let highestAssessment = { name: "—", pct: -Infinity };
   for (const a of assessments) {
     const byP = perAssessment.get(a.id);
     if (!byP || byP.size === 0) continue;
-    const m = mean([...byP.values()].map((g) => g.score)) ?? 0;
-    if (m > highestAssessment.mean) highestAssessment = { name: a.name, mean: m };
+    const p = fractionOf(rawMean([...byP.values()].map((g) => g.score)), totalOfAssessment(a.id)) ?? 0;
+    if (p > highestAssessment.pct + PCT_TOLERANCE) highestAssessment = { name: a.name, pct: p };
   }
   let highestParticipant = { id: "—", pct: -Infinity };
   const labelById = new Map(participants.map((p) => [p.id, p.label]));
@@ -199,48 +222,96 @@ function buildSummarySheet(input: ScoreAnalysisInput): XLSX.WorkSheet {
   aoa[8] = ["MCQ score summary of all participants for each assessment"];
   aoa[9] = [...ASSESSMENT_SUMMARY_HEADER];
 
+  const assessmentHeaderRow = 9;
   let row = 10;
   for (const a of assessments) {
     const byP = perAssessment.get(a.id);
     const scores = byP ? [...byP.values()].map((g) => g.score) : [];
-    const total = [...(assessmentMax.get(a.id)?.values() ?? [])].reduce((s, m) => s + m, 0);
+    const total = totalOfAssessment(a.id);
     aoa[row++] = [
       a.name,
       total,
       byP?.size ?? 0,
-      mean(scores),
-      scores.length ? Math.min(...scores) : null,
-      scores.length ? Math.max(...scores) : null,
+      fractionOf(rawMean(scores), total),
+      fractionOf(scores.length ? Math.min(...scores) : null, total),
+      fractionOf(scores.length ? Math.max(...scores) : null, total),
     ];
   }
+  const assessmentDataEnd = row - 1;
 
   // Major-element summary block.
   row += 1;
+  const majorBannerRow = row;
   aoa[row++] = ["MCQ score summary of all participants for each major element"];
   const majorHeaderRow = row;
   aoa[row++] = ["QuestionMajorElement", "TotalScore", "NumberOfParticipants", "AverageOfParticipantScores", "LowestParticipantScore", "HighestParticipantScore"];
   row = appendGroupSummary(aoa, row, scoredResponses, (r) => r.majorElement);
+  const majorDataEnd = row - 1;
 
   // Demand-level summary block.
   row += 1;
+  const demandBannerRow = row;
   aoa[row++] = ["MCQ score summary of all participants for each demand level"];
   const demandHeaderRow = row;
   aoa[row++] = ["DemandLevel", "TotalScore", "NumberOfParticipants", "AverageOfParticipantScores", "LowestParticipantScore", "HighestParticipantScore"];
-  appendGroupSummary(aoa, row, scoredResponses, (r) => r.demandLevel);
+  row = appendGroupSummary(aoa, row, scoredResponses, (r) => r.demandLevel);
+  const demandDataEnd = row - 1;
 
   void nameById;
+  const ncols = ASSESSMENT_SUMMARY_HEADER.length;
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  styleCell(ws, 0, 0, TITLE_STYLE);
-  styleCell(ws, 2, 0, META_STYLE);
-  styleCell(ws, 8, 0, GUIDE_STYLE);
-  styleHeaderRow(ws, 9, ASSESSMENT_SUMMARY_HEADER.length);
-  styleHeaderRow(ws, majorHeaderRow, 6);
-  styleHeaderRow(ws, demandHeaderRow, 6);
-  ws["!cols"] = [{ wch: 28 }, { wch: 18 }, { wch: 18 }, { wch: 22 }, { wch: 18 }, { wch: 18 }];
+  styleCell(ws, 0, 0, SA_TITLE_STYLE);
+  styleCell(ws, 2, 0, SA_SUBTITLE_STYLE);
+  styleCell(ws, majorBannerRow, 0, SA_BANNER_STYLE);
+  styleCell(ws, demandBannerRow, 0, SA_BANNER_STYLE);
+  styleCell(ws, assessmentHeaderRow - 1, 0, SA_BANNER_STYLE); // "...for each assessment" banner
+  styleHeaderRow(ws, assessmentHeaderRow, ncols);
+  styleHeaderRow(ws, majorHeaderRow, ncols);
+  styleHeaderRow(ws, demandHeaderRow, ncols);
+
+  // Average / Lowest / Highest columns (D–F) hold fractions of the total, shown as %.
+  const percentRows = [
+    [assessmentHeaderRow + 1, assessmentDataEnd],
+    [majorHeaderRow + 1, majorDataEnd],
+    [demandHeaderRow + 1, demandDataEnd],
+  ] as const;
+  for (const [first, last] of percentRows) {
+    for (let r = first; r <= last; r++) {
+      for (let c = 3; c <= 5; c++) {
+        const cell = ws[XLSX.utils.encode_cell({ r, c })];
+        if (cell && cell.t === "n") cell.z = PERCENT_FORMAT;
+      }
+    }
+  }
+
+  ws["!merges"] = [
+    fullWidthMerge(0, ncols),
+    fullWidthMerge(2, ncols),
+    fullWidthMerge(assessmentHeaderRow - 1, ncols),
+    fullWidthMerge(majorBannerRow, ncols),
+    fullWidthMerge(demandBannerRow, ncols),
+  ];
+  ws["!rows"] = buildRowHeights({
+    0: 24,
+    [assessmentHeaderRow - 1]: 20,
+    [majorBannerRow]: 20,
+    [demandBannerRow]: 20,
+  });
+
+  // Only the Assessment Summary block gets AutoFilter — Excel supports one
+  // AutoFilter region per worksheet, and this is the sheet's primary table
+  // (see score-analysis-theme.ts for why we can't give every block a Table).
+  applyAutoFilter(ws, assessmentHeaderRow, assessmentDataEnd, ncols);
+
+  ws["!cols"] = computeColWidths(ASSESSMENT_SUMMARY_HEADER, [
+    ...aoa.slice(10, assessmentDataEnd + 1),
+    ...aoa.slice(majorHeaderRow + 1, majorDataEnd + 1),
+    ...aoa.slice(demandHeaderRow + 1, demandDataEnd + 1),
+  ] as (string | number | null)[][]);
   return ws;
 }
 
-/** Append a group summary block (TotalScore / participants / avg / lo / hi). */
+/** Append a group summary block (TotalScore / participants / avg / lo / hi, as fractions of TotalScore). */
 function appendGroupSummary(
   aoa: (string | number | null)[][],
   startRow: number,
@@ -272,9 +343,9 @@ function appendGroupSummary(
       k,
       total,
       g.perP.size,
-      mean(scores),
-      scores.length ? Math.min(...scores) : null,
-      scores.length ? Math.max(...scores) : null,
+      fractionOf(rawMean(scores), total),
+      fractionOf(scores.length ? Math.min(...scores) : null, total),
+      fractionOf(scores.length ? Math.max(...scores) : null, total),
     ];
   }
   return row;
@@ -332,12 +403,18 @@ function buildBreakdownSheet(input: ScoreAnalysisInput, spec: BreakdownSpec): XL
     aoa[r++] = base;
   }
 
+  const ncols = spec.header.length;
+  const lastDataRow = r - 1;
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  styleCell(ws, 0, 0, TITLE_STYLE);
-  styleCell(ws, 2, 0, META_STYLE);
-  styleCell(ws, 3, 0, GUIDE_STYLE);
-  styleHeaderRow(ws, 5, spec.header.length);
-  ws["!cols"] = spec.header.map((h) => ({ wch: h.length > 18 ? 26 : 18 }));
+  styleCell(ws, 0, 0, SA_TITLE_STYLE);
+  styleCell(ws, 2, 0, SA_SUBTITLE_STYLE);
+  styleCell(ws, 3, 0, SA_SUBTITLE_STYLE);
+  styleHeaderRow(ws, 5, ncols);
+
+  ws["!merges"] = [fullWidthMerge(0, ncols), fullWidthMerge(2, ncols), fullWidthMerge(3, ncols)];
+  ws["!rows"] = buildRowHeights({ 0: 24 });
+  applyAutoFilter(ws, 5, lastDataRow, ncols);
+  ws["!cols"] = computeColWidths(spec.header, aoa.slice(6, lastDataRow + 1) as (string | number | null)[][]);
   return ws;
 }
 
@@ -365,22 +442,29 @@ function buildAnalysisSheet(input: ScoreAnalysisInput): XLSX.WorkSheet {
       s?.participants.size ?? 0,
     ];
   }
+  const ncols = ANALYSIS_HEADER.length;
+  const lastDataRow = row - 1;
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  styleCell(ws, 0, 0, TITLE_STYLE);
-  styleHeaderRow(ws, 2, ANALYSIS_HEADER.length);
-  ws["!cols"] = [{ wch: 28 }, { wch: 24 }, { wch: 22 }, { wch: 24 }];
+  styleCell(ws, 0, 0, SA_TITLE_STYLE);
+  styleHeaderRow(ws, 2, ncols);
+
+  ws["!merges"] = [fullWidthMerge(0, ncols)];
+  ws["!rows"] = buildRowHeights({ 0: 24 });
+  applyAutoFilter(ws, 2, lastDataRow, ncols);
+  ws["!cols"] = computeColWidths(ANALYSIS_HEADER, aoa.slice(3, lastDataRow + 1) as (string | number | null)[][]);
   return ws;
 }
 
 export function buildScoreAnalysisWorkbook(input: ScoreAnalysisInput): XLSX.WorkBook {
   const wb = XLSX.utils.book_new();
+  applyAlsamaTheme(wb);
   XLSX.utils.book_append_sheet(wb, buildSummarySheet(input), SCORE_ANALYSIS_SHEETS[0]);
   XLSX.utils.book_append_sheet(
     wb,
     buildBreakdownSheet(input, {
       title: "MCQ Overall Scores - Assessment Level",
       description: "This sheet contains the MCQ overall score for all students per assessments.",
-      note: "Note: Use the slicers to filter by students or assessments",
+      note: "Note: use the column filter dropdowns (AutoFilter) to filter by students or assessments.",
       header: BY_ASSESSMENT_HEADER,
       keyOf: () => "all",
     }),
@@ -391,7 +475,7 @@ export function buildScoreAnalysisWorkbook(input: ScoreAnalysisInput): XLSX.Work
     buildBreakdownSheet(input, {
       title: "MCQ Overall Scores - Major Element Level",
       description: "This sheet contains the MCQ overall score for all students per major element.",
-      note: "Note: Use the slicers to filter by students, assessments or major elements.",
+      note: "Note: use the column filter dropdowns (AutoFilter) to filter by students, assessments or major elements.",
       header: BY_MAJOR_HEADER,
       keyOf: (r) => r.majorElement,
     }),
@@ -402,7 +486,7 @@ export function buildScoreAnalysisWorkbook(input: ScoreAnalysisInput): XLSX.Work
     buildBreakdownSheet(input, {
       title: "MCQ Overall Scores - Demand Level",
       description: "This sheet contains the MCQ overall score for all students per demand level.",
-      note: "Note: Use the slicers to filter by students, assessments or demand level.",
+      note: "Note: use the column filter dropdowns (AutoFilter) to filter by students, assessments or demand level.",
       header: BY_DEMAND_HEADER,
       keyOf: (r) => r.demandLevel,
     }),
