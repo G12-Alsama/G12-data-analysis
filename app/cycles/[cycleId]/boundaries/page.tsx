@@ -25,7 +25,8 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useProvider, useProviderData } from "@/lib/data/context";
-import type { BoundaryModel } from "@/lib/data/types";
+import type { BoundaryModel, BoundarySaveState } from "@/lib/data/types";
+import { needsAutoSuggestion } from "@/lib/data/boundary-suggest";
 import { H } from "@/lib/ui/tokens";
 import { AWARD_SHORT } from "@/lib/data/grading";
 import { CycleShell, AlertStack } from "@/components/shell/CycleShell";
@@ -54,10 +55,21 @@ export default function BoundariesPage({ params }: { params: { cycleId: string }
   // the user can then drag/type to change any cut, re-suggest, or reset to the
   // suggestion. No backsolve/guard-rail change — it just adopts the existing
   // suggestion as the editable starting point.
-  const needsSuggestion = !!model && !model.locked && model.n > 0 && model.suggestedCuts == null;
+  //
+  // GATED on `schemeStored`, never on the in-memory `suggestedCuts` snapshot alone: that
+  // snapshot is not persisted, so it is null on every reload, and keying on it made this
+  // effect backsolve over (and re-save) cuts a person had already confirmed. `auto` makes
+  // the seed in-memory only — no save, no audit row; only an explicit edit or the
+  // Suggest / Re-suggest buttons (which omit `auto`) are persisted and audited.
+  const needsSuggestion = needsAutoSuggestion(model);
   useEffect(() => {
-    if (needsSuggestion) provider.setBoundary(cycleId, scope, { suggest: true });
+    if (needsSuggestion) provider.setBoundary(cycleId, scope, { suggest: true, auto: true });
   }, [needsSuggestion, provider, cycleId, scope]);
+
+  // Save state of the latest cut-score write for this scope, shown beside the input
+  // that was last edited (`lastEdit`: "c<i>" = cut row, "t<i>" = target row).
+  const saveState = useProviderData((p) => p.getBoundarySaveState(cycleId, scope), [cycleId, scope]);
+  const [lastEdit, setLastEdit] = useState<string | null>(null);
 
   if (!model) {
     return (
@@ -72,19 +84,36 @@ export default function BoundariesPage({ params }: { params: { cycleId: string }
   // scaffolding (empty target inputs, guard-rail cards) as the main content.
   const isEmpty = model.n === 0;
 
-  const setCut = (index: number, v: number) =>
+  const setCut = (index: number, v: number) => {
+    setLastEdit(`c${index}`);
     provider.setBoundary(cycleId, scope, { cutIndex: index, cutValue: v });
+  };
   // "Set distribution" drag: the dragged score position re-targets the band's
   // share; the existing Wave 3b backsolver re-solves and the handle settles at
   // the nearest achievable cut. Same value the table's % column edits.
-  const dragTarget = (index: number, v: number) =>
+  const dragTarget = (index: number, v: number) => {
+    setLastEdit(`t${index}`);
     provider.setBoundary(cycleId, scope, { dragTargetIndex: index, dragScoreValue: v });
-  const setMode = (mode: "cuts" | "pct") => provider.setBoundary(cycleId, scope, { mode });
-  const setTarget = (index: number, v: number) =>
+  };
+  const setMode = (mode: "cuts" | "pct") => {
+    setLastEdit(null);
+    provider.setBoundary(cycleId, scope, { mode });
+  };
+  const setTarget = (index: number, v: number) => {
+    setLastEdit(`t${index}`);
     provider.setBoundary(cycleId, scope, { targetIndex: index, targetValue: v });
-  // Wave 3b — suggestion actions (live only inside "Set distribution").
-  const suggest = () => provider.setBoundary(cycleId, scope, { suggest: true });
-  const resetAll = () => provider.setBoundary(cycleId, scope, { resetToSuggestion: true });
+  };
+  // Wave 3b — suggestion actions (live only inside "Set distribution"). Explicit user
+  // actions: persisted and audited (no `auto`).
+  const suggest = () => {
+    setLastEdit(null);
+    provider.setBoundary(cycleId, scope, { suggest: true });
+  };
+  const resetAll = () => {
+    setLastEdit(null);
+    provider.setBoundary(cycleId, scope, { resetToSuggestion: true });
+  };
+  const statusFor = (key: string) => (lastEdit === key ? saveState : undefined);
 
   // Export every scope's cut-scores (raw + %) and band distribution.
   const gatherScopes = () =>
@@ -156,7 +185,7 @@ export default function BoundariesPage({ params }: { params: { cycleId: string }
         <AssessmentTabs
           activeId={scope}
           tabs={model.scopes.map((s) => ({ id: s.id, label: s.label }))}
-          onSelect={setScope}
+          onSelect={(id) => { setScope(id); setLastEdit(null); }}
         />
       }
       intro={
@@ -175,7 +204,7 @@ export default function BoundariesPage({ params }: { params: { cycleId: string }
               {isEmpty
                 ? "No scored data yet — complete the Score step to set cut scores."
                 : model.mode === "cuts"
-                  ? `${model.isAward ? "Classify each student's overall score into an award level. " : ""}Drag a handle on the curve, or type a cut score on the right — student counts update as you move.`
+                  ? `${model.isAward ? "Classify each student's overall score into an award level. " : ""}Drag a handle on the curve, or type a cut score on the right — student counts update when you let go.`
                   : "Drag a handle to re-target a band's share, or type the share you want on the right — we backsolve the nearest cut score and the handle settles there."}
             </div>
           </div>
@@ -226,7 +255,7 @@ export default function BoundariesPage({ params }: { params: { cycleId: string }
                   <Icon name="arrow" />
                   <span>
                     {model.mode === "cuts"
-                      ? "Drag a handle or edit a cut score on the right — counts recompute instantly."
+                      ? "Drag a handle or edit a cut score on the right — counts recompute when you release or press Enter."
                       : "Drag a handle or edit a share on the right — we backsolve the nearest cut and the handle settles there."}
                   </span>
                 </div>
@@ -277,7 +306,7 @@ export default function BoundariesPage({ params }: { params: { cycleId: string }
                             <span className="hf-sub hf-mono">remainder</span>
                           ) : model.mode === "cuts" ? (
                             <span style={{ display: "inline-flex", justifyContent: "flex-end", gap: 4, alignItems: "center" }}>
-                              <CutInput value={b.cut ?? 0} onCommit={(v) => setCut(i, v)} />
+                              <CutInput value={b.cut ?? 0} onCommit={(v) => setCut(i, v)} status={statusFor(`c${i}`)} onRetry={() => setCut(i, b.cut ?? 0)} />
                               <span className="hf-sub">%</span>
                               {rawOf(b.cut ?? 0) != null && (
                                 <span className="hf-sub" style={{ fontSize: 10 }}>≥{rawOf(b.cut ?? 0)}</span>
@@ -301,7 +330,7 @@ export default function BoundariesPage({ params }: { params: { cycleId: string }
                           ) : model.mode === "pct" && !isLowest ? (
                             <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
                               <span style={{ display: "inline-flex", justifyContent: "flex-end", gap: 4, alignItems: "center" }}>
-                                <CutInput value={model.targets[i] ?? 0} width={58} onCommit={(v) => setTarget(i, v)} />
+                                <CutInput value={model.targets[i] ?? 0} width={58} onCommit={(v) => setTarget(i, v)} status={statusFor(`t${i}`)} onRetry={() => setTarget(i, model.targets[i] ?? 0)} />
                                 <span className="hf-sub">%</span>
                               </span>
                               {/* honest: nearest achievable vs the target above */}
@@ -323,6 +352,11 @@ export default function BoundariesPage({ params }: { params: { cycleId: string }
                   (re-suggest) and when an adopted suggestion has been edited in
                   "Set cut-points" (reset). Never a permanent block; a single slim
                   row that swaps with the mode. */}
+              {!isEmpty && lastEdit === null && saveState.status === "error" && (
+                <div role="alert" className="hf-sub" style={{ padding: "8px 14px", fontSize: 11, color: H.bad, borderTop: `1px solid ${H.line}` }}>
+                  Failed to save — try again{saveState.message ? ` (${saveState.message})` : ""}
+                </div>
+              )}
               {!isEmpty && !model.locked && <BacksolveBar model={model} onSuggest={suggest} onResetAll={resetAll} />}
             </div>
 
@@ -550,29 +584,71 @@ function MiniStat({ n, label, sub }: { n: string; label: string; sub?: string })
   );
 }
 
-function CutInput({ value, width = 74, onCommit }: { value: number; width?: number; onCommit: (v: number) => void }) {
+function CutInput({
+  value,
+  width = 74,
+  onCommit,
+  status,
+  onRetry,
+}: {
+  value: number;
+  width?: number;
+  onCommit: (v: number) => void;
+  /** Save state of the write this input last made (undefined = nothing to show). */
+  status?: BoundarySaveState;
+  onRetry?: () => void;
+}) {
   const [draft, setDraft] = useState<string | null>(null);
   return (
-    <input
-      className="hf-input"
-      style={{ width }}
-      value={draft ?? String(value)}
-      onChange={(e) => setDraft(e.target.value.replace(/[^0-9]/g, ""))}
-      onBlur={() => {
-        if (draft !== null && draft !== "") onCommit(Number(draft));
-        setDraft(null);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-      }}
-      inputMode="numeric"
-    />
+    <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+      <input
+        className="hf-input"
+        style={{ width }}
+        value={draft ?? String(value)}
+        onChange={(e) => setDraft(e.target.value.replace(/[^0-9]/g, ""))}
+        onBlur={() => {
+          if (draft !== null && draft !== "") onCommit(Number(draft));
+          setDraft(null);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        inputMode="numeric"
+      />
+      {draft !== null ? (
+        <span className="hf-sub" style={{ fontSize: 10 }}>Press Enter to save</span>
+      ) : (
+        status && status.status !== "idle" && <SaveBadge status={status} onRetry={onRetry} />
+      )}
+    </span>
+  );
+}
+
+/** Saving… / Saved / Failed to save — try again. A failed save is never silent. */
+function SaveBadge({ status, onRetry }: { status: BoundarySaveState; onRetry?: () => void }) {
+  if (status.status === "error") {
+    return (
+      <button
+        type="button"
+        role="alert"
+        onClick={onRetry}
+        title={status.message ?? "The save was rejected"}
+        style={{ border: "none", background: "transparent", padding: 0, cursor: "pointer", fontSize: 10, color: H.bad, fontWeight: 600, textDecoration: "underline" }}
+      >
+        Failed to save — try again
+      </button>
+    );
+  }
+  return (
+    <span role="status" className="hf-sub" style={{ fontSize: 10, color: status.status === "saved" ? H.good : H.ink3 }}>
+      {status.status === "saving" ? "Saving…" : "Saved"}
+    </span>
   );
 }
 
 function BoundaryChart({
   histogram,
-  cuts,
+  cuts: committed,
   bands,
   isAward,
   draggable,
@@ -588,6 +664,10 @@ function BoundaryChart({
   onDrag: (index: number, v: number) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  // Local preview while a handle is held: the handle follows the pointer, but NOTHING is
+  // written until release (one setBoundary — one save, one audit row — per gesture).
+  const [preview, setPreview] = useState<{ index: number; value: number } | null>(null);
+  const cuts = preview ? committed.map((c, i) => (i === preview.index ? preview.value : c)) : committed;
   const max = Math.max(1, ...histogram);
   const last = bands.length - 1;
   // band i (top→bottom): from = cuts[i] (or 0 if lowest), to = cuts[i-1] (or 100 if top)
@@ -603,17 +683,33 @@ function BoundaryChart({
     if (!draggable || !ref.current) return;
     e.preventDefault();
     const rect = ref.current.getBoundingClientRect();
+    // Keep the previewed handle between its neighbours (cuts are strictly descending);
+    // the provider applies the same ordering guard on commit.
+    const hi = index > 0 ? (committed[index - 1] ?? 100) - 1 : 99;
+    const lo = index < committed.length - 1 ? (committed[index + 1] ?? 0) + 1 : 1;
+    let latest: number | null = null;
     const move = (ev: PointerEvent) => {
-      let v = Math.round(((ev.clientX - rect.left) / rect.width) * 100);
-      v = Math.max(0, Math.min(100, v));
-      onDrag(index, v);
+      const v = Math.round(((ev.clientX - rect.left) / rect.width) * 100);
+      latest = Math.max(lo, Math.min(hi, Math.max(0, Math.min(100, v))));
+      setPreview({ index, value: latest });
     };
-    const up = () => {
+    const stop = () => {
       document.removeEventListener("pointermove", move);
       document.removeEventListener("pointerup", up);
+      document.removeEventListener("pointercancel", cancel);
+    };
+    const up = () => {
+      stop();
+      if (latest !== null) onDrag(index, latest); // commit once, on release
+      setPreview(null);
+    };
+    const cancel = () => {
+      stop();
+      setPreview(null); // abandoned gesture: nothing committed
     };
     document.addEventListener("pointermove", move);
     document.addEventListener("pointerup", up);
+    document.addEventListener("pointercancel", cancel);
   };
 
   return (

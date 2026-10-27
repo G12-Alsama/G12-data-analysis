@@ -123,6 +123,7 @@ import type {
   ReviewModel,
   ItemDetailModel,
   BoundaryModel,
+  BoundarySaveState,
   BorderlineConfig,
   StudentReviewModel,
   DistinctionSafeguardModel,
@@ -213,6 +214,10 @@ export class SupabaseDataProvider implements DataProvider {
   /** Years + centres from the last light load (what `hydrateCycle` needs). */
   private ctx: CycleHydrationContext = { years: [], testCentres: [] };
   private version = 0;
+  /** Latest cut-score save per `${cycleId}:${scope}` — what the Cut Scores page shows. */
+  private boundarySave = new Map<string, BoundarySaveState>();
+  /** Save counter per key, so a slow earlier save can't overwrite a later one's status. */
+  private boundarySaveSeq = new Map<string, number>();
   private listeners = new Set<() => void>();
   private status: AccessStatus = "loading";
   /** The REAL member roster (auth.users ⋈ memberships), via the list_members RPC.
@@ -637,6 +642,9 @@ export class SupabaseDataProvider implements DataProvider {
   getItemDetail(cycleId: string, assessmentId: string, itemId: string): ItemDetailModel | null { return this.read(cycleId, (p) => p.getItemDetail(cycleId, assessmentId, itemId), null); }
   getBoundaries(cycleId: string, scope: string): BoundaryModel | null { return this.read(cycleId, (p) => p.getBoundaries(cycleId, scope), null); }
   getGrades(cycleId: string): GradesModel | null { return this.read(cycleId, (p) => p.getGrades(cycleId), null); }
+  getBoundarySaveState(cycleId: string, scope: string): BoundarySaveState {
+    return this.boundarySave.get(`${cycleId}:${scope}`) ?? { status: "idle" };
+  }
   getOverallGrades(yearId: string): OverallGradesModel | null { return this.dir.getOverallGrades(yearId); }
   getOverallDocuments(yearId: string): DocumentsModel | null { return this.dir.getOverallDocuments(yearId); }
   getPerformanceReport(cycleId: string): PerformanceReportModel | null { return this.read(cycleId, (p) => p.getPerformanceReport(cycleId), null); }
@@ -809,6 +817,10 @@ export class SupabaseDataProvider implements DataProvider {
     const p = this.cycleProvider(cycleId);
     if (!p) return;
     this.write(cycleId, (c) => c.setBoundary(cycleId, scope, input));
+    // The page's automatic first-open suggestion is a starting point, not a decision:
+    // in memory only. Saving it would write a `boundary_change` audit row nobody asked
+    // for, and (before the stored-scheme gate) re-saved over confirmed cuts on reload.
+    if (input.auto) return;
     const m = p.getBoundaries(cycleId, scope);
     if (!m) return;
     const bands = m.levels.map((label, i) => ({
@@ -816,12 +828,36 @@ export class SupabaseDataProvider implements DataProvider {
       min: i < m.cuts.length ? (m.cuts[i] ?? 0) : 0,
       max: i === 0 ? 100 : (m.cuts[i - 1] ?? 100),
     }));
-    this.rpc("save_grade_scheme", {
-      p_cycle: cycleId,
-      p_scope: scope,
-      p_method: m.mode === "pct" ? "fixed_pct" : "judgemental",
-      p_bands: bands,
-    });
+    // Not the fire-and-forget `rpc()`: the page shows Saving… / Saved / Failed, so a
+    // rejected save (e.g. a server-side permission refusal) is visible, not swallowed.
+    const key = `${cycleId}:${scope}`;
+    const seq = (this.boundarySaveSeq.get(key) ?? 0) + 1;
+    this.boundarySaveSeq.set(key, seq);
+    this.boundarySave.set(key, { status: "saving" });
+    this.bump();
+    void (async () => {
+      let message: string | null = null;
+      try {
+        const { error } = await this.rpcFn("save_grade_scheme", {
+          p_cycle: cycleId,
+          p_scope: scope,
+          p_method: m.mode === "pct" ? "fixed_pct" : "judgemental",
+          p_bands: bands,
+        });
+        message = error ? error.message : null;
+      } catch (e) {
+        message = e instanceof Error ? e.message : String(e);
+      }
+      if (this.boundarySaveSeq.get(key) !== seq) return; // a newer save owns the status
+      if (message !== null) {
+        // eslint-disable-next-line no-console
+        console.error("RPC save_grade_scheme failed:", message);
+        this.boundarySave.set(key, { status: "error", message });
+      } else {
+        this.boundarySave.set(key, { status: "saved" });
+      }
+      this.bump();
+    })();
   }
 
   // Workspace configuration: mutates the SHARED workspace through the directory, so every

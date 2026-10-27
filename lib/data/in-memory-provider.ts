@@ -127,6 +127,7 @@ import {
   type EffectiveDecision,
   type BoundaryMode,
   type BoundaryModel,
+  type BoundarySaveState,
   type D3HalfWarning,
   type BorderlineConfig,
   type ConfigModel,
@@ -288,6 +289,12 @@ interface BoundaryState {
   suggested?: number[];
   /** Per-cut deliberate guard-rail waiver (value knowingly outside policy bounds). */
   waived?: boolean[];
+  /**
+   * These cuts are a scheme a person committed: loaded from a stored `grade_schemes`
+   * row on replay, or written by a user action. Absent for the default scheme and for
+   * the automatic first-open suggestion (which is in-memory only and never persisted).
+   */
+  stored?: boolean;
 }
 
 /** One exam's D3-majority working for a student (Layer 1b). */
@@ -2586,6 +2593,7 @@ export class InMemoryDataProvider implements DataProvider {
         d3: suggestionD3,
       },
       suggestedCuts: st.suggested ? [...st.suggested] : null,
+      schemeStored: !!st.stored,
       d3Warning,
     };
   }
@@ -5209,6 +5217,12 @@ export class InMemoryDataProvider implements DataProvider {
     if (this.locked.has(cycleId)) return;
     const key = `${cycleId}:${scope}`;
     const cur = this.boundaryState(cycleId, scope);
+    // The page's automatic first-open suggestion: seeds the editable starting point in
+    // memory only. It must never touch a scope whose cuts a person already committed
+    // (the `suggested` snapshot is not persisted, so after a reload this is the ONLY
+    // thing standing between a stored scheme and a silent overwrite).
+    const auto = !!input.auto && !!input.suggest;
+    if (auto && cur.stored) return;
     const isAward = scope === "overall";
     const scopeName = isAward ? "Overall award" : this.assessment(scope)?.name ?? scope;
 
@@ -5254,7 +5268,8 @@ export class InMemoryDataProvider implements DataProvider {
       suggested = [...solved.cuts];
       waived = new Array(cuts.length).fill(false);
       mode = "cuts";
-      this.audit("boundary", "Suggested boundaries", `${scopeName} — backsolved cuts from target distribution`, cycleId);
+      // An unprompted auto-suggest is not a decision: no audit row.
+      if (!auto) this.audit("boundary", "Suggested boundaries", `${scopeName} — backsolved cuts from target distribution`, cycleId);
     }
 
     // ── reset to the stored suggestion (all cuts, or a single one).
@@ -5301,8 +5316,13 @@ export class InMemoryDataProvider implements DataProvider {
       this.audit("boundary", "Changed boundary", `${scopeName} — cut ${input.cutIndex + 1} set to ${cuts[input.cutIndex]}%`, cycleId);
     }
 
-    this.boundaries.set(key, { mode, cuts, targets, suggested, waived });
+    this.boundaries.set(key, { mode, cuts, targets, suggested, waived, stored: auto ? cur.stored : true });
     this.bump();
+  }
+
+  /** In-memory provider persists nothing, so there is never a save in flight or failed. */
+  getBoundarySaveState(_cycleId: string, _scope: string): BoundarySaveState {
+    return { status: "idle" };
   }
 
   /** Merge a grading patch into the (shared) grading config. Ungated; no audit. */

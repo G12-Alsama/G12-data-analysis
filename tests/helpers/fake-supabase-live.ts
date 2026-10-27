@@ -131,6 +131,15 @@ export function makeLiveFake(db: MockDb, opts: LiveFakeOptions = {}): LiveFake {
           y.expected_periods = list;
           return { data: y, error: null };
         }
+        // The real save_grade_scheme: upsert on (cycle_id, scope) — method + bands.
+        // (The server-side `boundary_change` audit row is out of scope for this fake;
+        // tests assert on the recorded call instead.)
+        case "save_grade_scheme": {
+          const existing = rows("grade_schemes").find((r) => r.cycle_id === args.p_cycle && r.scope === args.p_scope);
+          if (existing) Object.assign(existing, { method: args.p_method, bands: args.p_bands });
+          else rows("grade_schemes").push({ cycle_id: args.p_cycle, scope: args.p_scope, method: args.p_method, bands: args.p_bands });
+          return { data: null, error: null };
+        }
         case "list_members":
           return { data: [], error: null };
         default:

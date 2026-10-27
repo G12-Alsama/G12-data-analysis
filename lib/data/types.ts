@@ -952,6 +952,16 @@ export interface GradeBandRow {
 
 export type BoundaryMode = "cuts" | "pct";
 
+/**
+ * Where the last cut-score save for a scope stands. `idle` = nothing sent this
+ * session (or an in-memory-only provider); `error` carries the server's message so a
+ * rejected save (e.g. a permission refusal) is visible instead of silently swallowed.
+ */
+export interface BoundarySaveState {
+  status: "idle" | "saving" | "saved" | "error";
+  message?: string;
+}
+
 export interface BoundaryScopeRef {
   id: string;
   label: string;
@@ -1021,6 +1031,13 @@ export interface BoundaryModel {
    * suggestion has been adopted as the editable starting point.
    */
   suggestedCuts: number[] | null;
+  /**
+   * True when this scope's cuts came from a scheme a person committed (loaded from
+   * `grade_schemes` on reload, or edited this session). The auto-suggest on page
+   * open must NEVER run for a stored scope — `suggestedCuts` can't tell, because that
+   * snapshot is not persisted and is therefore always null right after a reload.
+   */
+  schemeStored: boolean;
   /** ½-D3 warning evaluated against the EFFECTIVE (current) Outstanding cut. */
   d3Warning: D3HalfWarning;
 }

@@ -73,6 +73,7 @@ import type {
   ReviewModel,
   ItemDetailModel,
   BoundaryModel,
+  BoundarySaveState,
   BorderlineConfig,
   StudentReviewModel,
   DistinctionSafeguardModel,
@@ -193,6 +194,14 @@ export interface SetBoundaryInput {
    * and "re-suggest".
    */
   suggest?: boolean;
+  /**
+   * With `suggest`: this is the page's automatic first-open suggestion, not a user
+   * action. It seeds the editable starting point IN MEMORY ONLY — no save, no audit
+   * row — and is a no-op for a scope that already has a stored scheme. Only an
+   * explicit user action (an edit, or the Suggest / Re-suggest control, which omit
+   * this flag) is persisted and audited.
+   */
+  auto?: boolean;
   /** Reset a single cut back to the stored suggestion snapshot. */
   resetCutIndex?: number;
   /** Reset all cuts back to the stored suggestion snapshot. */
@@ -479,6 +488,8 @@ export interface DataProvider {
     reason?: string | null,
   ): void;
   setBoundary(cycleId: string, scope: string, input: SetBoundaryInput): void;
+  /** Status of the most recent cut-score save for a scope (see `BoundarySaveState`). */
+  getBoundarySaveState(cycleId: string, scope: string): BoundarySaveState;
   setGradingDefaults(patch: Partial<GradingConfig>): void;
   /** Edit the engine's item-quality Good/Review/Flag thresholds (Lead/Admin only). */
   setQualityThresholds(patch: Partial<QualityThresholds>): void;
