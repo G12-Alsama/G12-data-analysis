@@ -1032,9 +1032,9 @@ export interface BoundaryModel {
    */
   suggestedCuts: number[] | null;
   /**
-   * True when this scope's cuts came from a scheme a person committed (loaded from
-   * `grade_schemes` on reload, or edited this session). The auto-suggest on page
-   * open must NEVER run for a stored scope — `suggestedCuts` can't tell, because that
+   * True when this scope has a stored scheme (loaded from `grade_schemes` on reload,
+   * or saved this session by an edit, a Suggest / Re-suggest, or the first-view
+   * suggestion). The auto-suggest on page open must NEVER run for a stored scope — `suggestedCuts` can't tell, because that
    * snapshot is not persisted and is therefore always null right after a reload.
    */
   schemeStored: boolean;

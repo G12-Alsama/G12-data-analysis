@@ -290,9 +290,9 @@ interface BoundaryState {
   /** Per-cut deliberate guard-rail waiver (value knowingly outside policy bounds). */
   waived?: boolean[];
   /**
-   * These cuts are a scheme a person committed: loaded from a stored `grade_schemes`
-   * row on replay, or written by a user action. Absent for the default scheme and for
-   * the automatic first-open suggestion (which is in-memory only and never persisted).
+   * These cuts are a stored scheme: loaded from a `grade_schemes` row on replay, or
+   * written by any setBoundary call this session (an edit, a Suggest / Re-suggest, or
+   * the page's first-view suggestion). Absent only for the untouched default scheme.
    */
   stored?: boolean;
 }
@@ -5217,12 +5217,6 @@ export class InMemoryDataProvider implements DataProvider {
     if (this.locked.has(cycleId)) return;
     const key = `${cycleId}:${scope}`;
     const cur = this.boundaryState(cycleId, scope);
-    // The page's automatic first-open suggestion: seeds the editable starting point in
-    // memory only. It must never touch a scope whose cuts a person already committed
-    // (the `suggested` snapshot is not persisted, so after a reload this is the ONLY
-    // thing standing between a stored scheme and a silent overwrite).
-    const auto = !!input.auto && !!input.suggest;
-    if (auto && cur.stored) return;
     const isAward = scope === "overall";
     const scopeName = isAward ? "Overall award" : this.assessment(scope)?.name ?? scope;
 
@@ -5268,8 +5262,7 @@ export class InMemoryDataProvider implements DataProvider {
       suggested = [...solved.cuts];
       waived = new Array(cuts.length).fill(false);
       mode = "cuts";
-      // An unprompted auto-suggest is not a decision: no audit row.
-      if (!auto) this.audit("boundary", "Suggested boundaries", `${scopeName} — backsolved cuts from target distribution`, cycleId);
+      this.audit("boundary", "Suggested boundaries", `${scopeName} — backsolved cuts from target distribution`, cycleId);
     }
 
     // ── reset to the stored suggestion (all cuts, or a single one).
@@ -5316,7 +5309,7 @@ export class InMemoryDataProvider implements DataProvider {
       this.audit("boundary", "Changed boundary", `${scopeName} — cut ${input.cutIndex + 1} set to ${cuts[input.cutIndex]}%`, cycleId);
     }
 
-    this.boundaries.set(key, { mode, cuts, targets, suggested, waived, stored: auto ? cur.stored : true });
+    this.boundaries.set(key, { mode, cuts, targets, suggested, waived, stored: true });
     this.bump();
   }
 

@@ -817,10 +817,6 @@ export class SupabaseDataProvider implements DataProvider {
     const p = this.cycleProvider(cycleId);
     if (!p) return;
     this.write(cycleId, (c) => c.setBoundary(cycleId, scope, input));
-    // The page's automatic first-open suggestion is a starting point, not a decision:
-    // in memory only. Saving it would write a `boundary_change` audit row nobody asked
-    // for, and (before the stored-scheme gate) re-saved over confirmed cuts on reload.
-    if (input.auto) return;
     const m = p.getBoundaries(cycleId, scope);
     if (!m) return;
     const bands = m.levels.map((label, i) => ({

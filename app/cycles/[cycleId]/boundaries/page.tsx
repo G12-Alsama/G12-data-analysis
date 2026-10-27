@@ -58,12 +58,13 @@ export default function BoundariesPage({ params }: { params: { cycleId: string }
   //
   // GATED on `schemeStored`, never on the in-memory `suggestedCuts` snapshot alone: that
   // snapshot is not persisted, so it is null on every reload, and keying on it made this
-  // effect backsolve over (and re-save) cuts a person had already confirmed. `auto` makes
-  // the seed in-memory only — no save, no audit row; only an explicit edit or the
-  // Suggest / Re-suggest buttons (which omit `auto`) are persisted and audited.
+  // effect backsolve over (and re-save) cuts a person had already confirmed. The first
+  // view of a fresh scope saves (and audits) the suggestion like any other suggest; from
+  // then on the scope counts as stored — whether that save came from this effect, an
+  // edit, or a Suggest / Re-suggest click — and this effect never touches it again.
   const needsSuggestion = needsAutoSuggestion(model);
   useEffect(() => {
-    if (needsSuggestion) provider.setBoundary(cycleId, scope, { suggest: true, auto: true });
+    if (needsSuggestion) provider.setBoundary(cycleId, scope, { suggest: true });
   }, [needsSuggestion, provider, cycleId, scope]);
 
   // Save state of the latest cut-score write for this scope, shown beside the input

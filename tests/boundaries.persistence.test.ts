@@ -6,7 +6,8 @@
  * `{scope, method, bands}`) and is therefore null on EVERY reload. So every page open
  * backsolved fresh cuts over the confirmed ones, re-saved them, and wrote an unprompted
  * `boundary_change` audit row. The fix keys the gate on a stored scheme existing
- * (`BoundaryModel.schemeStored`) and makes the automatic seed in-memory only.
+ * (`BoundaryModel.schemeStored`): the first view of a fresh scope still saves (and
+ * audits) its suggestion once, and from then on the scope is stored and never touched.
  *
  * Drives the real SupabaseDataProvider over the stateful fake backend, so "saved" means a
  * `save_grade_scheme` RPC that upserted a `grade_schemes` row, and "reload" means a NEW
@@ -46,89 +47,99 @@ async function load(database = db()) {
 /** What the page's effect does on open (page.tsx), verbatim. */
 function runPageEffect(provider: { getBoundaries: Function; setBoundary: Function }, scope: string) {
   const model = provider.getBoundaries(CYC, scope);
-  if (needsAutoSuggestion(model)) provider.setBoundary(CYC, scope, { suggest: true, auto: true });
+  if (needsAutoSuggestion(model)) provider.setBoundary(CYC, scope, { suggest: true });
 }
 
-describe("a stored scheme is never overwritten on load", () => {
-  it("restores the saved cuts after a reload and sends no auto-suggest write or audit row", async () => {
-    // 1. Open a fresh scope (auto-suggest), then a person types a cut → saved.
+describe("never-opened scope", () => {
+  it("stays on the workspace defaults with zero stored rows", async () => {
+    const { provider, fake, scope } = await load();
+    const m = provider.getBoundaries(CYC, scope)!;
+    expect(m.schemeStored).toBe(false);
+    expect(m.suggestedCuts).toBeNull();
+    expect(fake.db.grade_schemes ?? []).toHaveLength(0);
+    expect(saves(fake)).toHaveLength(0);
+    expect(boundaryAudit(provider)).toHaveLength(0);
+    // …and the page WOULD seed it on first view (the legitimate case):
+    expect(needsAutoSuggestion(m)).toBe(true);
+  });
+
+  it("is left alone when there is nothing to backsolve, or the sitting is locked", () => {
+    expect(needsAutoSuggestion({ locked: false, n: 0, suggestedCuts: null, schemeStored: false })).toBe(false);
+    expect(needsAutoSuggestion({ locked: true, n: 5, suggestedCuts: null, schemeStored: false })).toBe(false);
+    expect(needsAutoSuggestion(null)).toBe(false);
+  });
+});
+
+describe("scope opened once, never edited", () => {
+  it("saves + audits the suggestion on first view; a reload restores it and writes nothing", async () => {
+    // First view: the page effect seeds the suggestion — saved and audited, once.
+    const s1 = await load();
+    runPageEffect(s1.provider, s1.scope);
+    await vi.waitFor(() => expect(s1.provider.getBoundarySaveState(CYC, s1.scope).status).toBe("saved"));
+    const m1 = s1.provider.getBoundaries(CYC, s1.scope)!;
+    expect(m1.suggestedCuts).toEqual(m1.suggestion.cuts);
+    expect(saves(s1.fake)).toHaveLength(1);
+    expect(boundaryAudit(s1.provider)).toHaveLength(1);
+    const row = s1.fake.db.grade_schemes!.find((r) => r.scope === s1.scope)!;
+    expect((row.bands as { min: number }[]).slice(0, -1).map((b) => b.min)).toEqual(m1.cuts);
+
+    // The effect cannot re-run in this session (no loop, no second save).
+    runPageEffect(s1.provider, s1.scope);
+    expect(saves(s1.fake)).toHaveLength(1);
+
+    // Reload from the stored row — THE original bug: this must not overwrite or re-save.
+    const s2 = await load(s1.fake.db);
+    const m2 = s2.provider.getBoundaries(CYC, s2.scope)!;
+    expect(m2.cuts).toEqual(m1.cuts); // same cuts
+    expect(m2.schemeStored).toBe(true);
+    expect(m2.suggestedCuts).toBeNull(); // the snapshot really is gone after a reload…
+    expect(needsAutoSuggestion(m2)).toBe(false); // …and no longer triggers a suggestion
+    runPageEffect(s2.provider, s2.scope);
+    expect(s2.provider.getBoundaries(CYC, s2.scope)!.cuts).toEqual(m1.cuts);
+    expect(saves(s2.fake)).toHaveLength(0); // no second save_grade_scheme call
+    expect(boundaryAudit(s2.provider)).toHaveLength(0); // no new boundary_change audit row
+    expect(s2.provider.getBoundarySaveState(CYC, s2.scope).status).toBe("idle");
+  });
+});
+
+describe("scope with an explicit user edit", () => {
+  it("saves the edit, and a reload never auto-overwrites it", async () => {
     const s1 = await load();
     runPageEffect(s1.provider, s1.scope);
     const suggested = [...s1.provider.getBoundaries(CYC, s1.scope)!.cuts];
     const typed = [suggested[0]! + 5, ...suggested.slice(1)];
-    s1.provider.setBoundary(CYC, s1.scope, { cutIndex: 0, cutValue: typed[0]! });
+    s1.provider.setBoundary(CYC, s1.scope, { cutIndex: 0, cutValue: typed[0]! }); // CutInput Enter/blur
     await vi.waitFor(() => expect(s1.provider.getBoundarySaveState(CYC, s1.scope).status).toBe("saved"));
-
-    expect(saves(s1.fake)).toHaveLength(1); // only the explicit edit — the auto seed saved nothing
     const row = s1.fake.db.grade_schemes!.find((r) => r.scope === s1.scope)!;
-    expect(row).toBeTruthy(); // grade_schemes row written
     expect((row.bands as { min: number }[]).slice(0, -1).map((b) => b.min)).toEqual(typed);
 
-    // 2. Fresh load / replay from the stored row, as production does on reload.
     const s2 = await load(s1.fake.db);
     const m = s2.provider.getBoundaries(CYC, s2.scope)!;
-    expect(m.cuts).toEqual(typed); // restored == saved
-    expect(m.schemeStored).toBe(true);
-    expect(m.suggestedCuts).toBeNull(); // the snapshot really is gone after a reload…
-    expect(needsAutoSuggestion(m)).toBe(false); // …and that no longer triggers a suggestion
-
-    // 3. Run the page effect: no write, no audit, cuts untouched.
-    const auditBefore = boundaryAudit(s2.provider).length;
+    expect(m.cuts).toEqual(typed);
+    expect(needsAutoSuggestion(m)).toBe(false);
     runPageEffect(s2.provider, s2.scope);
     expect(s2.provider.getBoundaries(CYC, s2.scope)!.cuts).toEqual(typed);
     expect(saves(s2.fake)).toHaveLength(0);
-    expect(boundaryAudit(s2.provider).length).toBe(auditBefore);
-    expect(s2.provider.getBoundarySaveState(CYC, s2.scope).status).toBe("idle");
+    expect(boundaryAudit(s2.provider)).toHaveLength(0);
   });
+});
 
-  it("even a direct auto-suggest call cannot overwrite a stored scope (defence in depth)", async () => {
+describe("explicit Re-suggest on an already-stored scope", () => {
+  it("still saves and audits — a deliberate action, regardless of schemeStored", async () => {
     const s1 = await load();
     s1.provider.setBoundary(CYC, s1.scope, { cutIndex: 0, cutValue: 60 });
     await vi.waitFor(() => expect(s1.provider.getBoundarySaveState(CYC, s1.scope).status).toBe("saved"));
 
     const s2 = await load(s1.fake.db);
-    const before = [...s2.provider.getBoundaries(CYC, s2.scope)!.cuts];
-    s2.provider.setBoundary(CYC, s2.scope, { suggest: true, auto: true });
-    expect(s2.provider.getBoundaries(CYC, s2.scope)!.cuts).toEqual(before);
-    expect(saves(s2.fake)).toHaveLength(0);
-  });
-
-  it("an EXPLICIT Suggest click on a stored scope still works, and is saved + audited", async () => {
-    const s1 = await load();
-    s1.provider.setBoundary(CYC, s1.scope, { cutIndex: 0, cutValue: 60 });
-    await vi.waitFor(() => expect(s1.provider.getBoundarySaveState(CYC, s1.scope).status).toBe("saved"));
-    const s2 = await load(s1.fake.db);
+    expect(s2.provider.getBoundaries(CYC, s2.scope)!.schemeStored).toBe(true);
     const auditBefore = boundaryAudit(s2.provider).length;
     s2.provider.setBoundary(CYC, s2.scope, { suggest: true }); // user clicked Re-suggest
     expect(saves(s2.fake)).toHaveLength(1);
     expect(s2.provider.getBoundaries(CYC, s2.scope)!.suggestedCuts).not.toBeNull();
     expect(boundaryAudit(s2.provider).length).toBe(auditBefore + 1);
-  });
-});
-
-describe("a scope with no stored scheme still gets its auto-suggestion", () => {
-  it("seeds the backsolved suggestion in memory — no RPC, no audit row — and only once", async () => {
-    const { provider, fake, scope } = await load();
-    const m0 = provider.getBoundaries(CYC, scope)!;
-    expect(m0.schemeStored).toBe(false);
-    expect(needsAutoSuggestion(m0)).toBe(true);
-    const auditBefore = boundaryAudit(provider).length;
-
-    runPageEffect(provider, scope);
-
-    const m1 = provider.getBoundaries(CYC, scope)!;
-    expect(m1.suggestedCuts).toEqual(m1.suggestion.cuts); // adopted as the editable start
-    expect(m1.cuts).toEqual(m1.suggestion.cuts);
-    expect(m1.mode).toBe("cuts");
-    expect(needsAutoSuggestion(m1)).toBe(false); // no loop
-    expect(saves(fake)).toHaveLength(0); // unprompted seed is not persisted…
-    expect(boundaryAudit(provider).length).toBe(auditBefore); // …nor audited
-  });
-
-  it("an unseeded scope with no data to backsolve, or a locked one, is left alone", () => {
-    expect(needsAutoSuggestion({ locked: false, n: 0, suggestedCuts: null, schemeStored: false })).toBe(false);
-    expect(needsAutoSuggestion({ locked: true, n: 5, suggestedCuts: null, schemeStored: false })).toBe(false);
-    expect(needsAutoSuggestion(null)).toBe(false);
+    await vi.waitFor(() => expect(s2.provider.getBoundarySaveState(CYC, s2.scope).status).toBe("saved"));
+    const row = s2.fake.db.grade_schemes!.find((r) => r.scope === s2.scope)!;
+    expect((row.bands as { min: number }[]).slice(0, -1).map((b) => b.min)).toEqual(s2.provider.getBoundaries(CYC, s2.scope)!.cuts);
   });
 });
 
@@ -143,6 +154,13 @@ describe("save state is visible (a rejected save is not silent)", () => {
 
     fake.failRpc("save_grade_scheme", "not authorized");
     provider.setBoundary(CYC, scope, { cutIndex: 0, cutValue: 72 });
+    await vi.waitFor(() => expect(provider.getBoundarySaveState(CYC, scope)).toEqual({ status: "error", message: "not authorized" }));
+  });
+
+  it("a rejected first-view save is surfaced too, not swallowed (e.g. a non-lead_admin)", async () => {
+    const { provider, fake, scope } = await load();
+    fake.failRpc("save_grade_scheme", "not authorized");
+    runPageEffect(provider, scope);
     await vi.waitFor(() => expect(provider.getBoundarySaveState(CYC, scope)).toEqual({ status: "error", message: "not authorized" }));
   });
 });
