@@ -127,6 +127,7 @@ import {
   type EffectiveDecision,
   type BoundaryMode,
   type BoundaryModel,
+  type BoundarySaveState,
   type D3HalfWarning,
   type BorderlineConfig,
   type ConfigModel,
@@ -288,6 +289,12 @@ interface BoundaryState {
   suggested?: number[];
   /** Per-cut deliberate guard-rail waiver (value knowingly outside policy bounds). */
   waived?: boolean[];
+  /**
+   * These cuts are a stored scheme: loaded from a `grade_schemes` row on replay, or
+   * written by any setBoundary call this session (an edit, a Suggest / Re-suggest, or
+   * the page's first-view suggestion). Absent only for the untouched default scheme.
+   */
+  stored?: boolean;
 }
 
 /** One exam's D3-majority working for a student (Layer 1b). */
@@ -2586,6 +2593,7 @@ export class InMemoryDataProvider implements DataProvider {
         d3: suggestionD3,
       },
       suggestedCuts: st.suggested ? [...st.suggested] : null,
+      schemeStored: !!st.stored,
       d3Warning,
     };
   }
@@ -5301,8 +5309,13 @@ export class InMemoryDataProvider implements DataProvider {
       this.audit("boundary", "Changed boundary", `${scopeName} — cut ${input.cutIndex + 1} set to ${cuts[input.cutIndex]}%`, cycleId);
     }
 
-    this.boundaries.set(key, { mode, cuts, targets, suggested, waived });
+    this.boundaries.set(key, { mode, cuts, targets, suggested, waived, stored: true });
     this.bump();
+  }
+
+  /** In-memory provider persists nothing, so there is never a save in flight or failed. */
+  getBoundarySaveState(_cycleId: string, _scope: string): BoundarySaveState {
+    return { status: "idle" };
   }
 
   /** Merge a grading patch into the (shared) grading config. Ungated; no audit. */

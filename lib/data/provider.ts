@@ -73,6 +73,7 @@ import type {
   ReviewModel,
   ItemDetailModel,
   BoundaryModel,
+  BoundarySaveState,
   BorderlineConfig,
   StudentReviewModel,
   DistinctionSafeguardModel,
@@ -479,6 +480,8 @@ export interface DataProvider {
     reason?: string | null,
   ): void;
   setBoundary(cycleId: string, scope: string, input: SetBoundaryInput): void;
+  /** Status of the most recent cut-score save for a scope (see `BoundarySaveState`). */
+  getBoundarySaveState(cycleId: string, scope: string): BoundarySaveState;
   setGradingDefaults(patch: Partial<GradingConfig>): void;
   /** Edit the engine's item-quality Good/Review/Flag thresholds (Lead/Admin only). */
   setQualityThresholds(patch: Partial<QualityThresholds>): void;
