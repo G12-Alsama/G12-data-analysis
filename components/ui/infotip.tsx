@@ -14,11 +14,15 @@ export function InfoTip({
   children,
   label = "More information",
   width = 290,
+  align = "left",
 }: {
   children: ReactNode;
   /** Accessible label for the trigger. */
   label?: string;
   width?: number;
+  /** Which edge of the trigger the panel lines up with. "right" opens it leftwards, for a
+   *  trigger near the right edge of a scroll container (e.g. a right-aligned table cell). */
+  align?: "left" | "right";
 }) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLSpanElement>(null);
@@ -81,7 +85,7 @@ export function InfoTip({
           style={{
             position: "absolute",
             top: "calc(100% + 7px)",
-            left: 0,
+            ...(align === "right" ? { right: 0 } : { left: 0 }),
             zIndex: 50,
             width,
             maxWidth: "80vw",

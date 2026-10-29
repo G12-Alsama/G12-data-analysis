@@ -86,6 +86,7 @@ import type { ValidationReport } from "@/lib/ingest/types";
 import type { CanonicalModel } from "@/lib/ingest/qm";
 import { SUBJECT_CATALOG, isSurveyAssessment, canonicalSubjectName } from "./subject-catalog";
 import { isTechnicalIncidentStatus } from "./result-status";
+import { SCORE_PAGE_MAX_MARK_DELTA } from "./mark-adjust";
 import { isEssaySubject, reservedEssayMax, ESSAY_ITEM_MAX } from "./essays";
 import type {
   AssembleScoreAnalysisArgs,
@@ -153,6 +154,7 @@ import {
   type CgjStudentRow,
   type CgjSubjectCompare,
   type ManualMarkAdjustment,
+  type MarkAdjustResult,
   type OverallGradesModel,
   type GradingDefaultsModel,
   type IngestModel,
@@ -3719,6 +3721,49 @@ export class InMemoryDataProvider implements DataProvider {
     this.rebuildAlterations(cycleId);
   }
 
+  /**
+   * Load one STORED manual mark adjustment (an `alterations` row with no incident).
+   * UNGATED + unaudited twin of `adjustStudentMark`, for replaying persisted state: the
+   * stored delta is authoritative, so it is applied as-is (never re-derived from a mark)
+   * and the cell's old/new mark are read back from the score the engine now produces
+   * with that delta folded in. A cell with no score (participant excluded since) drops
+   * the adjustment rather than showing a badge on a cell that does not exist.
+   */
+  hydrateManualAdjustment(
+    cycleId: string,
+    adj: { participantId: string; assessmentId: string; delta: number; reason: string; decidedBy: string | null; decidedAt: string | null },
+  ): void {
+    if (!this.hostsCycle(cycleId)) return;
+    const a = this.assessment(adj.assessmentId);
+    const delta = round(adj.delta, 4);
+    if (!a || !Number.isFinite(delta) || delta === 0) return;
+    const rest = (this.manualAdjustmentsByCycle.get(cycleId) ?? []).filter(
+      (m) => !(m.participantId === adj.participantId && m.assessmentId === adj.assessmentId),
+    );
+    this.manualAdjSeq += 1;
+    const rec: ManualMarkAdjustment = {
+      id: `madj-${this.manualAdjSeq}`,
+      participantId: adj.participantId,
+      assessmentId: adj.assessmentId,
+      oldMark: 0,
+      newMark: 0,
+      delta,
+      reason: adj.reason,
+      // The stored actor is an auth uid; only the signed-in user's own name is known here.
+      by: adj.decidedBy && adj.decidedBy === this.user.id ? this.user.name : "Another team member",
+      ts: adj.decidedAt ?? new Date().toISOString(),
+    };
+    // Insert first so the engine's score includes the delta, then read the marks back.
+    this.manualAdjustmentsByCycle.set(cycleId, [...rest, rec]);
+    const score = this.pctByParticipant(cycleId, a).get(adj.participantId);
+    if (!score) {
+      this.manualAdjustmentsByCycle.set(cycleId, rest);
+      return;
+    }
+    rec.newMark = round(score.raw, 4);
+    rec.oldMark = round(rec.newMark - delta, 4);
+  }
+
   getEssayMarks(cycleId: string): EssayMarksModel | null {
     if (!this.hostsCycle(cycleId)) return null;
     const st = this.essayMarksByCycle.get(cycleId);
@@ -4715,16 +4760,39 @@ export class InMemoryDataProvider implements DataProvider {
    * never compound). Every change is audited (actor, student, subject, old → new,
    * reason, time). Engine parity is unaffected: only the alterations INPUT changes.
    */
-  adjustStudentMark(cycleId: string, participantId: string, assessmentId: string, newMark: number, reason: string): void {
-    if (!this.permitted("grades.adjust")) return;
-    if (!this.hostsCycle(cycleId) || this.locked.has(cycleId)) return;
+  adjustStudentMark(cycleId: string, participantId: string, assessmentId: string, newMark: number, reason: string): Promise<MarkAdjustResult> {
+    return Promise.resolve(this.applyMarkAdjustment(cycleId, participantId, assessmentId, newMark, reason, null));
+  }
+
+  /** As `adjustStudentMark`, but at most ±SCORE_PAGE_MAX_MARK_DELTA from the current mark
+   *  (the Score page; the live database enforces the same cap in migration 0052). */
+  adjustStudentMarkBounded(cycleId: string, participantId: string, assessmentId: string, newMark: number, reason: string): Promise<MarkAdjustResult> {
+    return Promise.resolve(this.applyMarkAdjustment(cycleId, participantId, assessmentId, newMark, reason, SCORE_PAGE_MAX_MARK_DELTA));
+  }
+
+  /**
+   * The shared, SYNCHRONOUS core of both adjust paths (the live provider calls it to
+   * apply the change optimistically, then persists it). Returns why a change was
+   * refused instead of silently doing nothing, so a screen can say so.
+   */
+  applyMarkAdjustment(
+    cycleId: string,
+    participantId: string,
+    assessmentId: string,
+    newMark: number,
+    reason: string,
+    maxDelta: number | null,
+  ): MarkAdjustResult {
+    if (!this.permitted("grades.adjust")) return { ok: false, error: "You don’t have permission to adjust marks." };
+    if (!this.hostsCycle(cycleId)) return { ok: false, error: "This sitting isn’t loaded." };
+    if (this.locked.has(cycleId)) return { ok: false, error: "This sitting is locked — re-open it to adjust marks." };
     const clean = (reason ?? "").trim();
-    if (!clean) return; // reason is required
-    if (!Number.isFinite(newMark)) return;
+    if (!clean) return { ok: false, error: "A reason is required." }; // reason is required
+    if (!Number.isFinite(newMark)) return { ok: false, error: "Enter a valid mark." };
     const a = this.assessment(assessmentId);
-    if (!a) return;
+    if (!a) return { ok: false, error: "Unknown subject." };
     const score = this.pctByParticipant(cycleId, a).get(participantId);
-    if (!score) return;
+    if (!score) return { ok: false, error: "This student has no score in this subject." };
 
     const list = this.manualAdjustmentsByCycle.get(cycleId) ?? [];
     const existing = list.find((m) => m.participantId === participantId && m.assessmentId === assessmentId);
@@ -4734,6 +4802,15 @@ export class InMemoryDataProvider implements DataProvider {
     const baseRaw = round(displayedBefore - (existing?.delta ?? 0), 4);
     const target = round(newMark, 4);
     const delta = round(target - baseRaw, 4);
+
+    // Mirrors the server (0052): 0 ≤ mark ≤ the subject max, and an optional cap measured
+    // from the BASE (so re-adjusting can never ratchet past it in steps).
+    if (target < 0 || target > score.max) {
+      return { ok: false, error: `The new mark must be between 0 and ${score.max}.` };
+    }
+    if (maxDelta != null && Math.abs(delta) > maxDelta) {
+      return { ok: false, error: `A mark can only be changed by up to ±${maxDelta} marks (current mark ${baseRaw}).` };
+    }
 
     const next = list.filter((m) => !(m.participantId === participantId && m.assessmentId === assessmentId));
     if (delta !== 0) {
@@ -4761,6 +4838,7 @@ export class InMemoryDataProvider implements DataProvider {
       cycleId,
     );
     this.bump();
+    return { ok: true };
   }
 
   /**
@@ -4768,12 +4846,18 @@ export class InMemoryDataProvider implements DataProvider {
    * leaves the alterations input, so the engine recomputes the original grade) and
    * audits the removal.
    */
-  removeStudentMarkAdjustment(cycleId: string, adjustmentId: string): void {
-    if (!this.permitted("grades.adjust")) return;
-    if (this.locked.has(cycleId)) return;
+  removeStudentMarkAdjustment(cycleId: string, adjustmentId: string): Promise<MarkAdjustResult> {
+    return Promise.resolve(this.applyMarkRemoval(cycleId, adjustmentId));
+  }
+
+  /** Synchronous core of `removeStudentMarkAdjustment` (the live provider applies it
+   *  optimistically, then persists). Says why nothing was removed. */
+  applyMarkRemoval(cycleId: string, adjustmentId: string): MarkAdjustResult {
+    if (!this.permitted("grades.adjust")) return { ok: false, error: "You don’t have permission to adjust marks." };
+    if (this.locked.has(cycleId)) return { ok: false, error: "This sitting is locked — re-open it to adjust marks." };
     const list = this.manualAdjustmentsByCycle.get(cycleId);
     const adj = list?.find((m) => m.id === adjustmentId);
-    if (!list || !adj) return;
+    if (!list || !adj) return { ok: false, error: "That adjustment no longer exists." };
     this.manualAdjustmentsByCycle.set(cycleId, list.filter((m) => m.id !== adjustmentId));
     const who = this.seed.liveCycle.participants.find((p) => p.id === adj.participantId)?.label ?? adj.participantId;
     const a = this.assessment(adj.assessmentId);
@@ -4784,6 +4868,7 @@ export class InMemoryDataProvider implements DataProvider {
       cycleId,
     );
     this.bump();
+    return { ok: true };
   }
 
   private mergeSafeguard(patch: { topDifficultyDemand?: string }): void {

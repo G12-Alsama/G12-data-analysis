@@ -4,10 +4,15 @@
  * Screen 07 — Score. The dedicated screen for the final POST-ADJUSTMENT computed
  * scores, one row per participant, BEFORE any award boundaries are set. Distinct
  * from "Raw scores" (step 4, pre-adjustment) and from "Boundaries" (step 8, which
- * sets cut-points). Read-only: it displays the numbers the engine already
- * produced in `participant_scores` (via getComposition) — there is no cut-point UI
- * and nothing here changes a score. Award levels live on Grades, which is after
- * boundaries.
+ * sets cut-points). It displays the numbers the engine already produced (via
+ * getComposition) — there is no cut-point UI. Award levels live on Grades, which is
+ * after boundaries.
+ *
+ * The one write here is a manual mark adjustment: a user who holds `grades.adjust`
+ * clicks a score to move it by at most ±5 marks, with a required reason (the cap is
+ * enforced by `adjust_participant_mark_bounded`, migration 0052). An adjusted cell
+ * carries the same pink `±` marker as Grades, with its detail and an Undo in a
+ * popover. Everyone else sees the marker and detail but no controls.
  *
  * Layout mirrors the Grades participant table for consistency: one all-subjects
  * table (not per-subject tabs), an identity column, a column per subject and an
@@ -15,7 +20,11 @@
  * transparent MCQ + Essay + Alterations composition beneath it — the same
  * composition logic the Grades screen renders, reused, not recomputed.
  */
-import { useProviderData } from "@/lib/data/context";
+import { useState } from "react";
+import { useProvider, useProviderData } from "@/lib/data/context";
+import { useCan } from "@/lib/auth/useCan";
+import { SCORE_PAGE_MAX_MARK_DELTA } from "@/lib/data/mark-adjust";
+import { AdjustMarkModal } from "@/components/ui/AdjustMarkModal";
 import { H } from "@/lib/ui/tokens";
 import { CycleShell, AlertStack } from "@/components/shell/CycleShell";
 import { useProvisionalNotice } from "@/components/shell/ProvisionalBanner";
@@ -28,6 +37,7 @@ import Link from "next/link";
 
 export default function ScorePage({ params }: { params: { cycleId: string } }) {
   const cycleId = params.cycleId;
+  const provider = useProvider();
   const comp = useProviderData((p) => p.getComposition(cycleId), [cycleId]);
   // Grades is only used for the human Student ID (the secondary identity line);
   // every score on this screen comes from the composition (participant_scores).
@@ -35,6 +45,11 @@ export default function ScorePage({ params }: { params: { cycleId: string } }) {
   const cycleName = useProviderData((p) => p.getCycle(cycleId)?.name, [cycleId]) ?? "Sitting";
   const provisional = useProvisionalNotice(cycleId);
   const { zoom, setZoom, scrollRef, zoomWrapStyle } = useTableZoom();
+  // Write controls need `grades.adjust` (the RPC re-checks server-side) and an unlocked
+  // sitting. Without them the adjusted marker + its detail popover stay visible.
+  const canAdjust = useCan("grades.adjust");
+  const writable = canAdjust && !(grades?.locked ?? false);
+  const [adjust, setAdjust] = useState<{ participantId: string; assessmentId: string } | null>(null);
 
   const intro = (
     <StepIntro>
@@ -97,6 +112,9 @@ export default function ScorePage({ params }: { params: { cycleId: string } }) {
             raw/max and %, plus that subject’s D3 (top-difficulty) correct % beneath; hover for the MCQ + Essay +
             Alterations breakdown. The last column is a display-only signal (technical incidents). There is no sitting
             “Overall” here — the final Overall is the best of February + May at the year level.
+            {writable
+              ? ` Click a score to adjust it by up to ±${SCORE_PAGE_MAX_MARK_DELTA} marks (a reason is required); an adjusted score shows ± and can be undone.`
+              : ""}
           </span>
           <div style={{ flex: 1, minWidth: 12 }} />
           <ZoomControl zoom={zoom} onZoom={setZoom} />
@@ -143,7 +161,15 @@ export default function ScorePage({ params }: { params: { cycleId: string } }) {
                         const s = byAssessment.get(sub.id);
                         return (
                           <td key={sub.id} className="hf-td" style={{ textAlign: "right" }}>
-                            {s ? <SubjectScoreCell s={s} /> : <span className="hf-sub hf-mono" title="No score for this subject">–</span>}
+                            {s ? (
+                              <SubjectScoreCell
+                                s={s}
+                                onAdjust={writable ? () => setAdjust({ participantId: st.participantId, assessmentId: sub.id }) : undefined}
+                                onUndo={writable && s.adjustment ? () => provider.removeStudentMarkAdjustment(cycleId, s.adjustment!.id) : undefined}
+                              />
+                            ) : (
+                              <span className="hf-sub hf-mono" title="No score for this subject">–</span>
+                            )}
                           </td>
                         );
                       })}
@@ -158,6 +184,25 @@ export default function ScorePage({ params }: { params: { cycleId: string } }) {
           </div>
         </div>
       </div>
+
+      {/* manual mark adjustment — opened from a score cell; capped at ±5 by the database */}
+      {adjust && writable && (() => {
+        const student = comp.students.find((x) => x.participantId === adjust.participantId);
+        const subj = student?.subjects.find((x) => x.assessmentId === adjust.assessmentId);
+        const subject = comp.subjects.find((x) => x.id === adjust.assessmentId);
+        if (!student || !subj || !subject) return null;
+        return (
+          <AdjustMarkModal
+            studentName={student.name}
+            subjectName={subjectHeader(subject.shortName)}
+            subject={subj}
+            maxDelta={SCORE_PAGE_MAX_MARK_DELTA}
+            onSave={(newMark, reason) => provider.adjustStudentMarkBounded(cycleId, adjust.participantId, adjust.assessmentId, newMark, reason)}
+            onRemove={subj.adjustment ? () => provider.removeStudentMarkAdjustment(cycleId, subj.adjustment!.id) : undefined}
+            onClose={() => setAdjust(null)}
+          />
+        );
+      })()}
     </CycleShell>
   );
 }

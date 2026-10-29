@@ -702,6 +702,8 @@ export interface Database {
       override_distinction_cap: { Args: { p_cycle: string; p_participant: string; p_scope: string; p_reason: string }; Returns: undefined };
       undo_distinction_override: { Args: { p_cycle: string; p_participant: string; p_scope: string }; Returns: undefined };
       adjust_participant_mark: { Args: { p_cycle: string; p_participant: string; p_assessment: string; p_new_mark: number; p_reason: string }; Returns: string | null };
+      // 0052 — same args, but the server refuses a change of more than ±5 marks from the current mark.
+      adjust_participant_mark_bounded: { Args: { p_cycle: string; p_participant: string; p_assessment: string; p_new_mark: number; p_reason: string }; Returns: string | null };
       remove_mark_adjustment: { Args: { p_cycle: string; p_participant: string; p_assessment: string }; Returns: undefined };
       set_document_settings: { Args: { p_cycle: string; p_settings: unknown }; Returns: undefined };
       record_documents: { Args: { p_cycle: string; p_detail: string }; Returns: undefined };

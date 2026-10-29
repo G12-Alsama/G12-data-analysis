@@ -1057,6 +1057,15 @@ export interface ManualMarkAdjustment {
   ts: string;
 }
 
+/**
+ * Outcome of a manual mark-adjustment write (adjust / bounded adjust / undo). The
+ * in-memory provider answers immediately; the live provider answers once the server
+ * has — and when the server REFUSED the change (the ±5 cap, a permission failure, a
+ * mark out of range…) it has already re-read the sitting, so the screen shows what the
+ * database holds. `error` is a message fit to show the user.
+ */
+export type MarkAdjustResult = { ok: true } | { ok: false; error: string };
+
 export interface GradeCell {
   level: string;
   stars: string;

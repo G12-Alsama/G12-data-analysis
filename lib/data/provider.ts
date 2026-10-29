@@ -55,6 +55,7 @@ import type {
   DocumentsModel,
   DuplicateStrategy,
   GradesModel,
+  MarkAdjustResult,
   CgjModel,
   OverallGradesModel,
   GradingDefaultsModel,
@@ -549,10 +550,14 @@ export interface DataProvider {
   // manual mark adjustment (Grades stage — audited, reversible; rides Alterations)
   /** Adjust a student's subject MARK to `newMark` with a required `reason`; the
    *  delta flows through the engine's existing alterations input and recomputes
-   *  the grade (incl. the D3 safeguard). Audited. */
-  adjustStudentMark(cycleId: string, participantId: string, assessmentId: string, newMark: number, reason: string): void;
+   *  the grade (incl. the D3 safeguard). Audited. Uncapped (the Grades view).
+   *  Resolves once the write is settled; a refusal is reported, never thrown. */
+  adjustStudentMark(cycleId: string, participantId: string, assessmentId: string, newMark: number, reason: string): Promise<MarkAdjustResult>;
+  /** Same, but at most ±`SCORE_PAGE_MAX_MARK_DELTA` marks from the current mark
+   *  (0052 — enforced server-side). Used by the Score page. */
+  adjustStudentMarkBounded(cycleId: string, participantId: string, assessmentId: string, newMark: number, reason: string): Promise<MarkAdjustResult>;
   /** Remove a manual mark adjustment by id — reverts the grade; audited. */
-  removeStudentMarkAdjustment(cycleId: string, adjustmentId: string): void;
+  removeStudentMarkAdjustment(cycleId: string, adjustmentId: string): Promise<MarkAdjustResult>;
 
   // overrides (authorised user reverses another user's grade-bearing action) ──
   /**

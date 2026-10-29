@@ -188,3 +188,12 @@ export function Mark({ kind, size = 16 }: { kind: MarkKind; size?: number }) {
     </svg>
   );
 }
+
+/** Small up-triangle glyph marking a marginal (just-below-boundary) state. */
+export function MarginalGlyph({ color }: { color: string }) {
+  return (
+    <svg width="11" height="11" viewBox="0 0 12 12" aria-hidden style={{ flex: "0 0 auto" }}>
+      <path d="M6 1.5l4.5 8.5h-9z" fill={color} />
+    </svg>
+  );
+}

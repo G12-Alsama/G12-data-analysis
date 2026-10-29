@@ -213,6 +213,19 @@ export async function fetchSessionUser(supabase: DB): Promise<SessionUser> {
 }
 
 // ── decision state replayed into a provider ─────────────────────────────────
+/** One stored manual mark adjustment, as read from `alterations` (incident_id null). */
+export interface ManualAdjustmentRecord {
+  participantId: string;
+  assessmentId: string;
+  /** Signed delta added to the subject's raw mark (the engine's alteration). */
+  delta: number;
+  reason: string;
+  /** auth.users id of whoever made it (stored as `decided_by`); null if unknown. */
+  decidedBy: string | null;
+  /** ISO timestamp (`decided_at`). */
+  decidedAt: string | null;
+}
+
 /** CYCLE-level decisions — replayed into that cycle's own provider instance. */
 export interface CycleDecisionState {
   exclusions: { assessmentId: string; itemId: string; reason: string | null }[];
@@ -227,6 +240,13 @@ export interface CycleDecisionState {
   incidents: IncidentInput[];
   /** Aligned to `incidents` order (inner ids become inc-1, inc-2, …). */
   incidentDecisions: (IncidentDecisionInput | null)[];
+  /**
+   * Manual mark adjustments (alterations with `incident_id IS NULL`, migration 0008),
+   * one per (participant, subject) cell. Replayed so the cell's badge, its Undo and
+   * its effect on the score survive a reload. Incident-derived alterations are NOT
+   * here — they ride `incidentDecisions`.
+   */
+  manualAdjustments: ManualAdjustmentRecord[];
   distinctionConfirmed: boolean;
   distinctionOverrides: { studentId: string; reason: string }[];
   docSettings: Record<string, unknown> | null;
@@ -909,6 +929,25 @@ export async function hydrateCycle(
     return { applyTo: al.apply_to, studentId: al.participant_id, subjectId: al.assessment_id, marks: Number(al.marks), reason: al.reason };
   });
 
+  // Manual mark adjustments: the incident-less alterations. The RPCs keep at most one
+  // per (participant, subject) cell (it supersedes on re-adjust); should drift ever
+  // leave several, fold them the way the engine does (sum) and keep the latest reason.
+  const manualByCell = new Map<string, ManualAdjustmentRecord>();
+  for (const a of [...alterationRows].sort((x, y) => String(x.decided_at).localeCompare(String(y.decided_at)))) {
+    if (a.incident_id != null || a.apply_to !== "student" || !a.participant_id || !a.assessment_id) continue;
+    const key = `${a.participant_id}:${a.assessment_id}`;
+    const prev = manualByCell.get(key);
+    manualByCell.set(key, {
+      participantId: a.participant_id,
+      assessmentId: a.assessment_id,
+      delta: (prev?.delta ?? 0) + Number(a.marks),
+      reason: a.reason ?? "",
+      decidedBy: a.decided_by ?? null,
+      decidedAt: a.decided_at ?? null,
+    });
+  }
+  const manualAdjustments = [...manualByCell.values()].filter((m) => m.delta !== 0);
+
   // Clean-stage removals, grouped per subject (rows = participants, cols = items).
   // Row removals re-resolve through the participant's STABLE key (qm_participant_id,
   // migration 0016) to the CURRENT row UUID, so an exclusion recorded before a
@@ -987,6 +1026,7 @@ export async function hydrateCycle(
     essays,
     incidents,
     incidentDecisions,
+    manualAdjustments,
     distinctionConfirmed: distState?.confirmed ?? false,
     distinctionOverrides: distOverrides.map((o) => ({ studentId: o.participant_id, reason: o.reason })),
     docSettings: (docRow?.settings as Record<string, unknown> | undefined) ?? null,

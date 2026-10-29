@@ -131,6 +131,41 @@ export function makeLiveFake(db: MockDb, opts: LiveFakeOptions = {}): LiveFake {
           y.expected_periods = list;
           return { data: y, error: null };
         }
+        // 0008/0052 — the real RPCs write ONLY the manual (incident_id null) row of the
+        // `alterations` table; the base is derived LIVE (MCQ + incident alterations), never
+        // from a stored score. `_bounded` additionally enforces the ±5 cap.
+        case "adjust_participant_mark":
+        case "adjust_participant_mark_bounded": {
+          const pid = String(args.p_participant);
+          const aid = String(args.p_assessment);
+          const itemIds = new Set(rows("items").filter((i) => i.assessment_id === aid && i.status !== "excluded").map((i) => i.id));
+          const mcq = rows("responses")
+            .filter((r) => r.participant_id === pid && itemIds.has(r.item_id as string))
+            .reduce((n, r) => n + Number(r.answer_score), 0);
+          const incident = rows("alterations")
+            .filter((a) => a.incident_id != null && a.participant_id === pid && a.assessment_id === aid)
+            .reduce((n, a) => n + Number(a.marks), 0);
+          const delta = Number(args.p_new_mark) - (mcq + incident);
+          if (name === "adjust_participant_mark_bounded" && Math.abs(delta) > 5) {
+            return { data: null, error: { message: "mark adjustment exceeds the allowed ±5 marks" } };
+          }
+          db.alterations = rows("alterations").filter(
+            (a) => !(a.incident_id == null && a.participant_id === pid && a.assessment_id === aid && a.cycle_id === args.p_cycle),
+          );
+          if (delta === 0) return { data: null, error: null };
+          const id = `alt-${++seq}`;
+          db.alterations.push({
+            id, cycle_id: args.p_cycle, incident_id: null, apply_to: "student", participant_id: pid, assessment_id: aid,
+            marks: delta, reason: String(args.p_reason).trim(), decided_by: USER, decided_at: "2026-02-01T10:00:00.000Z",
+          });
+          return { data: id, error: null };
+        }
+        case "remove_mark_adjustment": {
+          db.alterations = rows("alterations").filter(
+            (a) => !(a.incident_id == null && a.participant_id === args.p_participant && a.assessment_id === args.p_assessment && a.cycle_id === args.p_cycle),
+          );
+          return { data: null, error: null };
+        }
         case "list_members":
           return { data: [], error: null };
         default:

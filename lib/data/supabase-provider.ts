@@ -42,6 +42,7 @@ import type {
   ExamIncidentReconciliation,
 } from "@/lib/incidents/exam-incident-match";
 import { InMemoryDataProvider } from "./in-memory-provider";
+import { SCORE_PAGE_MAX_MARK_DELTA, friendlyMarkAdjustError } from "./mark-adjust";
 import { WorkspaceState } from "./workspace-state";
 import { gzipText, GZIP_MARKER_HEADER, GZIP_MARKER_VALUE } from "@/lib/transport/gzip";
 import {
@@ -135,6 +136,7 @@ import type {
   DiagnosticsModel,
   ReliabilityModel,
   IncidentDecision,
+  MarkAdjustResult,
 } from "./types";
 import type { ResolvedIncidentRow, RosterParticipant } from "@/lib/incidents/import";
 
@@ -525,6 +527,9 @@ export class SupabaseDataProvider implements DataProvider {
           if (dec) p.hydrateIncidentDecision(cid, `inc-${i + 1}`, dec);
         });
       }
+      // Manual mark adjustments (0008) — after exclusions, essays and incident decisions,
+      // so each one's old/new mark is derived from the same score the engine produces.
+      for (const m of d.manualAdjustments) p.hydrateManualAdjustment(cid, m);
       if (d.distinctionConfirmed) p.confirmDistinctionCaps(cid);
       for (const o of d.distinctionOverrides) p.overrideDistinctionCap(cid, o.studentId, o.reason);
       if (d.docSettings) p.setDocumentSettings(cid, d.docSettings as Partial<DocSettings>);
@@ -581,17 +586,20 @@ export class SupabaseDataProvider implements DataProvider {
     await this.refreshLoadedCycle(cycleId);
   }
   /** Persist an optimistic write; if the server REFUSES it, re-read the sitting so the
-   *  screen shows what the database actually holds instead of diverging silently. */
+   *  screen shows what the database actually holds instead of diverging silently.
+   *  Resolves to the server's error message, or null when it accepted the write. */
   private async rpcOrReconcile<N extends keyof Database["public"]["Functions"]>(
     cycleId: string,
     name: N,
     args: Database["public"]["Functions"][N]["Args"],
-  ): Promise<void> {
+  ): Promise<string | null> {
     const { error } = await this.rpcFn(name as string, args);
-    if (!error) return;
+    if (!error) return null;
     // eslint-disable-next-line no-console
     console.error(`RPC ${String(name)} failed:`, error.message);
     await this.refreshLoadedCycle(cycleId);
+    // The server's message, so a caller that has a screen can show WHY it was refused.
+    return error.message;
   }
   /** Persist, then re-read the WORKSPACE (roles, centres: server-generated ids). Sittings untouched. */
   private async rpcThenRefreshWorkspace<N extends keyof Database["public"]["Functions"]>(
@@ -1213,31 +1221,57 @@ export class SupabaseDataProvider implements DataProvider {
   }
 
   // manual mark adjustment (rides the existing alterations table server-side; the
-  // RPC resolves the actor via auth.uid() and writes the audit entry)
-  adjustStudentMark(cycleId: string, participantId: string, assessmentId: string, newMark: number, reason: string): void {
-    if (!this.write(cycleId, (p) => p.adjustStudentMark(cycleId, participantId, assessmentId, newMark, reason))) return;
-    this.rpc("adjust_participant_mark", {
+  // RPC resolves the actor via auth.uid(), re-checks grades.adjust and writes the audit
+  // entry). Applied optimistically to the sitting first — which also refuses anything the
+  // user may not do (permission / lock / range / cap) without a round trip — then
+  // persisted through `rpcOrReconcile`: if the SERVER refuses, the sitting is re-read so
+  // the screen shows what the database holds, and the refusal is handed back so the UI
+  // can say why (it used to reach only console.error).
+  adjustStudentMark(cycleId: string, participantId: string, assessmentId: string, newMark: number, reason: string): Promise<MarkAdjustResult> {
+    return this.adjustMark("adjust_participant_mark", cycleId, participantId, assessmentId, newMark, reason, null);
+  }
+  adjustStudentMarkBounded(cycleId: string, participantId: string, assessmentId: string, newMark: number, reason: string): Promise<MarkAdjustResult> {
+    return this.adjustMark("adjust_participant_mark_bounded", cycleId, participantId, assessmentId, newMark, reason, SCORE_PAGE_MAX_MARK_DELTA);
+  }
+  private async adjustMark(
+    rpc: "adjust_participant_mark" | "adjust_participant_mark_bounded",
+    cycleId: string,
+    participantId: string,
+    assessmentId: string,
+    newMark: number,
+    reason: string,
+    maxDelta: number | null,
+  ): Promise<MarkAdjustResult> {
+    const sitting = this.cycleProvider(cycleId);
+    if (!sitting) return { ok: false, error: "This sitting isn’t loaded yet." };
+    const local = sitting.applyMarkAdjustment(cycleId, participantId, assessmentId, newMark, reason, maxDelta);
+    if (!local.ok) return local;
+    this.afterCycleChange();
+    const error = await this.rpcOrReconcile(cycleId, rpc, {
       p_cycle: cycleId,
       p_participant: participantId,
       p_assessment: assessmentId,
       p_new_mark: newMark,
-      p_reason: reason,
+      p_reason: reason.trim(),
     });
+    return error ? { ok: false, error: friendlyMarkAdjustError(error) } : { ok: true };
   }
-  removeStudentMarkAdjustment(cycleId: string, adjustmentId: string): void {
+  async removeStudentMarkAdjustment(cycleId: string, adjustmentId: string): Promise<MarkAdjustResult> {
     const sitting = this.cycleProvider(cycleId);
-    if (!sitting) return;
+    if (!sitting) return { ok: false, error: "This sitting isn’t loaded yet." };
     // Capture the cell before the optimistic remove so the RPC can key the DB
     // alteration row by (cycle, participant, assessment).
     const rec = sitting.findManualAdjustment(cycleId, adjustmentId);
-    this.write(cycleId, (p) => p.removeStudentMarkAdjustment(cycleId, adjustmentId));
-    if (rec) {
-      this.rpc("remove_mark_adjustment", {
-        p_cycle: cycleId,
-        p_participant: rec.participantId,
-        p_assessment: rec.assessmentId,
-      });
-    }
+    if (!rec) return { ok: false, error: "That adjustment no longer exists." };
+    const local = sitting.applyMarkRemoval(cycleId, adjustmentId);
+    if (!local.ok) return local;
+    this.afterCycleChange();
+    const error = await this.rpcOrReconcile(cycleId, "remove_mark_adjustment", {
+      p_cycle: cycleId,
+      p_participant: rec.participantId,
+      p_assessment: rec.assessmentId,
+    });
+    return error ? { ok: false, error: friendlyMarkAdjustError(error) } : { ok: true };
   }
 
   // overrides — optimistic local apply (the sitting's provider holds the real session
